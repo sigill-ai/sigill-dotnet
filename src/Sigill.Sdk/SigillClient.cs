@@ -135,8 +135,13 @@ public sealed class SigillClient : ISigillAiEvidenceClient, IDisposable
         if (data["genTime"] is JsonNode genTime) proof["genTime"] = genTime.GetValue<string>();
         if (data["serial"] is JsonNode serial) proof["serial"] = serial.GetValue<string>();
         if (data["qualified"] is JsonNode q) proof["qualified"] = q.GetValue<bool>();
-        if (data["policyOid"] is JsonNode policy && policy.GetValue<string?>() is string pOid)
-            proof["policyOid"] = pOid;
+        if (data["policyOid"] is JsonNode policy)
+        {
+            // policyOid may be present-but-null (server convention). Skip it in that case.
+            try { proof["policyOid"] = policy.GetValue<string>(); }
+            catch (System.InvalidOperationException) { /* JSON null — fine */ }
+            catch (System.FormatException) { /* JSON null — fine */ }
+        }
         return proof;
     }
 
@@ -147,10 +152,13 @@ public sealed class SigillClient : ISigillAiEvidenceClient, IDisposable
         {
             foreach (var item in arr.OfType<JsonObject>())
             {
+                int? statusCode = null;
+                if (item["statusCode"] is JsonValue sv && sv.TryGetValue<int>(out var sc)) statusCode = sc;
+
                 list.Add(new TsaFailure(
                     Tsa: item["tsa"]?.GetValue<string>() ?? "unknown",
                     ErrorClass: item["errorClass"]?.GetValue<string>() ?? "unknown",
-                    StatusCode: item["statusCode"]?.GetValue<int?>(),
+                    StatusCode: statusCode,
                     Message: item["message"]?.GetValue<string>() ?? "",
                     LatencyMs: item["latencyMs"]?.GetValue<long>() ?? 0));
             }
@@ -169,7 +177,7 @@ public sealed class SigillClient : ISigillAiEvidenceClient, IDisposable
             var alg = node["hash"]?["alg"]?.GetValue<string>() ?? "SHA-256";
             var actual = EnvelopeHashing.HashHex(bytes, alg);
 
-            var existing = node["hash"]?["hex"]?.GetValue<string?>();
+            var existing = node["hash"]?["hex"]?.GetValue<string>();
             if (!string.IsNullOrEmpty(existing) && existing != actual)
                 throw new SigillHashMismatchException(refId, existing!, actual);
 

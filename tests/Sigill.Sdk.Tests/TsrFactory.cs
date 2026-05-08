@@ -11,16 +11,16 @@
 
 using System;
 using System.Collections.Generic;
-using Org.BouncyCastle.Asn1.Pkcs;
 using Org.BouncyCastle.Asn1.X509;
 using Org.BouncyCastle.Crypto;
 using Org.BouncyCastle.Crypto.Generators;
 using Org.BouncyCastle.Crypto.Operators;
 using Org.BouncyCastle.Crypto.Parameters;
 using Org.BouncyCastle.Math;
-using Org.BouncyCastle.Pkcs;
 using Org.BouncyCastle.Security;
 using Org.BouncyCastle.Tsp;
+using Org.BouncyCastle.Utilities;
+using Org.BouncyCastle.Utilities.Collections;
 using Org.BouncyCastle.X509;
 
 namespace Sigill.Sdk.Tests;
@@ -93,11 +93,11 @@ internal static class TsrFactory
         reqGen.SetCertReq(true);
         var req = reqGen.Generate(hashOid, messageImprint, serial);
 
-        // Generate the response (which contains the token).
+        // BC 2.x: SetCertificates takes IStore<X509Certificate>. We supply our own
+        // minimal implementation rather than depend on internal-helper class names that
+        // have churned across BC versions.
         var tokenGen = new TimeStampTokenGenerator(keyPair.Private, cert, hashOid, "1.2.3.4.5");
-        var certs = X509StoreFactory.Create("Certificate/Collection",
-            new X509CollectionStoreParameters(new List<X509Certificate> { cert }));
-        tokenGen.SetCertificates(certs);
+        tokenGen.SetCertificates(new SingletonStore<X509Certificate>(cert));
 
         var responseGen = new TimeStampResponseGenerator(tokenGen, TspAlgorithms.Allowed);
         var response = responseGen.Generate(req, serial, actualGenTime);
@@ -105,5 +105,23 @@ internal static class TsrFactory
             ?? throw new InvalidOperationException("TimeStampToken not produced (status=" + response.Status + ")");
 
         return token.GetEncoded();
+    }
+
+    /// <summary>
+    /// Minimal IStore&lt;T&gt; implementation: a fixed list of items, returned regardless of selector.
+    /// Sufficient for tests where the store has exactly one TSA cert.
+    /// </summary>
+    private sealed class SingletonStore<T> : IStore<T>
+    {
+        private readonly T[] _items;
+        public SingletonStore(params T[] items) => _items = items;
+        public IEnumerable<T> EnumerateMatches(ISelector<T>? selector)
+        {
+            foreach (var item in _items)
+            {
+                if (selector is null || selector.Match(item))
+                    yield return item;
+            }
+        }
     }
 }

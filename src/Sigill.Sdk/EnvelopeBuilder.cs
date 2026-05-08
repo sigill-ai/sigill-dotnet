@@ -5,6 +5,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text.Json.Nodes;
+using Sigill.Sdk.Internal;
 
 namespace Sigill.Sdk;
 
@@ -15,7 +16,7 @@ namespace Sigill.Sdk;
 /// <see cref="InvalidOperationException"/> if any of <c>purpose</c>, <c>actor</c>,
 /// <c>activity</c>, <c>model</c> are missing. <c>schemaName</c>, <c>schemaVersion</c>,
 /// <c>evidenceId</c>, <c>createdAt</c> are populated automatically (the latter two
-/// are overrideable via <see cref="WithEvidenceId"/> / <see cref="WithCreatedAt"/>
+/// are overrideable via <see cref="WithEvidenceId"/> / <see cref="WithCreatedAt(string)"/>
 /// for deterministic-output tests).
 /// </summary>
 public sealed class EnvelopeBuilder
@@ -73,7 +74,7 @@ public sealed class EnvelopeBuilder
         var m = new JsonObject { ["provider"] = provider, ["name"] = name };
         if (version is not null) m["version"] = version;
         if (deploymentId is not null) m["deploymentId"] = deploymentId;
-        if (parameters is not null) m["parameters"] = parameters.DeepClone();
+        if (parameters is not null) m["parameters"] = parameters.CloneObject();
         _env["model"] = m;
         return this;
     }
@@ -114,15 +115,15 @@ public sealed class EnvelopeBuilder
         return this;
     }
 
-    public EnvelopeBuilder WithRetrievedContext(JsonArray items) { _env["retrievedContext"] = items.DeepClone(); return this; }
-    public EnvelopeBuilder WithSourceTrace(JsonArray items) { _env["sourceTrace"] = items.DeepClone(); return this; }
-    public EnvelopeBuilder WithInputs(JsonArray items) { _env["inputs"] = items.DeepClone(); return this; }
-    public EnvelopeBuilder WithOutputArtifacts(JsonArray items) { _env["outputArtifacts"] = items.DeepClone(); return this; }
+    public EnvelopeBuilder WithRetrievedContext(JsonArray items) { _env["retrievedContext"] = items.CloneArray(); return this; }
+    public EnvelopeBuilder WithSourceTrace(JsonArray items) { _env["sourceTrace"] = items.CloneArray(); return this; }
+    public EnvelopeBuilder WithInputs(JsonArray items) { _env["inputs"] = items.CloneArray(); return this; }
+    public EnvelopeBuilder WithOutputArtifacts(JsonArray items) { _env["outputArtifacts"] = items.CloneArray(); return this; }
 
     // -- operational ------------------------------------------------------
 
-    public EnvelopeBuilder WithProcessingMetadata(JsonObject metadata) { _env["processingMetadata"] = metadata.DeepClone(); return this; }
-    public EnvelopeBuilder WithPolicyMetadata(JsonObject metadata) { _env["policyMetadata"] = metadata.DeepClone(); return this; }
+    public EnvelopeBuilder WithProcessingMetadata(JsonObject metadata) { _env["processingMetadata"] = metadata.CloneObject(); return this; }
+    public EnvelopeBuilder WithPolicyMetadata(JsonObject metadata) { _env["policyMetadata"] = metadata.CloneObject(); return this; }
 
     // -- escape hatch -----------------------------------------------------
 
@@ -131,7 +132,7 @@ public sealed class EnvelopeBuilder
     /// typed builder method. Provided so callers aren't blocked when the schema
     /// gains a field before the builder does.
     /// </summary>
-    public EnvelopeBuilder Set(string field, JsonNode value) { _env[field] = value.DeepClone(); return this; }
+    public EnvelopeBuilder Set(string field, JsonNode value) { _env[field] = value.CloneNode()!; return this; }
 
     // -- finalize ---------------------------------------------------------
 

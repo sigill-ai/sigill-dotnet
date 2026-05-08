@@ -111,7 +111,6 @@ public class CanonicalizationVectorTests
 
     [Theory]
     [InlineData(0.0, "0")]
-    [InlineData(-0.0, "0")]
     [InlineData(1.0, "1")]
     [InlineData(-1.0, "-1")]
     [InlineData(42.0, "42")]
@@ -121,5 +120,13 @@ public class CanonicalizationVectorTests
     public void EcmaScript_number_to_string_matches_spec(double d, string expected)
     {
         JsonCanonicalizer.EcmaScriptNumberToString(d).Should().Be(expected);
+    }
+
+    [Fact]
+    public void EcmaScript_number_to_string_treats_negative_zero_as_zero()
+    {
+        // ES Number.prototype.toString folds -0 to "0". Verified separately because
+        // xUnit treats -0.0 and 0.0 as equal in InlineData (xUnit1025).
+        JsonCanonicalizer.EcmaScriptNumberToString(-0.0).Should().Be("0");
     }
 }
