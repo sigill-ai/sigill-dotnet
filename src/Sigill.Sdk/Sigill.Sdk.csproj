@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFrameworks>net8.0;net9.0;netstandard2.1</TargetFrameworks>
+    <RootNamespace>Sigill.Sdk</RootNamespace>
+    <AssemblyName>Sigill.Sdk</AssemblyName>
+    <PackageId>Sigill.Sdk</PackageId>
+    <Title>Sigill SDK — AI Evidence Envelopes</Title>
+    <Description>Build, seal, and verify AiEvidenceEnvelopeV1 records for AI generation calls. RFC 8785 canonical JSON, SHA-256 hash binding, RFC 3161 timestamp via Sigill, PII-safe payload references.</Description>
+    <PackageTags>ai;evidence;audit;rfc3161;rfc8785;jcs;canonicalization;timestamping;trust;compliance;sigill</PackageTags>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="System.Security.Cryptography.Pkcs" Version="8.0.0" />
+    <PackageReference Include="System.Text.Json" Version="8.0.5" />
+    <!-- IsExternalInit polyfill for record types on netstandard2.1 -->
+    <PackageReference Include="PolySharp" Version="1.14.1" PrivateAssets="all" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="../README.md" Pack="true" PackagePath="\" />
+  </ItemGroup>
+
+</Project>
