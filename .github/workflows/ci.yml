@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: .NET on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            8.0.x
+            9.0.x
+      - name: Restore
+        run: dotnet restore
+      - name: Build
+        run: dotnet build --configuration Release --no-restore
+      - name: Test
+        run: dotnet test --configuration Release --no-build --logger "trx;LogFileName=test-results.trx"
+
+  spec-vectors:
+    # Sanity check: regenerating the vendored spec test vectors must produce the
+    # same bytes that are committed. If a contributor accidentally bumps something
+    # canonical (or copies a divergent spec/ from sigill-python), this catches it.
+    name: Spec vectors are stable
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install jcs reference
+        run: pip install jcs
+      - name: Verify committed canonical bytes match regeneration
+        run: |
+          set -euo pipefail
+          for vec in spec/test-vectors/01-complete-ai-call spec/test-vectors/02-pii-redacted; do
+            python "$vec/_generate.py"
+          done
+          if ! git diff --quiet -- spec/test-vectors; then
+            echo "::error::Test vector bytes drifted from committed values:"
+            git diff -- spec/test-vectors
+            exit 1
+          fi
