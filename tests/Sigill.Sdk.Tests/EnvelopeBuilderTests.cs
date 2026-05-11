@@ -3,6 +3,7 @@
 
 using System;
 using System.IO;
+using System.Reflection;
 using System.Text.Json.Nodes;
 using FluentAssertions;
 using Xunit;
@@ -42,10 +43,12 @@ public class EnvelopeBuilderTests
     [Fact]
     public void Inline_prompt_has_correct_shape()
     {
+#pragma warning disable CS0618
         var env = new EnvelopeBuilder()
             .WithPurpose("x").WithActor("user", "u").WithActivity("a").WithModel("p", "n")
             .WithPromptInline("hi", "text/plain")
             .Build();
+#pragma warning restore CS0618
 
         var prompt = (JsonObject)env.Json["prompt"]!;
         prompt["contentType"]!.GetValue<string>().Should().Be("text/plain");
@@ -91,6 +94,24 @@ public class EnvelopeBuilderTests
     }
 
     [Fact]
+    public void WithPromptInline_carries_obsolete_advisory_mentioning_ref_alternative()
+    {
+        var method = typeof(EnvelopeBuilder).GetMethod(nameof(EnvelopeBuilder.WithPromptInline));
+        var obs = method!.GetCustomAttribute<ObsoleteAttribute>();
+        obs.Should().NotBeNull("WithPromptInline should carry an [Obsolete] privacy advisory");
+        obs!.Message.Should().Contain("WithPromptRef");
+    }
+
+    [Fact]
+    public void WithOutputInline_carries_obsolete_advisory_mentioning_ref_alternative()
+    {
+        var method = typeof(EnvelopeBuilder).GetMethod(nameof(EnvelopeBuilder.WithOutputInline));
+        var obs = method!.GetCustomAttribute<ObsoleteAttribute>();
+        obs.Should().NotBeNull("WithOutputInline should carry an [Obsolete] privacy advisory");
+        obs!.Message.Should().Contain("WithOutputRef");
+    }
+
+    [Fact]
     public void Builder_reproduces_test_vector_01()
     {
         var vec = Path.Combine(SpecRoot.TestVectorsDir, "01-complete-ai-call");
@@ -100,6 +121,7 @@ public class EnvelopeBuilderTests
         var policy = (JsonObject)expected["policyMetadata"]!.DeepClone();
         var modelParams = (JsonObject)expected["model"]!["parameters"]!.DeepClone();
 
+#pragma warning disable CS0618
         var env = new EnvelopeBuilder()
             .WithEvidenceId(expected["evidenceId"]!.GetValue<string>())
             .WithCreatedAt(expected["createdAt"]!.GetValue<string>())
@@ -122,6 +144,7 @@ public class EnvelopeBuilderTests
             .WithProcessingMetadata(processing)
             .WithPolicyMetadata(policy)
             .Build();
+#pragma warning restore CS0618
 
         // Compare canonical bytes — that's the contract that matters
         var ours = EnvelopeHashing.Canonicalize(env.Json);

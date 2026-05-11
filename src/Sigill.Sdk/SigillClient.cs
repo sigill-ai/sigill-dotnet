@@ -92,7 +92,9 @@ public sealed class SigillClient : ISigillAiEvidenceClient, IDisposable
             ["hex"] = digestHex,
         };
 
-        // 4. Stamp via Sigill /tsa/stamp.
+        // 4. Stamp via Sigill /tsa/stamp. Default label to activity.name when not supplied.
+        if (options.Label is null && env["activity"]?["name"]?.GetValue<string>() is string activityName)
+            options = options with { Label = activityName };
         var proof = await StampAsync(canonicalBytes, options, cancellationToken).ConfigureAwait(false);
         env["proofs"] = new JsonArray(proof);
 

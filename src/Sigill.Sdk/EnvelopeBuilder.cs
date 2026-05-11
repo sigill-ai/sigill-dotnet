@@ -79,7 +79,15 @@ public sealed class EnvelopeBuilder
         return this;
     }
 
-    /// <summary>Set <c>prompt</c> to the inline UTF-8 text. Use only for non-PII content.</summary>
+    /// <summary>
+    /// Set <c>prompt</c> to the inline UTF-8 text. The content is embedded in the
+    /// envelope and transmitted to Sigill. For sensitive content use
+    /// <see cref="WithPromptRef"/> and supply bytes via <c>externalPayloads</c> at seal
+    /// time — Sigill will only see the hash.
+    /// </summary>
+    [Obsolete("WithPromptInline() transmits content to Sigill. " +
+              "For sensitive content use WithPromptRef() + externalPayloads. " +
+              "See InlineContentWarning. Suppress CS0618 when content is non-sensitive.")]
     public EnvelopeBuilder WithPromptInline(string text, string contentType = "text/plain")
     {
         _env["prompt"] = new JsonObject
@@ -98,6 +106,15 @@ public sealed class EnvelopeBuilder
         return this;
     }
 
+    /// <summary>
+    /// Set <c>output</c> to the inline UTF-8 text. The content is embedded in the
+    /// envelope and transmitted to Sigill. For sensitive content use
+    /// <see cref="WithOutputRef"/> and supply bytes via <c>externalPayloads</c> at seal
+    /// time — Sigill will only see the hash.
+    /// </summary>
+    [Obsolete("WithOutputInline() transmits content to Sigill. " +
+              "For sensitive content use WithOutputRef() + externalPayloads. " +
+              "See InlineContentWarning. Suppress CS0618 when content is non-sensitive.")]
     public EnvelopeBuilder WithOutputInline(string text, string contentType = "text/plain")
     {
         _env["output"] = new JsonObject

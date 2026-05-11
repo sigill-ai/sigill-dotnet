@@ -79,3 +79,16 @@ public sealed record TsaFailure(
     int? StatusCode,
     string Message,
     long LatencyMs);
+
+/// <summary>
+/// Marker type for the inline-content privacy advisory.
+///
+/// <see cref="EnvelopeBuilder.WithPromptInline"/> and <see cref="EnvelopeBuilder.WithOutputInline"/>
+/// carry <c>[Obsolete]</c> (CS0618) to warn that content is transmitted to Sigill.
+/// For sensitive content, use <see cref="EnvelopeBuilder.WithPromptRef"/> /
+/// <see cref="EnvelopeBuilder.WithOutputRef"/> and supply the raw bytes via
+/// <c>externalPayloads</c> at seal time — Sigill will only see the hash.
+///
+/// Suppress with <c>#pragma warning disable CS0618</c> when inline content is genuinely non-sensitive.
+/// </summary>
+public sealed class InlineContentWarning { }

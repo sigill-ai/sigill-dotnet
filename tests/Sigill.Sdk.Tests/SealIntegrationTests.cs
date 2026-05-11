@@ -145,6 +145,46 @@ public class SealIntegrationTests
         sealed_.Json["proofs"]![0]!["policyOid"]!.GetValue<string>().Should().Be("1.3.6.1.4.1.4146.2.2");
     }
 
+    // -------------------------------------------------------------- label
+
+    [Fact]
+    public async Task Seal_defaults_label_to_activity_name()
+    {
+        var handler = new FakeHandler(async req =>
+        {
+            var body = JsonNode.Parse(await req.Content!.ReadAsStringAsync())!.AsObject();
+            var fileBytes = Convert.FromBase64String(body["fileBase64"]!.GetValue<string>());
+            return StampOk(fileBytes);
+        });
+        var client = ClientWith(handler);
+
+        var env = new EnvelopeBuilder()
+            .WithPurpose("x").WithActor("user", "u").WithActivity("ticket.summarize").WithModel("p", "n")
+            .Build();
+        await client.SealAsync(env);
+
+        handler.Requests[0]["label"]!.GetValue<string>().Should().Be("ticket.summarize");
+    }
+
+    [Fact]
+    public async Task Seal_explicit_label_overrides_activity_name()
+    {
+        var handler = new FakeHandler(async req =>
+        {
+            var body = JsonNode.Parse(await req.Content!.ReadAsStringAsync())!.AsObject();
+            var fileBytes = Convert.FromBase64String(body["fileBase64"]!.GetValue<string>());
+            return StampOk(fileBytes);
+        });
+        var client = ClientWith(handler);
+
+        var env = new EnvelopeBuilder()
+            .WithPurpose("x").WithActor("user", "u").WithActivity("ticket.summarize").WithModel("p", "n")
+            .Build();
+        await client.SealAsync(env, options: new SealOptions { Label = "my custom label" });
+
+        handler.Requests[0]["label"]!.GetValue<string>().Should().Be("my custom label");
+    }
+
     // -------------------------------------------------------------- external payloads
 
     [Fact]
