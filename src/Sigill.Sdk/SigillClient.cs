@@ -92,26 +92,28 @@ public sealed class SigillClient : ISigillAiEvidenceClient, IDisposable
             ["hex"] = digestHex,
         };
 
-        // 4. Stamp via Sigill /tsa/stamp. Default label to activity.name when not supplied.
+        // 4. Stamp via Sigill /tsa/stamp-hash. Only the SHA-256 digest is transmitted —
+        // the canonical bytes never leave the machine. RFC 3161 compliant.
+        // Default label to activity.name when not supplied.
         if (options.Label is null && env["activity"]?["name"]?.GetValue<string>() is string activityName)
             options = options with { Label = activityName };
-        var proof = await StampAsync(canonicalBytes, options, cancellationToken).ConfigureAwait(false);
+        var proof = await StampAsync(digestHex, options, cancellationToken).ConfigureAwait(false);
         env["proofs"] = new JsonArray(proof);
 
         return new SealedAiEvidenceEnvelope(env, canonicalBytes, digestHex);
     }
 
-    private async Task<JsonObject> StampAsync(byte[] canonicalBytes, SealOptions options, CancellationToken ct)
+    private async Task<JsonObject> StampAsync(string hashHex, SealOptions options, CancellationToken ct)
     {
         var requestBody = new JsonObject
         {
             ["tsaSlug"] = options.TsaSlug,
-            ["fileBase64"] = Convert.ToBase64String(canonicalBytes),
+            ["hashHex"] = hashHex,
             ["qualified"] = options.Qualified,
         };
         if (options.Label is not null) requestBody["label"] = options.Label;
 
-        using var resp = await _http.PostAsJsonAsync("/tsa/stamp", requestBody, ct).ConfigureAwait(false);
+        using var resp = await _http.PostAsJsonAsync("/tsa/stamp-hash", requestBody, ct).ConfigureAwait(false);
 
         if (resp.StatusCode == HttpStatusCode.BadGateway)
         {

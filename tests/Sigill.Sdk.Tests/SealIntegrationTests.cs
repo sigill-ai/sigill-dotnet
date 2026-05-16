@@ -54,11 +54,10 @@ public class SealIntegrationTests
         return new SigillClient(http);
     }
 
-    private static HttpResponseMessage StampOk(byte[] fileBytes, string tsaName = "Test TSA",
+    private static HttpResponseMessage StampOk(string hashHex, string tsaName = "Test TSA",
         bool qualified = false, string? policyOid = null)
     {
-        using var sha = SHA256.Create();
-        var imprint = sha.ComputeHash(fileBytes);
+        var imprint = Convert.FromHexString(hashHex);
         var tsr = TsrFactory.MakeTsr(imprint);
 
         var body = new JsonObject
@@ -66,7 +65,7 @@ public class SealIntegrationTests
             ["serial"] = "1234567",
             ["genTime"] = "2026-05-08T12:00:00Z",
             ["hashAlgorithmOid"] = "2.16.840.1.101.3.4.2.1",
-            ["hashHex"] = EnvelopeHashing.HashHex(fileBytes),
+            ["hashHex"] = hashHex,
             ["tsrBase64"] = Convert.ToBase64String(tsr),
             ["tsaName"] = tsaName,
             ["qualified"] = qualified,
@@ -85,10 +84,9 @@ public class SealIntegrationTests
     {
         var handler = new FakeHandler(async req =>
         {
-            req.RequestUri!.AbsolutePath.Should().Be("/tsa/stamp");
+            req.RequestUri!.AbsolutePath.Should().Be("/tsa/stamp-hash");
             var body = JsonNode.Parse(await req.Content!.ReadAsStringAsync())!.AsObject();
-            var fileBytes = Convert.FromBase64String(body["fileBase64"]!.GetValue<string>());
-            return StampOk(fileBytes, tsaName: "Sigill SDK Test TSA");
+            return StampOk(body["hashHex"]!.GetValue<string>(), tsaName: "Sigill SDK Test TSA");
         });
         var client = ClientWith(handler);
 
@@ -107,15 +105,12 @@ public class SealIntegrationTests
         sealed_.Json["proofs"]![0]!["type"]!.GetValue<string>().Should().Be("rfc3161");
         sealed_.Json["proofs"]![0]!["tsaName"]!.GetValue<string>().Should().Be("Sigill SDK Test TSA");
 
-        // The captured request body must use defaults
+        // The captured request body must use defaults and contain the envelope hash
         handler.Requests.Should().HaveCount(1);
         handler.Requests[0]["tsaSlug"]!.GetValue<string>().Should().Be("auto");
         handler.Requests[0]["qualified"]!.GetValue<bool>().Should().BeFalse();
-
-        // What we sent must canonicalize to itself — i.e., it WAS the canonical bytes
-        var sent = Convert.FromBase64String(handler.Requests[0]["fileBase64"]!.GetValue<string>());
-        var reCanonicalized = EnvelopeHashing.Canonicalize((JsonObject)JsonNode.Parse(sent)!);
-        reCanonicalized.Should().Equal(sent);
+        handler.Requests[0]["hashHex"]!.GetValue<string>().Should().HaveLength(64); // SHA-256
+        handler.Requests[0]["hashHex"]!.GetValue<string>().Should().Be(sealed_.EnvelopeHashHex);
     }
 
     [Fact]
@@ -124,8 +119,7 @@ public class SealIntegrationTests
         var handler = new FakeHandler(async req =>
         {
             var body = JsonNode.Parse(await req.Content!.ReadAsStringAsync())!.AsObject();
-            var fileBytes = Convert.FromBase64String(body["fileBase64"]!.GetValue<string>());
-            return StampOk(fileBytes, tsaName: "DigiCert", qualified: true,
+            return StampOk(body["hashHex"]!.GetValue<string>(), tsaName: "DigiCert", qualified: true,
                 policyOid: "1.3.6.1.4.1.4146.2.2");
         });
         var client = ClientWith(handler);
@@ -153,8 +147,7 @@ public class SealIntegrationTests
         var handler = new FakeHandler(async req =>
         {
             var body = JsonNode.Parse(await req.Content!.ReadAsStringAsync())!.AsObject();
-            var fileBytes = Convert.FromBase64String(body["fileBase64"]!.GetValue<string>());
-            return StampOk(fileBytes);
+            return StampOk(body["hashHex"]!.GetValue<string>());
         });
         var client = ClientWith(handler);
 
@@ -172,8 +165,7 @@ public class SealIntegrationTests
         var handler = new FakeHandler(async req =>
         {
             var body = JsonNode.Parse(await req.Content!.ReadAsStringAsync())!.AsObject();
-            var fileBytes = Convert.FromBase64String(body["fileBase64"]!.GetValue<string>());
-            return StampOk(fileBytes);
+            return StampOk(body["hashHex"]!.GetValue<string>());
         });
         var client = ClientWith(handler);
 
@@ -193,8 +185,7 @@ public class SealIntegrationTests
         var handler = new FakeHandler(async req =>
         {
             var body = JsonNode.Parse(await req.Content!.ReadAsStringAsync())!.AsObject();
-            var fileBytes = Convert.FromBase64String(body["fileBase64"]!.GetValue<string>());
-            return StampOk(fileBytes);
+            return StampOk(body["hashHex"]!.GetValue<string>());
         });
         var client = ClientWith(handler);
 
@@ -294,8 +285,7 @@ public class SealIntegrationTests
         var handler = new FakeHandler(async req =>
         {
             var body = JsonNode.Parse(await req.Content!.ReadAsStringAsync())!.AsObject();
-            var fileBytes = Convert.FromBase64String(body["fileBase64"]!.GetValue<string>());
-            return StampOk(fileBytes, tsaName: "Test TSA");
+            return StampOk(body["hashHex"]!.GetValue<string>(), tsaName: "Test TSA");
         });
         var client = ClientWith(handler);
 
