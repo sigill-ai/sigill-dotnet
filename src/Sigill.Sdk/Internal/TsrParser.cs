@@ -27,11 +27,17 @@ internal static class TsrParser
         try { bytes = Convert.FromBase64String(tsrBase64); }
         catch (FormatException ex) { throw new SigillInvalidProofException("tsrBase64 is not valid base64", ex); }
 
+        // /tsa/stamp-hash returns a full RFC 3161 TimeStampResp (§2.4.2):
+        //   SEQUENCE { PKIStatusInfo, TimeStampToken }
+        // TryDecode expects only the inner TimeStampToken (ContentInfo). Strip the wrapper
+        // when present; fall through to the original bytes for bare-token callers and tests.
+        byte[] tokenBytes = ExtractTokenBytes(bytes);
+
         Rfc3161TimestampToken token;
         try
         {
             // TryDecode false → bad token; an exception path is uncommon but possible.
-            if (!Rfc3161TimestampToken.TryDecode(bytes, out var t, out _))
+            if (!Rfc3161TimestampToken.TryDecode(tokenBytes, out var t, out _))
                 throw new SigillInvalidProofException("TSR is not a well-formed RFC 3161 TimeStampToken");
             token = t!;
         }
@@ -75,6 +81,59 @@ internal static class TsrParser
             HashedMessageHex: hex,
             Qualified: false,                       // set externally from the proof envelope field
             PolicyOid: info.PolicyId?.Value);
+    }
+
+    /// <summary>
+    /// If <paramref name="bytes"/> is a full RFC 3161 TimeStampResp
+    /// (SEQUENCE { PKIStatusInfo (SEQUENCE), TimeStampToken }), extracts and returns
+    /// the inner TimeStampToken (ContentInfo) bytes. Otherwise returns
+    /// <paramref name="bytes"/> unchanged.
+    /// </summary>
+    private static byte[] ExtractTokenBytes(byte[] bytes)
+    {
+        // TimeStampResp  ::= SEQUENCE { PKIStatusInfo (SEQUENCE { INTEGER … }), TimeStampToken? }
+        // TimeStampToken ::= ContentInfo   ::= SEQUENCE { OID, … }
+        // Distinguisher: in TimeStampResp the outer SEQUENCE's first child is a SEQUENCE (0x30);
+        // in ContentInfo the first child is an OID (0x06).
+        try
+        {
+            if (bytes.Length < 2 || bytes[0] != 0x30) return bytes;
+
+            int pos = 1 + DerLengthWidth(bytes, 1);   // skip outer SEQUENCE tag + length
+            if (pos >= bytes.Length || bytes[pos] != 0x30) return bytes; // first child is OID → ContentInfo
+
+            // Skip PKIStatusInfo (tag + length + value)
+            int pkiLenWidth = DerLengthWidth(bytes, pos + 1);
+            int pkiBodyLen  = ReadDerLength(bytes, pos + 1);
+            pos += 1 + pkiLenWidth + pkiBodyLen;
+
+            if (pos >= bytes.Length || bytes[pos] != 0x30) return bytes; // absent or unexpected tag
+
+            // Copy exactly the TimeStampToken TLV (tag + length + value)
+            int tokLenWidth = DerLengthWidth(bytes, pos + 1);
+            int tokBodyLen  = ReadDerLength(bytes, pos + 1);
+            int total       = 1 + tokLenWidth + tokBodyLen;
+            var result = new byte[total];
+            Buffer.BlockCopy(bytes, pos, result, 0, total);
+            return result;
+        }
+        catch
+        {
+            return bytes;
+        }
+    }
+
+    private static int DerLengthWidth(byte[] b, int pos) =>
+        b[pos] < 0x80 ? 1 : 1 + (b[pos] & 0x7F);
+
+    private static int ReadDerLength(byte[] b, int pos)
+    {
+        byte first = b[pos];
+        if (first < 0x80) return first;
+        int n = first & 0x7F;
+        int len = 0;
+        for (int i = 1; i <= n; i++) len = (len << 8) | b[pos + i];
+        return len;
     }
 
     private static string? OidToHashName(string oid) => oid switch

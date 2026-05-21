@@ -73,8 +73,13 @@ internal static class TsrFactory
     /// Construct a DER-encoded RFC 3161 TimeStampToken whose message-imprint is
     /// <paramref name="messageImprint"/>. Returns the bytes that go into
     /// <c>proofs[].tsrBase64</c> after base64 encoding.
+    /// When <paramref name="wrapInResponse"/> is <see langword="true"/>, the bytes are a
+    /// full RFC 3161 TimeStampResp (SEQUENCE { PKIStatusInfo, TimeStampToken }) — the format
+    /// returned by <c>/tsa/stamp-hash</c>. When <see langword="false"/> (default), the bytes
+    /// are the bare TimeStampToken (ContentInfo).
     /// </summary>
-    public static byte[] MakeTsr(byte[] messageImprint, string hashAlg = "SHA-256", DateTime? genTime = null)
+    public static byte[] MakeTsr(byte[] messageImprint, string hashAlg = "SHA-256", DateTime? genTime = null,
+        bool wrapInResponse = false)
     {
         var (keyPair, cert) = EnsureIdentity();
         var actualGenTime = genTime ?? DateTime.UtcNow;
@@ -104,7 +109,7 @@ internal static class TsrFactory
         var token = response.TimeStampToken
             ?? throw new InvalidOperationException("TimeStampToken not produced (status=" + response.Status + ")");
 
-        return token.GetEncoded();
+        return wrapInResponse ? response.GetEncoded() : token.GetEncoded();
     }
 
     /// <summary>

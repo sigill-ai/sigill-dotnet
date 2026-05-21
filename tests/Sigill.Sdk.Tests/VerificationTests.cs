@@ -100,6 +100,46 @@ public class VerificationTests
         result.IsValid.Should().BeTrue("got issues: " + string.Join("; ", result.Issues.Select(i => i.Message)));
     }
 
+    [Fact]
+    public async Task Verify_happy_path_with_full_timestamp_response()
+    {
+        // Regression test: /tsa/stamp-hash returns a full RFC 3161 TimeStampResp
+        // (SEQUENCE { PKIStatusInfo, TimeStampToken }), not a bare TimeStampToken.
+        // TsrParser must unwrap the outer response before calling TryDecode.
+        var expected = (JsonObject)JsonNode.Parse(File.ReadAllText(
+            Path.Combine(SpecRoot.TestVectorsDir, "01-complete-ai-call", "expected.json")))!;
+
+        var env = (JsonObject)JsonNode.Parse(expected.ToJsonString())!;
+        var integrity = env["integrity"] as JsonObject ?? new JsonObject();
+        integrity["canonicalization"] = "RFC8785";
+        integrity.Remove("envelopeHash");
+        env["integrity"] = integrity;
+        env.Remove("proofs");
+
+        var (digestHex, canonical) = EnvelopeHashing.ComputeEnvelopeHash(env);
+        ((JsonObject)env["integrity"]!)["envelopeHash"] = new JsonObject
+        {
+            ["alg"] = "SHA-256",
+            ["hex"] = digestHex,
+        };
+
+        using var sha = SHA256.Create();
+        var imprint = sha.ComputeHash(canonical);
+        // wrapInResponse: true mimics /tsa/stamp-hash returning TimeStampResp instead of bare token
+        var tsrBytes = TsrFactory.MakeTsr(imprint, wrapInResponse: true);
+        env["proofs"] = new JsonArray(new JsonObject
+        {
+            ["type"] = "rfc3161",
+            ["tsrBase64"] = Convert.ToBase64String(tsrBytes),
+        });
+
+        var sealed_ = new SealedAiEvidenceEnvelope(env, canonical, digestHex);
+        var result = await NewClient().VerifyAsync(sealed_);
+
+        result.IsValid.Should().BeTrue("got issues: " + string.Join("; ", result.Issues.Select(i => i.Message)));
+        result.Timestamps.Should().HaveCount(1);
+    }
+
     // ---------------------------------------------------------------- envelope tampering
 
     [Fact]
