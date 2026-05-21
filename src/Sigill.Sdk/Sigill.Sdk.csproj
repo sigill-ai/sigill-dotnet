@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFrameworks>net8.0;net9.0;netstandard2.1</TargetFrameworks>
+    <TargetFrameworks>net8.0;net9.0;net10.0;netstandard2.1</TargetFrameworks>
     <RootNamespace>Sigill.Sdk</RootNamespace>
     <AssemblyName>Sigill.Sdk</AssemblyName>
     <PackageId>Sigill.Sdk</PackageId>
@@ -12,12 +12,12 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="System.Security.Cryptography.Pkcs" Version="8.0.0" />
-    <PackageReference Include="System.Text.Json" Version="8.0.5" />
+    <PackageReference Include="System.Security.Cryptography.Pkcs" Version="9.0.0" />
+    <PackageReference Include="System.Text.Json" Version="9.0.5" />
     <!-- System.Net.Http.Json is part of the BCL on net5+ but ships as a separate
-         package for netstandard2.1. Reference it unconditionally; on net8+/net9+
+         package for netstandard2.1. Reference it unconditionally; on net8+/net9+/net10+
          the SDK's framework reference takes precedence at compile time. -->
-    <PackageReference Include="System.Net.Http.Json" Version="8.0.1" />
+    <PackageReference Include="System.Net.Http.Json" Version="9.0.1" />
     <!-- IsExternalInit polyfill for record types on netstandard2.1 -->
     <PackageReference Include="PolySharp" Version="1.14.1" PrivateAssets="all" />
   </ItemGroup>

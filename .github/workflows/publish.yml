@@ -19,6 +19,7 @@ jobs:
           dotnet-version: |
             8.0.x
             9.0.x
+            10.0.x
       - run: dotnet restore
       - run: dotnet build --configuration Release --no-restore
       - run: dotnet test --configuration Release --no-build
@@ -34,6 +35,7 @@ jobs:
           dotnet-version: |
             8.0.x
             9.0.x
+            10.0.x
       - name: Pack
         run: dotnet pack src/Sigill.Sdk/Sigill.Sdk.csproj --configuration Release -p:Version=${GITHUB_REF_NAME#v} --output ./artifacts
       - name: Push
