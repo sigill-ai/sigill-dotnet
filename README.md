@@ -120,6 +120,59 @@ var result = await client.VerifyAsync(sealed_,
 // result.Issues[0].Message -> "payload_not_supplied: external bytes for ref 'output' …"
 ```
 
+## CAdES document sealing
+
+For workflows where you need to cryptographically seal a specific file or JSON blob
+(not a full AI evidence envelope), the SDK supports **CAdES detached signatures**
+(`.p7s`). This is the right choice when you want a compact, verifiable proof that a
+particular document was sealed by a named Sigill certificate at a specific moment.
+
+```csharp
+using Sigill.Sdk;
+
+// Obtain a certificate ID from the Sigill dashboard (Settings → Certificates).
+var certId = Guid.Parse("5f498b84-65e2-404c-8791-65d70e3f385b");
+
+var document = """{"decision": "approved", "amount": 42000}"""u8.ToArray();
+
+// Seal: only the SHA-256 hash of the document is sent to Sigill — the document
+// itself never leaves your system.
+byte[] p7s = await client.SealCadesAsync(document, certId, label: "decision.json");
+
+// p7s is a standard PKCS#7 / CMS detached signature (.p7s). Store it alongside
+// the document — you need both to verify later.
+
+// Verify: again, only the hash is transmitted — the document stays local.
+CadesVerifyResult result = await client.VerifyCadesAsync(document, p7s);
+
+Debug.Assert(result.IsValid);
+Console.WriteLine(result.Signer);   // CN=Sigill Platform Seal, O=SIGILL AS, …
+Console.WriteLine(result.Trust);    // "trusted_chain"
+Console.WriteLine(result.GenTime);  // "2026-06-25T16:49:04Z"
+```
+
+`CadesVerifyResult` properties:
+
+| Property | Type | Meaning |
+|---|---|---|
+| `IsValid` | `bool` | `HashMatch && SignatureValid && Error is null` |
+| `HashMatch` | `bool` | Document hash matches the value embedded in the `.p7s` |
+| `SignatureValid` | `bool` | RSA/ECDSA signature over signed attributes is valid |
+| `Signer` | `string?` | Subject DN of the signing certificate |
+| `Trust` | `string?` | `"trusted_chain"`, `"self_signed"`, `"dev_ca"`, … |
+| `TsaName` | `string?` | TSA that issued the embedded timestamp |
+| `GenTime` | `string?` | Timestamp generation time (ISO 8601) |
+| `Qualified` | `bool` | Whether the embedded timestamp is eIDAS-qualified |
+| `Error` | `string?` | Set when `IsValid` is `false` |
+| `Warnings` | `IReadOnlyList<string>` | Non-fatal issues found during verification |
+
+If you also hold an external `.tsr` file (e.g. from a separate timestamping step),
+pass it as `tsr:`:
+
+```csharp
+var result = await client.VerifyCadesAsync(document, p7s, tsr: tsrBytes);
+```
+
 ## Error handling
 
 Producer-time errors throw; verification errors are collected. This split is
