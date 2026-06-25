@@ -6,6 +6,33 @@ using System.Collections.Generic;
 namespace Sigill.Sdk;
 
 /// <summary>
+/// Result of <see cref="ISigillAiEvidenceClient.VerifyCadesAsync"/> — server-side CAdES verification.
+/// <list type="bullet">
+///   <item><see cref="IsValid"/> — true iff <see cref="HashMatch"/>, <see cref="SignatureValid"/>, and no <see cref="Error"/>.</item>
+///   <item><see cref="HashMatch"/> — the .p7s messageDigest matched SHA-256(original document).</item>
+///   <item><see cref="SignatureValid"/> — RSA/ECDSA signature over signedAttrs verified against the signer cert.</item>
+///   <item><see cref="Signer"/> — certificate subject DN of the signing certificate.</item>
+///   <item><see cref="Trust"/> — chain trust status: "trusted_chain", "self_signed", "dev_ca", etc.</item>
+///   <item><see cref="TsaName"/> — name of the embedded timestamp authority.</item>
+///   <item><see cref="GenTime"/> — ISO-8601 timestamp from the embedded RFC 3161 token.</item>
+///   <item><see cref="Qualified"/> — true if the TSA qualification source is LOTL or QC statement.</item>
+///   <item><see cref="Error"/> — server error message, or null on success.</item>
+///   <item><see cref="Warnings"/> — non-fatal warnings from the server verifier.</item>
+/// </list>
+/// </summary>
+public sealed record CadesVerifyResult(
+    bool IsValid,
+    bool HashMatch,
+    bool SignatureValid,
+    string? Signer,
+    string? Trust,
+    string? TsaName,
+    string? GenTime,
+    bool Qualified,
+    string? Error,
+    IReadOnlyList<string> Warnings);
+
+/// <summary>
 /// The four documented verification failure kinds from spec §7.
 /// </summary>
 public enum VerificationIssueKind

@@ -103,6 +103,82 @@ public sealed class SigillClient : ISigillAiEvidenceClient, IDisposable
         return new SealedAiEvidenceEnvelope(env, canonicalBytes, digestHex);
     }
 
+    // ========================================================== seal cades
+
+    /// <inheritdoc/>
+    public async Task<byte[]> SealCadesAsync(
+        byte[] data,
+        Guid certificateId,
+        string? label = null,
+        bool qualified = false,
+        CancellationToken cancellationToken = default)
+    {
+        if (data is null) throw new ArgumentNullException(nameof(data));
+
+        var hashHex = EnvelopeHashing.HashHex(data);
+        var requestBody = new JsonObject
+        {
+            ["hashHex"] = hashHex,
+            ["certificateId"] = certificateId.ToString(),
+            ["qualified"] = qualified,
+        };
+        if (label is not null) requestBody["label"] = label;
+
+        using var resp = await _http.PostAsJsonAsync("/seal/sign-hash", requestBody, cancellationToken).ConfigureAwait(false);
+        resp.EnsureSuccessStatusCode();
+
+        return await resp.Content.ReadAsByteArrayAsync().ConfigureAwait(false);
+    }
+
+    // ======================================================== verify cades
+
+    /// <inheritdoc/>
+    public async Task<CadesVerifyResult> VerifyCadesAsync(
+        byte[] data,
+        byte[] p7s,
+        byte[]? tsr = null,
+        CancellationToken cancellationToken = default)
+    {
+        if (data is null) throw new ArgumentNullException(nameof(data));
+        if (p7s  is null) throw new ArgumentNullException(nameof(p7s));
+
+        var requestBody = new JsonObject
+        {
+            ["hashHex"]   = EnvelopeHashing.HashHex(data),
+            ["p7sBase64"] = Convert.ToBase64String(p7s),
+        };
+        if (tsr is not null) requestBody["tsrBase64"] = Convert.ToBase64String(tsr);
+
+        using var resp = await _http.PostAsJsonAsync("/seal/verify-hash", requestBody, cancellationToken).ConfigureAwait(false);
+        resp.EnsureSuccessStatusCode();
+
+        var body = (await resp.Content.ReadFromJsonAsync<JsonObject>(cancellationToken: cancellationToken).ConfigureAwait(false))!;
+        var cades = body["cades"] as JsonObject ?? new JsonObject();
+        var cert  = cades["certificate"] as JsonObject ?? new JsonObject();
+        var ts    = cades["timestamp"]   as JsonObject ?? new JsonObject();
+
+        var hashMatch      = cades["hashMatch"]?.GetValue<bool>()      ?? false;
+        var signatureValid = cades["signatureValid"]?.GetValue<bool>()  ?? false;
+        var error          = cades["error"]?.GetValue<string>();
+        var qualSrc        = ts["qualificationSource"]?.GetValue<string>() ?? "none";
+
+        var warnings = new List<string>();
+        if (cades["warnings"] is JsonArray wa)
+            foreach (var w in wa) if (w?.GetValue<string>() is string s) warnings.Add(s);
+
+        return new CadesVerifyResult(
+            IsValid:        hashMatch && signatureValid && error is null,
+            HashMatch:      hashMatch,
+            SignatureValid: signatureValid,
+            Signer:         cert["subject"]?.GetValue<string>(),
+            Trust:          cert["trust"]?.GetValue<string>(),
+            TsaName:        ts["tsaName"]?.GetValue<string>(),
+            GenTime:        ts["genTime"]?.GetValue<string>(),
+            Qualified:      qualSrc is not null && qualSrc != "none",
+            Error:          error,
+            Warnings:       warnings);
+    }
+
     private async Task<JsonObject> StampAsync(string hashHex, SealOptions options, CancellationToken ct)
     {
         var requestBody = new JsonObject

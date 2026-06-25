@@ -40,7 +40,8 @@ public class SealIntegrationTests
                 var raw = await request.Content.ReadAsStringAsync(ct);
                 if (!string.IsNullOrEmpty(raw))
                 {
-                    if (JsonNode.Parse(raw) is JsonObject obj) Requests.Add(obj);
+                    try { if (JsonNode.Parse(raw) is JsonObject obj) Requests.Add(obj); }
+                    catch (System.Text.Json.JsonException) { /* multipart or non-JSON body — skip capture */ }
                 }
             }
             return await _impl(request);
@@ -274,6 +275,153 @@ public class SealIntegrationTests
         ex.Which.AttemptsTried.Should().Be(2);
         ex.Which.Failures.Should().HaveCount(2);
         ex.Which.Failures[0].Tsa.Should().Be("DigiCert");
+    }
+
+    // -------------------------------------------------------------- VerifyCades
+
+    [Fact]
+    public async Task VerifyCades_parses_response_into_result()
+    {
+        var fakeBody = """
+            {
+              "format": "cades",
+              "cades": {
+                "signaturePresent": true,
+                "hashMatch": true,
+                "signatureValid": true,
+                "certificate": {
+                  "subject": "CN=Sigill Platform Seal,O=SIGILL AS",
+                  "trust": "trusted_chain"
+                },
+                "timestamp": {
+                  "genTime": "2026-06-25T16:16:31Z",
+                  "tsaName": "SSL.com",
+                  "qualificationSource": "none"
+                },
+                "tsrSource": "embedded",
+                "error": null,
+                "warnings": null
+              }
+            }
+            """;
+        JsonObject? capturedBody = null;
+
+        var handler = new FakeHandler(async req =>
+        {
+            req.RequestUri!.AbsolutePath.Should().Be("/seal/verify-hash");
+            capturedBody = (JsonObject)JsonNode.Parse(await req.Content!.ReadAsStringAsync())!;
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(fakeBody, Encoding.UTF8, "application/json"),
+            };
+        });
+        var client = ClientWith(handler);
+
+        var data = Encoding.UTF8.GetBytes("original doc");
+        var result = await client.VerifyCadesAsync(data, new byte[] { 0x30, 0x00 });
+
+        result.IsValid.Should().BeTrue();
+        result.HashMatch.Should().BeTrue();
+        result.SignatureValid.Should().BeTrue();
+        result.Signer.Should().Be("CN=Sigill Platform Seal,O=SIGILL AS");
+        result.Trust.Should().Be("trusted_chain");
+        result.TsaName.Should().Be("SSL.com");
+        result.GenTime.Should().Be("2026-06-25T16:16:31Z");
+        result.Qualified.Should().BeFalse();
+        result.Error.Should().BeNull();
+        result.Warnings.Should().BeEmpty();
+        capturedBody.Should().NotBeNull();
+        capturedBody!["hashHex"]!.GetValue<string>()
+            .Should().Be(Convert.ToHexString(SHA256.HashData(data)).ToLowerInvariant());
+        capturedBody["p7sBase64"]!.GetValue<string>().Should().Be(Convert.ToBase64String(new byte[] { 0x30, 0x00 }));
+        capturedBody.ContainsKey("tsrBase64").Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task VerifyCades_includes_tsr_field_when_supplied()
+    {
+        JsonObject? capturedBody = null;
+
+        var handler = new FakeHandler(async req =>
+        {
+            capturedBody = (JsonObject)JsonNode.Parse(await req.Content!.ReadAsStringAsync())!;
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent("""
+                    {"format":"cades","cades":{"hashMatch":false,"signatureValid":false,"error":"TSR does not cover this .p7s"}}
+                    """, Encoding.UTF8, "application/json"),
+            };
+        });
+        var client = ClientWith(handler);
+
+        var tsr = new byte[] { 0x30, 0x01, 0x00 };
+        var result = await client.VerifyCadesAsync(
+            Encoding.UTF8.GetBytes("doc"),
+            new byte[] { 0x30, 0x00 },
+            tsr: tsr);
+
+        capturedBody!.ContainsKey("tsrBase64").Should().BeTrue();
+        capturedBody["tsrBase64"]!.GetValue<string>().Should().Be(Convert.ToBase64String(tsr));
+        result.IsValid.Should().BeFalse();
+        result.Error.Should().Be("TSR does not cover this .p7s");
+    }
+
+    // -------------------------------------------------------------- SealCades
+
+    [Fact]
+    public async Task SealCades_sends_hash_and_returns_p7s_bytes()
+    {
+        var fakePkcs7 = new byte[] { 0x30, 0x82, 0x01, 0x00 };
+        JsonObject? capturedBody = null;
+
+        var handler = new FakeHandler(async req =>
+        {
+            req.RequestUri!.AbsolutePath.Should().Be("/seal/sign-hash");
+            capturedBody = (JsonObject)JsonNode.Parse(await req.Content!.ReadAsStringAsync())!;
+            var resp = new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new ByteArrayContent(fakePkcs7),
+            };
+            resp.Content.Headers.ContentType =
+                new System.Net.Http.Headers.MediaTypeHeaderValue("application/pkcs7-signature");
+            return resp;
+        });
+        var client = ClientWith(handler);
+
+        var data = Encoding.UTF8.GetBytes("this is a JSON envelope or any document");
+        var certId = Guid.Parse("aaaaaaaa-bbbb-cccc-dddd-ffffffffffff");
+        var p7s = await client.SealCadesAsync(data, certId);
+
+        p7s.Should().Equal(fakePkcs7);
+        capturedBody.Should().NotBeNull();
+        capturedBody!["hashHex"]!.GetValue<string>()
+            .Should().Be(Convert.ToHexString(SHA256.HashData(data)).ToLowerInvariant());
+        capturedBody["certificateId"]!.GetValue<string>()
+            .Should().Be("aaaaaaaa-bbbb-cccc-dddd-ffffffffffff");
+        capturedBody["qualified"]!.GetValue<bool>().Should().BeFalse();
+        capturedBody.ContainsKey("label").Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task SealCades_forwards_label_and_qualified()
+    {
+        JsonObject? capturedBody = null;
+
+        var handler = new FakeHandler(async req =>
+        {
+            capturedBody = (JsonObject)JsonNode.Parse(await req.Content!.ReadAsStringAsync())!;
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new ByteArrayContent(new byte[] { 0x30, 0x00 }),
+            };
+        });
+        var client = ClientWith(handler);
+
+        await client.SealCadesAsync(Encoding.UTF8.GetBytes("doc"),
+            Guid.NewGuid(), label: "my-doc.json", qualified: true);
+
+        capturedBody!["label"]!.GetValue<string>().Should().Be("my-doc.json");
+        capturedBody["qualified"]!.GetValue<bool>().Should().BeTrue();
     }
 
     // -------------------------------------------------------------- end-to-end

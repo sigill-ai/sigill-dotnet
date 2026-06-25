@@ -23,7 +23,7 @@ public interface ISigillAiEvidenceClient
     ///   <item>Set <c>integrity.canonicalization</c> = <c>"RFC8785"</c>.</item>
     ///   <item>Strip <c>integrity.envelopeHash</c> and <c>proofs</c>, canonicalize, hash;
     ///         write the digest into <c>integrity.envelopeHash</c>.</item>
-    ///   <item>Submit the canonical bytes to Sigill's <c>/tsa/stamp</c>; attach the
+    ///   <item>Submit the envelope hash to Sigill's <c>/tsa/stamp-hash</c>; attach the
     ///         returned TSR as a single entry in <c>proofs[]</c>.</item>
     /// </list>
     ///
@@ -36,6 +36,28 @@ public interface ISigillAiEvidenceClient
         AiEvidenceEnvelopeInput input,
         IReadOnlyDictionary<string, byte[]>? externalPayloads = null,
         SealOptions? options = null,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// CAdES-seal arbitrary data (JSON, binary, etc.) via <c>/seal/sign-hash</c>.
+    /// Only the SHA-256 digest is transmitted — the original document never leaves the machine.
+    /// Returns the raw DER-encoded detached CAdES signature (.p7s bytes).
+    /// </summary>
+    Task<byte[]> SealCadesAsync(
+        byte[] data,
+        Guid certificateId,
+        string? label = null,
+        bool qualified = false,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Verify a detached CAdES signature via <c>POST /seal/verify</c>. The endpoint
+    /// is public — no API key is required — but the existing HTTP client works fine.
+    /// </summary>
+    Task<CadesVerifyResult> VerifyCadesAsync(
+        byte[] data,
+        byte[] p7s,
+        byte[]? tsr = null,
         CancellationToken cancellationToken = default);
 
     /// <summary>
