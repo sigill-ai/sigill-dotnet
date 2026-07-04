@@ -424,6 +424,107 @@ public class SealIntegrationTests
         capturedBody["qualified"]!.GetValue<bool>().Should().BeTrue();
     }
 
+    // -------------------------------------------------------------- pqc (hybrid)
+
+    [Fact]
+    public async Task SealCades_pqc_sends_sha512_and_flag()
+    {
+        JsonObject? capturedBody = null;
+        var handler = new FakeHandler(async req =>
+        {
+            req.RequestUri!.AbsolutePath.Should().Be("/seal/sign-hash");
+            capturedBody = (JsonObject)JsonNode.Parse(await req.Content!.ReadAsStringAsync())!;
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            { Content = new ByteArrayContent(new byte[] { 0x30, 0x03 }) };
+        });
+        var client = ClientWith(handler);
+
+        var data = Encoding.UTF8.GetBytes("quantum please");
+        await client.SealCadesAsync(data, Guid.NewGuid(), pqc: true);
+
+        capturedBody!["pqc"]!.GetValue<bool>().Should().BeTrue();
+        capturedBody["hashHex512"]!.GetValue<string>()
+            .Should().Be(Convert.ToHexString(SHA512.HashData(data)).ToLowerInvariant());
+    }
+
+    [Fact]
+    public async Task SealCades_without_pqc_omits_sha512()
+    {
+        JsonObject? capturedBody = null;
+        var handler = new FakeHandler(async req =>
+        {
+            capturedBody = (JsonObject)JsonNode.Parse(await req.Content!.ReadAsStringAsync())!;
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            { Content = new ByteArrayContent(new byte[] { 0x30, 0x00 }) };
+        });
+        var client = ClientWith(handler);
+
+        await client.SealCadesAsync(Encoding.UTF8.GetBytes("classic"), Guid.NewGuid());
+
+        capturedBody!.ContainsKey("pqc").Should().BeFalse();
+        capturedBody.ContainsKey("hashHex512").Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task VerifyCades_parses_post_quantum_dimension()
+    {
+        var fakeBody = """
+            {
+              "format": "cades",
+              "cades": {
+                "hashMatch": true,
+                "signatureValid": true,
+                "certificate": { "subject": "CN=Acme", "trust": "trusted_chain" },
+                "postQuantum": {
+                  "present": true, "valid": true, "signatureValid": true,
+                  "contentBound": "yes", "trusted": "not_evaluated", "algorithm": "ml-dsa-87"
+                }
+              }
+            }
+            """;
+        JsonObject? capturedBody = null;
+        var handler = new FakeHandler(async req =>
+        {
+            capturedBody = (JsonObject)JsonNode.Parse(await req.Content!.ReadAsStringAsync())!;
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            { Content = new StringContent(fakeBody, Encoding.UTF8, "application/json") };
+        });
+        var client = ClientWith(handler);
+
+        var data = Encoding.UTF8.GetBytes("quantum please");
+        var result = await client.VerifyCadesAsync(data, new byte[] { 0x30, 0x03 });
+
+        // verify always sends SHA-512 so hybrid content binding is checked
+        capturedBody!["hashHex512"]!.GetValue<string>()
+            .Should().Be(Convert.ToHexString(SHA512.HashData(data)).ToLowerInvariant());
+        result.IsValid.Should().BeTrue();          // classical governs the verdict
+        result.PostQuantum.Should().NotBeNull();
+        result.PostQuantum!.Present.Should().BeTrue();
+        result.PostQuantum.Valid.Should().BeTrue();
+        result.PostQuantum.ContentBound.Should().Be("yes");
+        result.PostQuantum.Trusted.Should().Be("not_evaluated");
+        result.PostQuantum.Algorithm.Should().Be("ml-dsa-87");
+    }
+
+    [Fact]
+    public async Task VerifyCades_classical_only_has_no_post_quantum()
+    {
+        var fakeBody = """
+            { "format": "cades", "cades": {
+                "hashMatch": true, "signatureValid": true,
+                "certificate": { "subject": "CN=Acme", "trust": "trusted_chain" } } }
+            """;
+        var handler = new FakeHandler(_ =>
+            Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+            { Content = new StringContent(fakeBody, Encoding.UTF8, "application/json") }));
+        var client = ClientWith(handler);
+
+        var result = await client.VerifyCadesAsync(Encoding.UTF8.GetBytes("classic"), new byte[] { 0x30, 0x00 });
+
+        result.IsValid.Should().BeTrue();
+        result.PostQuantum.Should().BeNull();
+    }
+
     // -------------------------------------------------------------- end-to-end
 
     [Fact]

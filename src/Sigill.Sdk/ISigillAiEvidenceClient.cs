@@ -40,14 +40,21 @@ public interface ISigillAiEvidenceClient
 
     /// <summary>
     /// CAdES-seal arbitrary data (JSON, binary, etc.) via <c>/seal/sign-hash</c>.
-    /// Only the SHA-256 digest is transmitted — the original document never leaves the machine.
+    /// Only digests are transmitted — the original document never leaves the machine.
     /// Returns the raw DER-encoded detached CAdES signature (.p7s bytes).
+    /// <para>
+    /// When <paramref name="pqc"/> is true, adds a post-quantum ML-DSA-87 (FIPS 204) signer
+    /// alongside the classical one in the same CMS — one .p7s, both independently verifiable.
+    /// The SHA-512 digest is computed locally and sent as the ML-DSA signer's messageDigest;
+    /// content still never leaves the machine. Requires a platform PQC certificate server-side.
+    /// </para>
     /// </summary>
     Task<byte[]> SealCadesAsync(
         byte[] data,
         Guid certificateId,
         string? label = null,
         bool qualified = false,
+        bool pqc = false,
         CancellationToken cancellationToken = default);
 
     /// <summary>

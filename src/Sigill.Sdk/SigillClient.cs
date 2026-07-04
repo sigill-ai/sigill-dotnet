@@ -111,6 +111,7 @@ public sealed class SigillClient : ISigillAiEvidenceClient, IDisposable
         Guid certificateId,
         string? label = null,
         bool qualified = false,
+        bool pqc = false,
         CancellationToken cancellationToken = default)
     {
         if (data is null) throw new ArgumentNullException(nameof(data));
@@ -123,6 +124,12 @@ public sealed class SigillClient : ISigillAiEvidenceClient, IDisposable
             ["qualified"] = qualified,
         };
         if (label is not null) requestBody["label"] = label;
+        if (pqc)
+        {
+            // Hybrid seal: the ML-DSA-87 signer commits to SHA-512 of the same content.
+            requestBody["pqc"] = true;
+            requestBody["hashHex512"] = EnvelopeHashing.HashHex(data, "SHA-512");
+        }
 
         using var resp = await _http.PostAsJsonAsync("/seal/sign-hash", requestBody, cancellationToken).ConfigureAwait(false);
         resp.EnsureSuccessStatusCode();
@@ -145,6 +152,10 @@ public sealed class SigillClient : ISigillAiEvidenceClient, IDisposable
         var requestBody = new JsonObject
         {
             ["hashHex"]   = EnvelopeHashing.HashHex(data),
+            // Always supply SHA-512 so a hybrid seal's ML-DSA content binding is
+            // actually checked (contentBound: "yes"/"no" rather than "not_checked").
+            // Ignored by the server for classical-only seals.
+            ["hashHex512"] = EnvelopeHashing.HashHex(data, "SHA-512"),
             ["p7sBase64"] = Convert.ToBase64String(p7s),
         };
         if (tsr is not null) requestBody["tsrBase64"] = Convert.ToBase64String(tsr);
@@ -166,6 +177,18 @@ public sealed class SigillClient : ISigillAiEvidenceClient, IDisposable
         if (cades["warnings"] is JsonArray wa)
             foreach (var w in wa) if (w?.GetValue<string>() is string s) warnings.Add(s);
 
+        PqcVerifyInfo? postQuantum = null;
+        if (cades["postQuantum"] is JsonObject pq && (pq["present"]?.GetValue<bool>() ?? false))
+        {
+            postQuantum = new PqcVerifyInfo(
+                Present:        true,
+                Valid:          pq["valid"]?.GetValue<bool>() ?? false,
+                SignatureValid: pq["signatureValid"]?.GetValue<bool>() ?? false,
+                ContentBound:   pq["contentBound"]?.GetValue<string>() ?? "not_checked",
+                Trusted:        pq["trusted"]?.GetValue<string>() ?? "not_evaluated",
+                Algorithm:      pq["algorithm"]?.GetValue<string>() ?? "ml-dsa-87");
+        }
+
         return new CadesVerifyResult(
             IsValid:        hashMatch && signatureValid && error is null,
             HashMatch:      hashMatch,
@@ -176,7 +199,8 @@ public sealed class SigillClient : ISigillAiEvidenceClient, IDisposable
             GenTime:        ts["genTime"]?.GetValue<string>(),
             Qualified:      qualSrc is not null && qualSrc != "none",
             Error:          error,
-            Warnings:       warnings);
+            Warnings:       warnings,
+            PostQuantum:    postQuantum);
     }
 
     private async Task<JsonObject> StampAsync(string hashHex, SealOptions options, CancellationToken ct)

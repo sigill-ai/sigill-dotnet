@@ -18,7 +18,13 @@ namespace Sigill.Sdk;
 ///   <item><see cref="Qualified"/> — true if the TSA qualification source is LOTL or QC statement.</item>
 ///   <item><see cref="Error"/> — server error message, or null on success.</item>
 ///   <item><see cref="Warnings"/> — non-fatal warnings from the server verifier.</item>
+///   <item><see cref="PostQuantum"/> — non-null when the seal carries an ML-DSA-87 signer.</item>
 /// </list>
+/// <para>
+/// <see cref="IsValid"/> reflects the classical signer only — the legal instrument.
+/// The post-quantum signer is reported separately via <see cref="PostQuantum"/> and
+/// is additive (quantum-resistant protection, not a qualified/legal upgrade).
+/// </para>
 /// </summary>
 public sealed record CadesVerifyResult(
     bool IsValid,
@@ -30,7 +36,27 @@ public sealed record CadesVerifyResult(
     string? GenTime,
     bool Qualified,
     string? Error,
-    IReadOnlyList<string> Warnings);
+    IReadOnlyList<string> Warnings,
+    PqcVerifyInfo? PostQuantum = null);
+
+/// <summary>
+/// Post-quantum dimension of a CAdES verification (the ML-DSA-87 SignerInfo).
+/// <list type="bullet">
+///   <item><see cref="Present"/> — an ML-DSA signer is present in the CMS.</item>
+///   <item><see cref="SignatureValid"/> — the ML-DSA signature over its signedAttrs verified.</item>
+///   <item><see cref="ContentBound"/> — "yes" | "no" | "not_checked" (the last when no SHA-512 was supplied on the hash-based path).</item>
+///   <item><see cref="Trusted"/> — "yes" | "no" | "not_evaluated" (self-signed platform certs are "not_evaluated").</item>
+///   <item><see cref="Valid"/> — signature verified AND content bound; convenience roll-up.</item>
+///   <item><see cref="Algorithm"/> — e.g. "ml-dsa-87".</item>
+/// </list>
+/// </summary>
+public sealed record PqcVerifyInfo(
+    bool Present,
+    bool Valid,
+    bool SignatureValid,
+    string ContentBound,
+    string Trusted,
+    string Algorithm);
 
 /// <summary>
 /// The four documented verification failure kinds from spec §7.

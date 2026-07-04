@@ -151,6 +151,31 @@ Console.WriteLine(result.Trust);    // "trusted_chain"
 Console.WriteLine(result.GenTime);  // "2026-06-25T16:49:04Z"
 ```
 
+### Post-quantum (hybrid) sealing
+
+Pass `pqc: true` to add a post-quantum **ML-DSA-87** (FIPS 204) signer alongside
+the classical one — a single `.p7s` with two independently-verifiable signatures
+(RFC 5652 §5.1 + RFC 9882). Content still never leaves your system (only SHA-256
+and SHA-512 digests are sent).
+
+```csharp
+byte[] p7s = await client.SealCadesAsync(document, certId, label: "decision.json", pqc: true);
+
+CadesVerifyResult result = await client.VerifyCadesAsync(document, p7s);
+Debug.Assert(result.IsValid);                     // classical signer — the legal instrument
+if (result.PostQuantum is { } pqc)
+{
+    Console.WriteLine(pqc.Algorithm);             // "ml-dsa-87"
+    Console.WriteLine(pqc.SignatureValid);        // true
+    Console.WriteLine(pqc.ContentBound);          // "yes"
+    Console.WriteLine(pqc.Trusted);               // "not_evaluated" (self-signed platform cert)
+}
+```
+
+`IsValid` reflects the classical signer only — the post-quantum signer is
+additive (quantum-resistant protection, not a qualified/legal upgrade), and is
+reported separately via `result.PostQuantum`.
+
 `CadesVerifyResult` properties:
 
 | Property | Type | Meaning |
