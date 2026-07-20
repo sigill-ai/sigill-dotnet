@@ -58,6 +58,28 @@ public interface ISigillAiEvidenceClient
         CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// PAdES-seal a PDF without the PDF ever leaving the machine (delegated
+    /// signing via <c>/seal/sign-pades-hash</c>). The SDK assembles the PDF
+    /// signature revision locally, transmits only the ByteRange digest, embeds
+    /// the returned CMS, and — with <see cref="PadesSealOptions.Ltv"/> (default) —
+    /// upgrades to B-LT/B-LTA by embedding the Document Security Store and a
+    /// DocTimeStamp obtained via <c>/tsa/stamp-hash</c>.
+    /// <para>
+    /// Throws <see cref="SigillPdfUnsupportedException"/> when the local parser
+    /// cannot handle the PDF's structure. With
+    /// <see cref="PadesSealOptions.AllowUploadFallback"/> (opt-in, default off)
+    /// such documents are instead sealed server-side via <c>POST /seal/sign</c>
+    /// — identical PAdES output, but the PDF is transmitted. By default the SDK
+    /// transmits nothing but digests.
+    /// </para>
+    /// </summary>
+    Task<PadesSealResult> SealPadesAsync(
+        byte[] pdf,
+        Guid certificateId,
+        PadesSealOptions? options = null,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// Verify a detached CAdES signature via <c>POST /seal/verify</c>. The endpoint
     /// is public — no API key is required — but the existing HTTP client works fine.
     /// </summary>

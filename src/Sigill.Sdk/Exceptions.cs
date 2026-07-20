@@ -72,6 +72,22 @@ public sealed class SigillTimestampUnavailableException : SigillException
     }
 }
 
+/// <summary>
+/// The local PDF parser cannot handle this PDF's structure (e.g. an object
+/// stream with an exotic filter or /Predictor, or a pathological page tree).
+/// The document is fine — it just needs the server-side path: upload it to
+/// <c>POST /seal/sign</c>, either manually or by opting in to
+/// <see cref="PadesSealOptions.AllowUploadFallback"/>. Note that path
+/// transmits the PDF to Sigill; by default the SDK never does so.
+/// </summary>
+public sealed class SigillPdfUnsupportedException : SigillException
+{
+    public SigillPdfUnsupportedException(string message, Exception inner)
+        : base(message + " — this PDF's structure is not supported by local (hash-only) sealing. " +
+               "Seal it server-side via POST /seal/sign, or opt in with PadesSealOptions.AllowUploadFallback " +
+               "(that path transmits the PDF to Sigill).", inner) { }
+}
+
 /// <summary>One entry in the failure list returned by Sigill on a 502.</summary>
 public sealed record TsaFailure(
     string Tsa,
