@@ -198,6 +198,39 @@ pass it as `tsr:`:
 var result = await client.VerifyCadesAsync(document, p7s, tsr: tsrBytes);
 ```
 
+## JAdES sealing for JSON
+
+For JSON and JSONL content — API payloads, agent logs, AI evidence — prefer
+**JAdES** (ETSI TS 119 182-1), the ETSI signature format for JSON. Same
+detached, hash-only model as CAdES: only digests are transmitted, and the
+returned `.jades.json` artifact verifies against the exact original bytes
+(re-serializing the JSON breaks it by design).
+
+```csharp
+var log = File.ReadAllBytes("agent-log.json");
+
+byte[] jades = await client.SealJadesAsync(log, certId,
+    label: "agent-log.json", contentType: "application/json");
+// store agent-log.json.jades.json alongside the log
+
+JadesVerifyResult result = await client.VerifyJadesAsync(log, jades);
+Debug.Assert(result.IsValid);
+```
+
+`pqc: true` works here too — the ML-DSA-87 signer is added as a second JWS
+`signatures[]` entry (RFC 9964). `JadesVerifyResult` has the same fields as
+`CadesVerifyResult`.
+
+To seal an AI evidence envelope with a JAdES organisation seal in addition to
+its RFC 3161 proof, sign the canonical bytes:
+
+```csharp
+var sealed_ = await client.SealAsync(input, payloads);
+byte[] canonical = EnvelopeHashing.Canonicalize(sealed_.Json);  // full sealed envelope, proofs included
+byte[] jades = await client.SealJadesAsync(canonical, certId,
+    label: "envelope.jades.json", contentType: "application/json");
+```
+
 ## PAdES PDF sealing — the PDF never leaves your machine
 
 For PDFs, the SDK produces an embedded **PAdES** signature (ETSI EN 319 142-1)

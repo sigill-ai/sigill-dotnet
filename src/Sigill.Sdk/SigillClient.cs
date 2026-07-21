@@ -311,21 +311,122 @@ public sealed class SigillClient : ISigillAiEvidenceClient, IDisposable
         resp.EnsureSuccessStatusCode();
 
         var body = (await resp.Content.ReadFromJsonAsync<JsonObject>(cancellationToken: cancellationToken).ConfigureAwait(false))!;
-        var cades = body["cades"] as JsonObject ?? new JsonObject();
-        var cert  = cades["certificate"] as JsonObject ?? new JsonObject();
-        var ts    = cades["timestamp"]   as JsonObject ?? new JsonObject();
+        var m = MapDetachedVerify(body["cades"] as JsonObject ?? new JsonObject());
 
-        var hashMatch      = cades["hashMatch"]?.GetValue<bool>()      ?? false;
-        var signatureValid = cades["signatureValid"]?.GetValue<bool>()  ?? false;
-        var error          = cades["error"]?.GetValue<string>();
-        var qualSrc        = ts["qualificationSource"]?.GetValue<string>() ?? "none";
+        return new CadesVerifyResult(
+            IsValid:        m.HashMatch && m.SignatureValid && m.Error is null,
+            HashMatch:      m.HashMatch,
+            SignatureValid: m.SignatureValid,
+            Signer:         m.Signer,
+            Trust:          m.Trust,
+            TsaName:        m.TsaName,
+            GenTime:        m.GenTime,
+            Qualified:      m.Qualified,
+            Error:          m.Error,
+            Warnings:       m.Warnings,
+            PostQuantum:    m.PostQuantum);
+    }
+
+    // ========================================================== seal jades
+
+    /// <inheritdoc/>
+    public async Task<byte[]> SealJadesAsync(
+        byte[] data,
+        Guid certificateId,
+        string? label = null,
+        bool qualified = false,
+        bool pqc = false,
+        string? contentType = null,
+        CancellationToken cancellationToken = default)
+    {
+        if (data is null) throw new ArgumentNullException(nameof(data));
+
+        var requestBody = new JsonObject
+        {
+            ["hashHex"] = EnvelopeHashing.HashHex(data),
+            ["certificateId"] = certificateId.ToString(),
+            ["qualified"] = qualified,
+            ["format"] = "jades",
+        };
+        if (label is not null) requestBody["label"] = label;
+        if (contentType is not null) requestBody["contentType"] = contentType;
+        if (pqc)
+        {
+            // Hybrid seal: the ML-DSA-87 signer commits to SHA-512 of the same content.
+            requestBody["pqc"] = true;
+            requestBody["hashHex512"] = EnvelopeHashing.HashHex(data, "SHA-512");
+        }
+
+        using var resp = await _http.PostAsJsonAsync("/seal/sign-hash", requestBody, cancellationToken).ConfigureAwait(false);
+        resp.EnsureSuccessStatusCode();
+
+        return await resp.Content.ReadAsByteArrayAsync().ConfigureAwait(false);
+    }
+
+    // ======================================================== verify jades
+
+    /// <inheritdoc/>
+    public async Task<JadesVerifyResult> VerifyJadesAsync(
+        byte[] data,
+        byte[] jades,
+        byte[]? tsr = null,
+        CancellationToken cancellationToken = default)
+    {
+        if (data  is null) throw new ArgumentNullException(nameof(data));
+        if (jades is null) throw new ArgumentNullException(nameof(jades));
+
+        // /seal/verify-hash routes on the artifact bytes (JSON text → JAdES,
+        // DER → CAdES); p7sBase64 doubles as the artifact carrier.
+        var requestBody = new JsonObject
+        {
+            ["hashHex"]    = EnvelopeHashing.HashHex(data),
+            ["hashHex512"] = EnvelopeHashing.HashHex(data, "SHA-512"),
+            ["p7sBase64"]  = Convert.ToBase64String(jades),
+        };
+        if (tsr is not null) requestBody["tsrBase64"] = Convert.ToBase64String(tsr);
+
+        using var resp = await _http.PostAsJsonAsync("/seal/verify-hash", requestBody, cancellationToken).ConfigureAwait(false);
+        resp.EnsureSuccessStatusCode();
+
+        var body = (await resp.Content.ReadFromJsonAsync<JsonObject>(cancellationToken: cancellationToken).ConfigureAwait(false))!;
+        var m = MapDetachedVerify(body["jades"] as JsonObject ?? new JsonObject());
+
+        return new JadesVerifyResult(
+            IsValid:        m.HashMatch && m.SignatureValid && m.Error is null,
+            HashMatch:      m.HashMatch,
+            SignatureValid: m.SignatureValid,
+            Signer:         m.Signer,
+            Trust:          m.Trust,
+            TsaName:        m.TsaName,
+            GenTime:        m.GenTime,
+            Qualified:      m.Qualified,
+            Error:          m.Error,
+            Warnings:       m.Warnings,
+            PostQuantum:    m.PostQuantum);
+    }
+
+    private sealed record DetachedVerifyFields(
+        bool HashMatch, bool SignatureValid, string? Signer, string? Trust,
+        string? TsaName, string? GenTime, bool Qualified, string? Error,
+        List<string> Warnings, PqcVerifyInfo? PostQuantum);
+
+    /// <summary>
+    /// Shared field extraction for the CAdES and JAdES branches of
+    /// <c>/seal/verify-hash</c> — the two verifiers report the same dimensions.
+    /// </summary>
+    private static DetachedVerifyFields MapDetachedVerify(JsonObject node)
+    {
+        var cert = node["certificate"] as JsonObject ?? new JsonObject();
+        var ts   = node["timestamp"]   as JsonObject ?? new JsonObject();
+
+        var qualSrc = ts["qualificationSource"]?.GetValue<string>() ?? "none";
 
         var warnings = new List<string>();
-        if (cades["warnings"] is JsonArray wa)
+        if (node["warnings"] is JsonArray wa)
             foreach (var w in wa) if (w?.GetValue<string>() is string s) warnings.Add(s);
 
         PqcVerifyInfo? postQuantum = null;
-        if (cades["postQuantum"] is JsonObject pq && (pq["present"]?.GetValue<bool>() ?? false))
+        if (node["postQuantum"] is JsonObject pq && (pq["present"]?.GetValue<bool>() ?? false))
         {
             postQuantum = new PqcVerifyInfo(
                 Present:        true,
@@ -336,16 +437,15 @@ public sealed class SigillClient : ISigillAiEvidenceClient, IDisposable
                 Algorithm:      pq["algorithm"]?.GetValue<string>() ?? "ml-dsa-87");
         }
 
-        return new CadesVerifyResult(
-            IsValid:        hashMatch && signatureValid && error is null,
-            HashMatch:      hashMatch,
-            SignatureValid: signatureValid,
+        return new DetachedVerifyFields(
+            HashMatch:      node["hashMatch"]?.GetValue<bool>() ?? false,
+            SignatureValid: node["signatureValid"]?.GetValue<bool>() ?? false,
             Signer:         cert["subject"]?.GetValue<string>(),
             Trust:          cert["trust"]?.GetValue<string>(),
             TsaName:        ts["tsaName"]?.GetValue<string>(),
             GenTime:        ts["genTime"]?.GetValue<string>(),
             Qualified:      qualSrc is not null && qualSrc != "none",
-            Error:          error,
+            Error:          node["error"]?.GetValue<string>(),
             Warnings:       warnings,
             PostQuantum:    postQuantum);
     }

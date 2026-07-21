@@ -40,6 +40,26 @@ public sealed record CadesVerifyResult(
     PqcVerifyInfo? PostQuantum = null);
 
 /// <summary>
+/// Result of <see cref="ISigillAiEvidenceClient.VerifyJadesAsync"/> — server-side
+/// verification of a detached JAdES signature (ETSI TS 119 182-1). Same
+/// dimensions and semantics as <see cref="CadesVerifyResult"/>: JAdES shares the
+/// detached, hash-only model — only digests and the signature artifact are
+/// transmitted.
+/// </summary>
+public sealed record JadesVerifyResult(
+    bool IsValid,
+    bool HashMatch,
+    bool SignatureValid,
+    string? Signer,
+    string? Trust,
+    string? TsaName,
+    string? GenTime,
+    bool Qualified,
+    string? Error,
+    IReadOnlyList<string> Warnings,
+    PqcVerifyInfo? PostQuantum = null);
+
+/// <summary>
 /// Post-quantum dimension of a CAdES verification (the ML-DSA-87 SignerInfo).
 /// <list type="bullet">
 ///   <item><see cref="Present"/> — an ML-DSA signer is present in the CMS.</item>
