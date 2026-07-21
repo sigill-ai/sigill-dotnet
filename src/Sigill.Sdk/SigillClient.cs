@@ -137,6 +137,153 @@ public sealed class SigillClient : ISigillAiEvidenceClient, IDisposable
         return await resp.Content.ReadAsByteArrayAsync().ConfigureAwait(false);
     }
 
+    // ========================================================== seal pades
+
+    /// <inheritdoc/>
+    public async Task<PadesSealResult> SealPadesAsync(
+        byte[] pdf,
+        Guid certificateId,
+        PadesSealOptions? options = null,
+        CancellationToken cancellationToken = default)
+    {
+        if (pdf is null) throw new ArgumentNullException(nameof(pdf));
+        options ??= new PadesSealOptions();
+
+        // 1. Assemble the signature revision locally: placeholder /Contents slot,
+        // ByteRange, and the digests over the signed ranges. Only these digests
+        // are ever transmitted.
+        PdfIncrementalSigner.PreparedPdf prep;
+        try
+        {
+            prep = PdfIncrementalSigner.Prepare(
+                pdf, DateTime.UtcNow, options.Reason, options.Location);
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or NotSupportedException or KeyNotFoundException)
+        {
+            if (!options.AllowUploadFallback)
+                throw new SigillPdfUnsupportedException(ex.Message, ex);
+            // Explicit opt-in: server-side sealing with the full parser. This is
+            // the one code path in the SDK that transmits the PDF itself.
+            return await SealPadesByUploadAsync(pdf, certificateId, options, cancellationToken).ConfigureAwait(false);
+        }
+
+        // 2. hash → Sigill → CMS (+ LTV material for the DSS).
+        var requestBody = new JsonObject
+        {
+            ["hashHex"] = EnvelopeHashing.ToLowerHex(prep.DocumentHash),
+            ["certificateId"] = certificateId.ToString(),
+            ["qualified"] = options.Qualified,
+        };
+        if (options.Label is not null) requestBody["label"] = options.Label;
+
+        using var resp = await _http.PostAsJsonAsync("/seal/sign-pades-hash", requestBody, cancellationToken).ConfigureAwait(false);
+        resp.EnsureSuccessStatusCode();
+        var body = (await resp.Content.ReadFromJsonAsync<JsonObject>(cancellationToken: cancellationToken).ConfigureAwait(false))!;
+
+        var cms = Convert.FromBase64String(body["cmsBase64"]!.GetValue<string>());
+        var operationId   = Guid.Parse(body["operationId"]!.GetValue<string>());
+        var timestampedBy = body["timestampedBy"]?.GetValue<string>();
+        var qualified     = body["qualified"]?.GetValue<bool>() ?? false;
+
+        var certDers = ReadDerArray(body["certChainDers"]);
+        var ocspDers = ReadDerArray(body["ocspDers"]);
+
+        // 3. Embed the CMS into the reserved slot.
+        var signedPdf = PdfIncrementalSigner.Embed(prep, cms);
+
+        // 4. Optional LTV: DSS (B-LT) + DocTimeStamp (B-LTA), both assembled
+        // locally. Mirrors the server-side /seal/sign pipeline: the DocTimeStamp
+        // is best-effort — a timestamp failure leaves a valid B-LT PDF.
+        bool hasDss = false, hasDocTs = false;
+        if (options.Ltv && (certDers.Length > 0 || ocspDers.Length > 0))
+        {
+            signedPdf = PdfIncrementalSigner.AppendDss(signedPdf, certDers, ocspDers, cms);
+            hasDss = true;
+
+            try
+            {
+                var dtPrep = PdfIncrementalSigner.PrepareDocTimestamp(signedPdf, DateTime.UtcNow);
+                var stampBody = new JsonObject
+                {
+                    ["tsaSlug"] = "auto",
+                    ["hashHex"] = EnvelopeHashing.ToLowerHex(dtPrep.DocumentHash),
+                    ["qualified"] = options.Qualified,
+                };
+                if (options.Label is not null) stampBody["label"] = options.Label;
+
+                using var dtResp = await _http.PostAsJsonAsync("/tsa/stamp-hash", stampBody, cancellationToken).ConfigureAwait(false);
+                dtResp.EnsureSuccessStatusCode();
+                var dtData = (await dtResp.Content.ReadFromJsonAsync<JsonObject>(cancellationToken: cancellationToken).ConfigureAwait(false))!;
+                var tokenDer = Convert.FromBase64String(dtData["tokenBase64"]!.GetValue<string>());
+
+                signedPdf = PdfIncrementalSigner.EmbedDocTimestamp(dtPrep, tokenDer);
+                hasDocTs = true;
+            }
+            catch (OperationCanceledException) { throw; }
+            catch
+            {
+                // B-LT is still a valid, LTV-enabled seal; the archival timestamp
+                // can be added later by re-sealing or via the server-side path.
+            }
+        }
+
+        // Same format ladder as the server-side /seal/sign PDF branch.
+        var format = timestampedBy is null ? "pades-bes"
+            : !hasDss   ? "pades-b-t"
+            : !hasDocTs ? "pades-b-lt"
+            : "pades-b-lta";
+
+        return new PadesSealResult(
+            SealedPdf:     signedPdf,
+            OperationId:   operationId,
+            Format:        format,
+            TimestampedBy: timestampedBy,
+            Qualified:     qualified);
+    }
+
+    /// <summary>
+    /// Upload fallback (opt-in via <see cref="PadesSealOptions.AllowUploadFallback"/>):
+    /// server-side PAdES sealing through <c>POST /seal/sign</c>. Same output
+    /// levels as the delegated path; the server handles DSS + DocTimeStamp.
+    /// </summary>
+    private async Task<PadesSealResult> SealPadesByUploadAsync(
+        byte[] pdf, Guid certificateId, PadesSealOptions options, CancellationToken ct)
+    {
+        using var form = new MultipartFormDataContent();
+        var filePart = new ByteArrayContent(pdf);
+        filePart.Headers.ContentType = new MediaTypeHeaderValue("application/pdf");
+        form.Add(filePart, "file", options.Label ?? "document.pdf");
+        form.Add(new StringContent(certificateId.ToString()), "certificateId");
+        form.Add(new StringContent(options.Qualified ? "true" : "false"), "qualified");
+        if (options.Label is not null)    form.Add(new StringContent(options.Label), "label");
+        if (options.Reason is not null)   form.Add(new StringContent(options.Reason), "reason");
+        if (options.Location is not null) form.Add(new StringContent(options.Location), "location");
+
+        using var resp = await _http.PostAsync("/seal/sign", form, ct).ConfigureAwait(false);
+        resp.EnsureSuccessStatusCode();
+
+        static string? Header(HttpResponseMessage r, string name) =>
+            r.Headers.TryGetValues(name, out var v) ? v.FirstOrDefault() : null;
+
+        var tsaName = Header(resp, "X-Seal-Timestamped-By");
+        return new PadesSealResult(
+            SealedPdf:     await resp.Content.ReadAsByteArrayAsync().ConfigureAwait(false),
+            OperationId:   Guid.TryParse(Header(resp, "X-Seal-Operation-Id"), out var opId) ? opId : Guid.Empty,
+            Format:        Header(resp, "X-Seal-Format") ?? "pades-bes",
+            TimestampedBy: tsaName is null or "none" ? null : tsaName,
+            Qualified:     string.Equals(Header(resp, "X-Seal-Qualified"), "true", StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static byte[][] ReadDerArray(JsonNode? node)
+    {
+        if (node is not JsonArray arr || arr.Count == 0) return Array.Empty<byte[]>();
+        var result = new List<byte[]>(arr.Count);
+        foreach (var item in arr)
+            if (item?.GetValue<string>() is string b64)
+                result.Add(Convert.FromBase64String(b64));
+        return result.ToArray();
+    }
+
     // ======================================================== verify cades
 
     /// <inheritdoc/>
@@ -164,21 +311,122 @@ public sealed class SigillClient : ISigillAiEvidenceClient, IDisposable
         resp.EnsureSuccessStatusCode();
 
         var body = (await resp.Content.ReadFromJsonAsync<JsonObject>(cancellationToken: cancellationToken).ConfigureAwait(false))!;
-        var cades = body["cades"] as JsonObject ?? new JsonObject();
-        var cert  = cades["certificate"] as JsonObject ?? new JsonObject();
-        var ts    = cades["timestamp"]   as JsonObject ?? new JsonObject();
+        var m = MapDetachedVerify(body["cades"] as JsonObject ?? new JsonObject());
 
-        var hashMatch      = cades["hashMatch"]?.GetValue<bool>()      ?? false;
-        var signatureValid = cades["signatureValid"]?.GetValue<bool>()  ?? false;
-        var error          = cades["error"]?.GetValue<string>();
-        var qualSrc        = ts["qualificationSource"]?.GetValue<string>() ?? "none";
+        return new CadesVerifyResult(
+            IsValid:        m.HashMatch && m.SignatureValid && m.Error is null,
+            HashMatch:      m.HashMatch,
+            SignatureValid: m.SignatureValid,
+            Signer:         m.Signer,
+            Trust:          m.Trust,
+            TsaName:        m.TsaName,
+            GenTime:        m.GenTime,
+            Qualified:      m.Qualified,
+            Error:          m.Error,
+            Warnings:       m.Warnings,
+            PostQuantum:    m.PostQuantum);
+    }
+
+    // ========================================================== seal jades
+
+    /// <inheritdoc/>
+    public async Task<byte[]> SealJadesAsync(
+        byte[] data,
+        Guid certificateId,
+        string? label = null,
+        bool qualified = false,
+        bool pqc = false,
+        string? contentType = null,
+        CancellationToken cancellationToken = default)
+    {
+        if (data is null) throw new ArgumentNullException(nameof(data));
+
+        var requestBody = new JsonObject
+        {
+            ["hashHex"] = EnvelopeHashing.HashHex(data),
+            ["certificateId"] = certificateId.ToString(),
+            ["qualified"] = qualified,
+            ["format"] = "jades",
+        };
+        if (label is not null) requestBody["label"] = label;
+        if (contentType is not null) requestBody["contentType"] = contentType;
+        if (pqc)
+        {
+            // Hybrid seal: the ML-DSA-87 signer commits to SHA-512 of the same content.
+            requestBody["pqc"] = true;
+            requestBody["hashHex512"] = EnvelopeHashing.HashHex(data, "SHA-512");
+        }
+
+        using var resp = await _http.PostAsJsonAsync("/seal/sign-hash", requestBody, cancellationToken).ConfigureAwait(false);
+        resp.EnsureSuccessStatusCode();
+
+        return await resp.Content.ReadAsByteArrayAsync().ConfigureAwait(false);
+    }
+
+    // ======================================================== verify jades
+
+    /// <inheritdoc/>
+    public async Task<JadesVerifyResult> VerifyJadesAsync(
+        byte[] data,
+        byte[] jades,
+        byte[]? tsr = null,
+        CancellationToken cancellationToken = default)
+    {
+        if (data  is null) throw new ArgumentNullException(nameof(data));
+        if (jades is null) throw new ArgumentNullException(nameof(jades));
+
+        // /seal/verify-hash routes on the artifact bytes (JSON text → JAdES,
+        // DER → CAdES); p7sBase64 doubles as the artifact carrier.
+        var requestBody = new JsonObject
+        {
+            ["hashHex"]    = EnvelopeHashing.HashHex(data),
+            ["hashHex512"] = EnvelopeHashing.HashHex(data, "SHA-512"),
+            ["p7sBase64"]  = Convert.ToBase64String(jades),
+        };
+        if (tsr is not null) requestBody["tsrBase64"] = Convert.ToBase64String(tsr);
+
+        using var resp = await _http.PostAsJsonAsync("/seal/verify-hash", requestBody, cancellationToken).ConfigureAwait(false);
+        resp.EnsureSuccessStatusCode();
+
+        var body = (await resp.Content.ReadFromJsonAsync<JsonObject>(cancellationToken: cancellationToken).ConfigureAwait(false))!;
+        var m = MapDetachedVerify(body["jades"] as JsonObject ?? new JsonObject());
+
+        return new JadesVerifyResult(
+            IsValid:        m.HashMatch && m.SignatureValid && m.Error is null,
+            HashMatch:      m.HashMatch,
+            SignatureValid: m.SignatureValid,
+            Signer:         m.Signer,
+            Trust:          m.Trust,
+            TsaName:        m.TsaName,
+            GenTime:        m.GenTime,
+            Qualified:      m.Qualified,
+            Error:          m.Error,
+            Warnings:       m.Warnings,
+            PostQuantum:    m.PostQuantum);
+    }
+
+    private sealed record DetachedVerifyFields(
+        bool HashMatch, bool SignatureValid, string? Signer, string? Trust,
+        string? TsaName, string? GenTime, bool Qualified, string? Error,
+        List<string> Warnings, PqcVerifyInfo? PostQuantum);
+
+    /// <summary>
+    /// Shared field extraction for the CAdES and JAdES branches of
+    /// <c>/seal/verify-hash</c> — the two verifiers report the same dimensions.
+    /// </summary>
+    private static DetachedVerifyFields MapDetachedVerify(JsonObject node)
+    {
+        var cert = node["certificate"] as JsonObject ?? new JsonObject();
+        var ts   = node["timestamp"]   as JsonObject ?? new JsonObject();
+
+        var qualSrc = ts["qualificationSource"]?.GetValue<string>() ?? "none";
 
         var warnings = new List<string>();
-        if (cades["warnings"] is JsonArray wa)
+        if (node["warnings"] is JsonArray wa)
             foreach (var w in wa) if (w?.GetValue<string>() is string s) warnings.Add(s);
 
         PqcVerifyInfo? postQuantum = null;
-        if (cades["postQuantum"] is JsonObject pq && (pq["present"]?.GetValue<bool>() ?? false))
+        if (node["postQuantum"] is JsonObject pq && (pq["present"]?.GetValue<bool>() ?? false))
         {
             postQuantum = new PqcVerifyInfo(
                 Present:        true,
@@ -189,16 +437,15 @@ public sealed class SigillClient : ISigillAiEvidenceClient, IDisposable
                 Algorithm:      pq["algorithm"]?.GetValue<string>() ?? "ml-dsa-87");
         }
 
-        return new CadesVerifyResult(
-            IsValid:        hashMatch && signatureValid && error is null,
-            HashMatch:      hashMatch,
-            SignatureValid: signatureValid,
+        return new DetachedVerifyFields(
+            HashMatch:      node["hashMatch"]?.GetValue<bool>() ?? false,
+            SignatureValid: node["signatureValid"]?.GetValue<bool>() ?? false,
             Signer:         cert["subject"]?.GetValue<string>(),
             Trust:          cert["trust"]?.GetValue<string>(),
             TsaName:        ts["tsaName"]?.GetValue<string>(),
             GenTime:        ts["genTime"]?.GetValue<string>(),
             Qualified:      qualSrc is not null && qualSrc != "none",
-            Error:          error,
+            Error:          node["error"]?.GetValue<string>(),
             Warnings:       warnings,
             PostQuantum:    postQuantum);
     }

@@ -58,12 +58,65 @@ public interface ISigillAiEvidenceClient
         CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// PAdES-seal a PDF without the PDF ever leaving the machine (delegated
+    /// signing via <c>/seal/sign-pades-hash</c>). The SDK assembles the PDF
+    /// signature revision locally, transmits only the ByteRange digest, embeds
+    /// the returned CMS, and — with <see cref="PadesSealOptions.Ltv"/> (default) —
+    /// upgrades to B-LT/B-LTA by embedding the Document Security Store and a
+    /// DocTimeStamp obtained via <c>/tsa/stamp-hash</c>.
+    /// <para>
+    /// Throws <see cref="SigillPdfUnsupportedException"/> when the local parser
+    /// cannot handle the PDF's structure. With
+    /// <see cref="PadesSealOptions.AllowUploadFallback"/> (opt-in, default off)
+    /// such documents are instead sealed server-side via <c>POST /seal/sign</c>
+    /// — identical PAdES output, but the PDF is transmitted. By default the SDK
+    /// transmits nothing but digests.
+    /// </para>
+    /// </summary>
+    Task<PadesSealResult> SealPadesAsync(
+        byte[] pdf,
+        Guid certificateId,
+        PadesSealOptions? options = null,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// JAdES-seal data via <c>/seal/sign-hash</c> with <c>format: "jades"</c> —
+    /// the ETSI signature format for JSON (TS 119 182-1), the natural fit for
+    /// JSON/JSONL content such as AI evidence and agent logs. Only digests are
+    /// transmitted; returns the detached <c>.jades.json</c> artifact bytes.
+    /// The seal covers the exact bytes — re-serializing the JSON breaks it by design.
+    /// <para>
+    /// When <paramref name="pqc"/> is true, adds an ML-DSA-87 signer as a second
+    /// JWS <c>signatures[]</c> entry (RFC 9964), same hybrid model as CAdES.
+    /// </para>
+    /// </summary>
+    Task<byte[]> SealJadesAsync(
+        byte[] data,
+        Guid certificateId,
+        string? label = null,
+        bool qualified = false,
+        bool pqc = false,
+        string? contentType = null,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// Verify a detached CAdES signature via <c>POST /seal/verify</c>. The endpoint
     /// is public — no API key is required — but the existing HTTP client works fine.
     /// </summary>
     Task<CadesVerifyResult> VerifyCadesAsync(
         byte[] data,
         byte[] p7s,
+        byte[]? tsr = null,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Verify a detached JAdES signature via <c>POST /seal/verify-hash</c> —
+    /// hash-only, the original content never leaves the machine. The endpoint is
+    /// public — no API key is required — but the existing HTTP client works fine.
+    /// </summary>
+    Task<JadesVerifyResult> VerifyJadesAsync(
+        byte[] data,
+        byte[] jades,
         byte[]? tsr = null,
         CancellationToken cancellationToken = default);
 
