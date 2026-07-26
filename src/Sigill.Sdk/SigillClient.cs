@@ -208,6 +208,11 @@ public sealed class SigillClient : ISigillAiEvidenceClient, IDisposable
                     ["tsaSlug"] = "auto",
                     ["hashHex"] = EnvelopeHashing.ToLowerHex(dtPrep.DocumentHash),
                     ["qualified"] = options.Qualified,
+                    // Ties the archival DocTimeStamp to its seal operation so the
+                    // platform's evidence view can track — and archival-restamp —
+                    // the token that governs the B-LTA horizon. Older platforms
+                    // without the field simply ignore it.
+                    ["sealOperationId"] = operationId.ToString(),
                 };
                 if (options.Label is not null) stampBody["label"] = options.Label;
 

@@ -189,6 +189,12 @@ public class PadesSealTests
         handler.Calls.Select(c => c.Path).Should().Equal("/seal/sign-pades-hash", "/tsa/stamp-hash");
         result.Format.Should().Be("pades-b-lta");
 
+        // The DocTimeStamp stamp call must carry the seal-operation link so the
+        // platform can attach the archival token to the operation's evidence.
+        var stampSent = JsonNode.Parse(handler.Calls[1].Body)!.AsObject();
+        stampSent["sealOperationId"]!.GetValue<string>()
+            .Should().Be("6a1e12e8-6bb9-4d0e-9f6e-1c2d3e4f5a6b");
+
         var text = Encoding.ASCII.GetString(result.SealedPdf);
         text.Should().Contain("/Type /DSS");
         text.Should().Contain("/VRI");
