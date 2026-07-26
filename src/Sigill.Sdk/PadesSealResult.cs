@@ -25,6 +25,16 @@ public sealed record PadesSealOptions
     public bool Ltv { get; init; } = true;
 
     /// <summary>
+    /// Expiry-reminder policy for the created evidence: null/"inherit" follows
+    /// the tenant default, "on" forces reminders, "off" mutes the evidence
+    /// (e.g. short-lived artifacts that will never need renewal).
+    /// </summary>
+    public string? Reminders { get; init; }
+
+    /// <summary>Reminder threshold override in days (30/60/90/180) when Reminders is "on".</summary>
+    public int? ReminderDays { get; init; }
+
+    /// <summary>
     /// When the local PDF parser cannot handle the document's structure, fall
     /// back to server-side sealing by uploading the PDF to <c>POST /seal/sign</c>
     /// (identical PAdES output, but the PDF is transmitted to Sigill).

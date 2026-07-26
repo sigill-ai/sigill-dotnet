@@ -175,6 +175,8 @@ public sealed class SigillClient : ISigillAiEvidenceClient, IDisposable
             ["qualified"] = options.Qualified,
         };
         if (options.Label is not null) requestBody["label"] = options.Label;
+        if (options.Reminders is not null) requestBody["reminders"] = options.Reminders;
+        if (options.ReminderDays is not null) requestBody["reminderDays"] = options.ReminderDays;
 
         using var resp = await _http.PostAsJsonAsync("/seal/sign-pades-hash", requestBody, cancellationToken).ConfigureAwait(false);
         resp.EnsureSuccessStatusCode();
@@ -215,6 +217,8 @@ public sealed class SigillClient : ISigillAiEvidenceClient, IDisposable
                     ["sealOperationId"] = operationId.ToString(),
                 };
                 if (options.Label is not null) stampBody["label"] = options.Label;
+                if (options.Reminders is not null) stampBody["reminders"] = options.Reminders;
+                if (options.ReminderDays is not null) stampBody["reminderDays"] = options.ReminderDays;
 
                 using var dtResp = await _http.PostAsJsonAsync("/tsa/stamp-hash", stampBody, cancellationToken).ConfigureAwait(false);
                 dtResp.EnsureSuccessStatusCode();
