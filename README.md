@@ -296,13 +296,17 @@ var result = await client.SealPreparedPadesAsync(checkpoint.Bytes, certId);
 // ... process dies before result.SealedPdf was persisted? Resume later:
 
 byte[]? cms = await client.GetSealCmsAsync(operationId);  // escrowed CMS
-byte[] sealed = SigillClient.CompletePades(Load(), cms!); // offline, byte-identical
+byte[] sealed = SigillClient.CompletePades(Load(), cms!); // offline recovery
 ```
 
-`CompletePades` needs no network and produces exactly the bytes the
-uninterrupted flow would have (at the level the CMS carries — B-T; LTV upgrades
-are not re-applied on the resume path). Without the escrow setting, a signing
-response lost before embedding cannot be recovered.
+`CompletePades` needs no network and recovers a **valid sealed PDF at the
+level the CMS carries** — B-T when the signature timestamp succeeded, else
+B-BES. LTV material (the DSS and the archival DocTimeStamp that `Ltv = true`
+would have appended) is **not reconstructed** on the resume path: with
+`Ltv = false` the recovery is byte-identical to the uninterrupted flow; with
+the default LTV ladder it recovers the B-T seal, and B-LT/B-LTA can be reached
+later by re-sealing. Without the escrow setting, a signing response lost
+before embedding cannot be recovered at all.
 
 ## Evidence lifecycle: tags, CI gates, and audit packages
 

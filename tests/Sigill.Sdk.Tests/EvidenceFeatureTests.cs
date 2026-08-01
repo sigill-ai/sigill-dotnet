@@ -124,6 +124,42 @@ public class EvidenceFeatureTests
     }
 
     [Fact]
+    public async Task UploadFallback_ForwardsTagsAndReminders()
+    {
+        // The fallback must carry the caller's full intent — QA: reminders were
+        // silently dropped on this path.
+        var unsupported = Encoding.ASCII.GetBytes("%PDF-1.4\nnot really a pdf");
+        string? seenBody = null;
+
+        var handler = new FakeHandler((req, body) =>
+        {
+            req.RequestUri!.AbsolutePath.Should().Be("/seal/sign");
+            seenBody = body;
+            var resp = new HttpResponseMessage(HttpStatusCode.OK)
+                { Content = new ByteArrayContent(Encoding.ASCII.GetBytes("sealed")) };
+            resp.Headers.Add("X-Seal-Operation-Id", OperationId);
+            resp.Headers.Add("X-Seal-Format", "pades-b-lta");
+            resp.Headers.Add("X-Seal-Timestamped-By", "Test TSA");
+            resp.Headers.Add("X-Seal-Qualified", "false");
+            return Task.FromResult(resp);
+        });
+        var client = ClientWith(handler);
+
+        await client.SealPadesAsync(unsupported, Guid.NewGuid(), new PadesSealOptions
+        {
+            AllowUploadFallback = true,
+            Tags = new[] { "a", "b" },
+            Reminders = "on",
+            ReminderDays = 60,
+        });
+
+        // Repeated form fields for tags; scalar fields for the reminder override.
+        System.Text.RegularExpressions.Regex.Matches(seenBody!, "name=\"?tags\"?").Count.Should().Be(2);
+        seenBody.Should().Contain("reminders").And.Contain("\r\non\r\n");
+        seenBody.Should().Contain("reminderDays").And.Contain("\r\n60\r\n");
+    }
+
+    [Fact]
     public async Task Tags_AreOmitted_WhenNotSupplied()
     {
         JsonObject? seen = null;

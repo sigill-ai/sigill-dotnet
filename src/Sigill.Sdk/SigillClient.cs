@@ -351,6 +351,10 @@ public sealed class SigillClient : ISigillAiEvidenceClient, IDisposable
         if (options.Label is not null)    form.Add(new StringContent(options.Label), "label");
         if (options.Reason is not null)   form.Add(new StringContent(options.Reason), "reason");
         if (options.Location is not null) form.Add(new StringContent(options.Location), "location");
+        if (options.Reminders is not null)
+            form.Add(new StringContent(options.Reminders), "reminders");
+        if (options.ReminderDays is not null)
+            form.Add(new StringContent(options.ReminderDays.Value.ToString(System.Globalization.CultureInfo.InvariantCulture)), "reminderDays");
         if (options.Tags is { Count: > 0 })
             foreach (var tag in options.Tags)
                 form.Add(new StringContent(tag), "tags");
