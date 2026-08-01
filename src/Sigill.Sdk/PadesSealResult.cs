@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 using System;
+using System.Collections.Generic;
 
 namespace Sigill.Sdk;
 
@@ -33,6 +34,14 @@ public sealed record PadesSealOptions
 
     /// <summary>Reminder threshold override in days (30/60/90/180) when Reminders is "on".</summary>
     public int? ReminderDays { get; init; }
+
+    /// <summary>
+    /// Evidence tags attached at creation — the grouping/filter dimension of the
+    /// Sigill evidence store (e.g. a release name or pipeline id). At most 10
+    /// distinct tags per evidence, 40 characters each; more than 10 in one
+    /// request is rejected with 400.
+    /// </summary>
+    public IReadOnlyList<string>? Tags { get; init; }
 
     /// <summary>
     /// When the local PDF parser cannot handle the document's structure, fall
@@ -71,3 +80,20 @@ public sealed record PadesSealResult(
     string Format,
     string? TimestampedBy,
     bool Qualified);
+
+/// <summary>
+/// Output of <see cref="SigillClient.PreparePades"/>: the PDF with its placeholder
+/// signature revision appended, plus the ByteRange digest that will be signed.
+/// <para>
+/// <see cref="Bytes"/> is the crash checkpoint: persist it before calling
+/// <see cref="SigillClient.SealPreparedPadesAsync"/> and a pipeline that dies
+/// after the server signed can later finish locally — re-fetch the CMS with
+/// <see cref="SigillClient.GetSealCmsAsync"/> (requires the tenant's
+/// "Store PAdES seal data" escrow setting) and call
+/// <see cref="SigillClient.CompletePades"/>. Everything needed to resume is
+/// re-derived from these bytes; no other state must survive the crash.
+/// </para>
+/// </summary>
+public sealed record PreparedPadesPdf(
+    byte[] Bytes,
+    string HashHex);

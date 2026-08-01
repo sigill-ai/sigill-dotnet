@@ -112,6 +112,9 @@ public sealed class SigillClient : ISigillAiEvidenceClient, IDisposable
         string? label = null,
         bool qualified = false,
         bool pqc = false,
+        IReadOnlyList<string>? tags = null,
+        string? reminders = null,
+        int? reminderDays = null,
         CancellationToken cancellationToken = default)
     {
         if (data is null) throw new ArgumentNullException(nameof(data));
@@ -124,6 +127,9 @@ public sealed class SigillClient : ISigillAiEvidenceClient, IDisposable
             ["qualified"] = qualified,
         };
         if (label is not null) requestBody["label"] = label;
+        if (tags is { Count: > 0 }) requestBody["tags"] = new JsonArray(tags.Select(t => (JsonNode)t).ToArray());
+        if (reminders is not null) requestBody["reminders"] = reminders;
+        if (reminderDays is not null) requestBody["reminderDays"] = reminderDays;
         if (pqc)
         {
             // Hybrid seal: the ML-DSA-87 signer commits to SHA-512 of the same content.
@@ -167,6 +173,82 @@ public sealed class SigillClient : ISigillAiEvidenceClient, IDisposable
             return await SealPadesByUploadAsync(pdf, certificateId, options, cancellationToken).ConfigureAwait(false);
         }
 
+        return await SealPreparedCoreAsync(prep, certificateId, options, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Phase 1 of the two-phase delegated PAdES flow: assemble the placeholder
+    /// signature revision locally and return it as a persistable checkpoint.
+    /// Persist <see cref="PreparedPadesPdf.Bytes"/>, then call
+    /// <see cref="SealPreparedPadesAsync"/> — a pipeline that crashes after the
+    /// server signed can finish later from the checkpoint plus the escrowed CMS
+    /// (<see cref="GetSealCmsAsync"/> + <see cref="CompletePades"/>).
+    /// <para>
+    /// Throws <see cref="SigillPdfUnsupportedException"/> when the local parser
+    /// cannot handle the PDF's structure; the two-phase flow has no upload
+    /// fallback — use <see cref="SealPadesAsync"/> with
+    /// <see cref="PadesSealOptions.AllowUploadFallback"/> for that.
+    /// </para>
+    /// </summary>
+    public PreparedPadesPdf PreparePades(byte[] pdf, string? reason = null, string? location = null)
+    {
+        if (pdf is null) throw new ArgumentNullException(nameof(pdf));
+        try
+        {
+            var prep = PdfIncrementalSigner.Prepare(pdf, DateTime.UtcNow, reason, location);
+            return new PreparedPadesPdf(prep.Bytes, EnvelopeHashing.ToLowerHex(prep.DocumentHash));
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or NotSupportedException or KeyNotFoundException)
+        {
+            throw new SigillPdfUnsupportedException(ex.Message, ex);
+        }
+    }
+
+    /// <summary>
+    /// Phase 2 of the two-phase delegated PAdES flow: sign a prepared revision
+    /// (from <see cref="PreparePades"/>, possibly persisted and reloaded) and
+    /// finish the seal locally. Everything is re-derived from the prepared
+    /// bytes; equivalent to <see cref="SealPadesAsync"/> minus the local
+    /// preparation and the upload fallback.
+    /// </summary>
+    public Task<PadesSealResult> SealPreparedPadesAsync(
+        byte[] preparedPdf,
+        Guid certificateId,
+        PadesSealOptions? options = null,
+        CancellationToken cancellationToken = default)
+    {
+        if (preparedPdf is null) throw new ArgumentNullException(nameof(preparedPdf));
+        var prep = PdfIncrementalSigner.Recover(preparedPdf);
+        return SealPreparedCoreAsync(prep, certificateId, options ?? new PadesSealOptions(), cancellationToken);
+    }
+
+    /// <summary>
+    /// Finish a delegated PAdES seal offline: embed a CMS — typically re-fetched
+    /// from escrow via <see cref="GetSealCmsAsync"/> — into a prepared revision
+    /// persisted by <see cref="PreparePades"/>. No network access; the result is
+    /// the sealed PDF at the level the CMS carries (B-T when timestamped, else
+    /// B-BES). LTV upgrades are not re-applied on this path — re-seal via the
+    /// normal flow when B-LT/B-LTA is required.
+    /// </summary>
+    public static byte[] CompletePades(byte[] preparedPdf, byte[] cms)
+    {
+        if (preparedPdf is null) throw new ArgumentNullException(nameof(preparedPdf));
+        if (cms is null) throw new ArgumentNullException(nameof(cms));
+        var prep = PdfIncrementalSigner.Recover(preparedPdf);
+        return PdfIncrementalSigner.Embed(prep, cms);
+    }
+
+    /// <summary>
+    /// Shared signing core for <see cref="SealPadesAsync"/> and
+    /// <see cref="SealPreparedPadesAsync"/>: digest → sign-pades-hash → embed →
+    /// optional DSS + DocTimeStamp.
+    /// </summary>
+    private async Task<PadesSealResult> SealPreparedCoreAsync(
+        PdfIncrementalSigner.PreparedPdf prep,
+        Guid certificateId,
+        PadesSealOptions options,
+        CancellationToken cancellationToken)
+    {
         // 2. hash → Sigill → CMS (+ LTV material for the DSS).
         var requestBody = new JsonObject
         {
@@ -177,6 +259,8 @@ public sealed class SigillClient : ISigillAiEvidenceClient, IDisposable
         if (options.Label is not null) requestBody["label"] = options.Label;
         if (options.Reminders is not null) requestBody["reminders"] = options.Reminders;
         if (options.ReminderDays is not null) requestBody["reminderDays"] = options.ReminderDays;
+        if (options.Tags is { Count: > 0 })
+            requestBody["tags"] = new JsonArray(options.Tags.Select(t => (JsonNode)t).ToArray());
 
         using var resp = await _http.PostAsJsonAsync("/seal/sign-pades-hash", requestBody, cancellationToken).ConfigureAwait(false);
         resp.EnsureSuccessStatusCode();
@@ -267,6 +351,9 @@ public sealed class SigillClient : ISigillAiEvidenceClient, IDisposable
         if (options.Label is not null)    form.Add(new StringContent(options.Label), "label");
         if (options.Reason is not null)   form.Add(new StringContent(options.Reason), "reason");
         if (options.Location is not null) form.Add(new StringContent(options.Location), "location");
+        if (options.Tags is { Count: > 0 })
+            foreach (var tag in options.Tags)
+                form.Add(new StringContent(tag), "tags");
 
         using var resp = await _http.PostAsync("/seal/sign", form, ct).ConfigureAwait(false);
         resp.EnsureSuccessStatusCode();
@@ -281,6 +368,125 @@ public sealed class SigillClient : ISigillAiEvidenceClient, IDisposable
             Format:        Header(resp, "X-Seal-Format") ?? "pades-bes",
             TimestampedBy: tsaName is null or "none" ? null : tsaName,
             Qualified:     string.Equals(Header(resp, "X-Seal-Qualified"), "true", StringComparison.OrdinalIgnoreCase));
+    }
+
+    // ========================================================== evidence
+
+    /// <summary>
+    /// Download the escrowed signature object for a seal operation
+    /// (<c>GET /seal/operations/{id}/p7s</c>). For PAdES operations this is the
+    /// /Contents CMS — the input to <see cref="CompletePades"/>; for CAdES/JAdES
+    /// it is the detached .p7s / JWS. Returns null when nothing is stored for
+    /// the operation (the tenant setting was off, or the id is unknown).
+    /// </summary>
+    public async Task<byte[]?> GetSealCmsAsync(Guid operationId, CancellationToken cancellationToken = default)
+    {
+        using var resp = await _http.GetAsync($"/seal/operations/{operationId}/p7s", cancellationToken).ConfigureAwait(false);
+        if (resp.StatusCode == HttpStatusCode.NotFound) return null;
+        resp.EnsureSuccessStatusCode();
+        return await resp.Content.ReadAsByteArrayAsync().ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Fetch the newest evidence record for an artifact's SHA-256 hex digest, as
+    /// recorded for the authenticated tenant. Returns null when the tenant holds
+    /// no record for the hash. The CI-gate primitive: check existence and how
+    /// close <see cref="EvidenceRecord.CertNotAfter"/> (the renewal horizon) is.
+    /// </summary>
+    public async Task<EvidenceRecord?> GetEvidenceRecordAsync(string hashHex, CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(hashHex)) throw new ArgumentException("hashHex is required", nameof(hashHex));
+
+        using var resp = await _http.GetAsync($"/api/transactions/by-hash/{hashHex.ToLowerInvariant()}", cancellationToken).ConfigureAwait(false);
+        if (resp.StatusCode == HttpStatusCode.NotFound) return null;
+        resp.EnsureSuccessStatusCode();
+        var b = (await resp.Content.ReadFromJsonAsync<JsonObject>(cancellationToken: cancellationToken).ConfigureAwait(false))!;
+
+        return new EvidenceRecord(
+            TransactionId: Guid.Parse(b["id"]!.GetValue<string>()),
+            Hash:          b["hash"]!.GetValue<string>(),
+            HashAlgorithm: b["alg"]?.GetValue<string>(),
+            GenTime:       ReadDate(b["genTime"]),
+            CreatedAt:     ReadDate(b["createdAt"]) ?? default,
+            TsaName:       b["tsaName"]?.GetValue<string>(),
+            Label:         b["label"]?.GetValue<string>(),
+            CertNotBefore: ReadDate(b["certNotBefore"]),
+            CertNotAfter:  ReadDate(b["certNotAfter"]),
+            IsRestamp:     b["isRestamp"]?.GetValue<bool>() ?? false,
+            HasTsr:        b["hasTsr"]?.GetValue<bool>() ?? false);
+    }
+
+    /// <summary>Convenience overload: hashes the artifact bytes locally (SHA-256) first.</summary>
+    public Task<EvidenceRecord?> GetEvidenceRecordAsync(byte[] data, CancellationToken cancellationToken = default)
+    {
+        if (data is null) throw new ArgumentNullException(nameof(data));
+        return GetEvidenceRecordAsync(EnvelopeHashing.HashHex(data), cancellationToken);
+    }
+
+    /// <summary>
+    /// Public existence check (<c>GET /api/lookup/{hash}</c>, no auth required):
+    /// has this artifact been timestamped, by anyone who chose to disclose it?
+    /// Discoverability is opt-in per tenant/evidence, so null means "no publicly
+    /// disclosed record" — deliberately indistinguishable from "never stamped".
+    /// Third-party verification of published artifacts (releases, git objects).
+    /// </summary>
+    public async Task<PublicLookupResult?> LookupAsync(string hashHex, CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(hashHex)) throw new ArgumentException("hashHex is required", nameof(hashHex));
+
+        using var resp = await _http.GetAsync($"/api/lookup/{hashHex.ToLowerInvariant()}", cancellationToken).ConfigureAwait(false);
+        if (resp.StatusCode == HttpStatusCode.NotFound) return null;
+        resp.EnsureSuccessStatusCode();
+        var b = (await resp.Content.ReadFromJsonAsync<JsonObject>(cancellationToken: cancellationToken).ConfigureAwait(false))!;
+
+        static PublicLookupRecord MapRecord(JsonObject r) => new(
+            TransactionId: Guid.Parse(r["id"]!.GetValue<string>()),
+            Hash:          r["hash"]!.GetValue<string>(),
+            HashAlgorithm: r["alg"]?.GetValue<string>(),
+            GenTime:       ReadDate(r["genTime"]),
+            CreatedAt:     ReadDate(r["createdAt"]) ?? default,
+            TsaName:       r["tsaName"]?.GetValue<string>(),
+            CertNotBefore: ReadDate(r["certNotBefore"]),
+            CertNotAfter:  ReadDate(r["certNotAfter"]),
+            IsRestamp:     r["isRestamp"]?.GetValue<bool>() ?? false);
+
+        var records = new List<PublicLookupRecord>();
+        if (b["records"] is JsonArray arr)
+            foreach (var item in arr.OfType<JsonObject>())
+                records.Add(MapRecord(item));
+
+        return new PublicLookupResult(
+            Count:   b["count"]?.GetValue<int>() ?? records.Count,
+            Latest:  MapRecord((JsonObject)b["latest"]!),
+            Records: records);
+    }
+
+    /// <summary>Convenience overload: hashes the artifact bytes locally (SHA-256) first.</summary>
+    public Task<PublicLookupResult?> LookupAsync(byte[] data, CancellationToken cancellationToken = default)
+    {
+        if (data is null) throw new ArgumentNullException(nameof(data));
+        return LookupAsync(EnvelopeHashing.HashHex(data), cancellationToken);
+    }
+
+    /// <summary>
+    /// Download the evidence's audit package
+    /// (<c>GET /api/transactions/{id}/audit-package.zip</c>): every token of the
+    /// restamp chain, embedded certificates, the latest verification report, the
+    /// custody log, the stored detached signature when present, and a SHA-256
+    /// manifest — independently verifiable offline with standard tools.
+    /// </summary>
+    public async Task<byte[]> ExportAuditPackageAsync(Guid transactionId, CancellationToken cancellationToken = default)
+    {
+        using var resp = await _http.GetAsync($"/api/transactions/{transactionId}/audit-package.zip", cancellationToken).ConfigureAwait(false);
+        resp.EnsureSuccessStatusCode();
+        return await resp.Content.ReadAsByteArrayAsync().ConfigureAwait(false);
+    }
+
+    private static DateTimeOffset? ReadDate(JsonNode? node)
+    {
+        var s = node?.GetValue<string>();
+        return s is null ? null : DateTimeOffset.Parse(s, System.Globalization.CultureInfo.InvariantCulture,
+            System.Globalization.DateTimeStyles.AssumeUniversal | System.Globalization.DateTimeStyles.AdjustToUniversal);
     }
 
     private static byte[][] ReadDerArray(JsonNode? node)
@@ -346,6 +552,9 @@ public sealed class SigillClient : ISigillAiEvidenceClient, IDisposable
         bool qualified = false,
         bool pqc = false,
         string? contentType = null,
+        IReadOnlyList<string>? tags = null,
+        string? reminders = null,
+        int? reminderDays = null,
         CancellationToken cancellationToken = default)
     {
         if (data is null) throw new ArgumentNullException(nameof(data));
@@ -359,6 +568,9 @@ public sealed class SigillClient : ISigillAiEvidenceClient, IDisposable
         };
         if (label is not null) requestBody["label"] = label;
         if (contentType is not null) requestBody["contentType"] = contentType;
+        if (tags is { Count: > 0 }) requestBody["tags"] = new JsonArray(tags.Select(t => (JsonNode)t).ToArray());
+        if (reminders is not null) requestBody["reminders"] = reminders;
+        if (reminderDays is not null) requestBody["reminderDays"] = reminderDays;
         if (pqc)
         {
             // Hybrid seal: the ML-DSA-87 signer commits to SHA-512 of the same content.
@@ -468,6 +680,8 @@ public sealed class SigillClient : ISigillAiEvidenceClient, IDisposable
             ["qualified"] = options.Qualified,
         };
         if (options.Label is not null) requestBody["label"] = options.Label;
+        if (options.Tags is { Count: > 0 })
+            requestBody["tags"] = new JsonArray(options.Tags.Select(t => (JsonNode)t).ToArray());
 
         using var resp = await _http.PostAsJsonAsync("/tsa/stamp-hash", requestBody, ct).ConfigureAwait(false);
 

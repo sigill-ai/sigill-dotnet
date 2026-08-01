@@ -281,6 +281,58 @@ allows a single `SignerInfo` per signature. For an ML-DSA-87 hybrid seal over a
 PDF, use `SealCadesAsync(pdf, certId, pqc: true)` and keep the detached `.p7s`
 alongside the file.
 
+### Crash-safe sealing: the two-phase flow
+
+`SealPadesAsync` prepares, signs, and embeds in one call. If your pipeline can
+die between the server signing (the seal is minted and billed) and your process
+persisting the result, use the two-phase flow with the tenant's **Store PAdES
+seal data** setting (Settings → Preferences, off by default):
+
+```csharp
+PreparedPadesPdf checkpoint = client.PreparePades(pdf);
+Save(checkpoint.Bytes);                       // your checkpoint — plain bytes
+
+var result = await client.SealPreparedPadesAsync(checkpoint.Bytes, certId);
+// ... process dies before result.SealedPdf was persisted? Resume later:
+
+byte[]? cms = await client.GetSealCmsAsync(operationId);  // escrowed CMS
+byte[] sealed = SigillClient.CompletePades(Load(), cms!); // offline, byte-identical
+```
+
+`CompletePades` needs no network and produces exactly the bytes the
+uninterrupted flow would have (at the level the CMS carries — B-T; LTV upgrades
+are not re-applied on the resume path). Without the escrow setting, a signing
+response lost before embedding cannot be recovered.
+
+## Evidence lifecycle: tags, CI gates, and audit packages
+
+Every seal and stamp is an **evidence** in the Sigill evidence store — with a
+renewal horizon, verification history, and a custody log. The SDK exposes the
+lifecycle surface an automated caller needs:
+
+```csharp
+// Tag at creation — the grouping/filter dimension of the evidence store
+// (≤10 per evidence, ≤40 chars). Available on every seal method.
+await client.SealCadesAsync(artifact, certId, tags: new[] { "release-4.2", "backend" });
+
+// CI gate: does evidence exist, and how close is the renewal horizon?
+EvidenceRecord? rec = await client.GetEvidenceRecordAsync(artifact);
+if (rec is null) throw new Exception("artifact was never sealed");
+Console.WriteLine(rec.CertNotAfter);   // the horizon — fail the build when too close
+
+// Public existence check (no API key needed) — consent-gated: null unless the
+// evidence owner opted in to public lookups. Third-party release verification.
+PublicLookupResult? found = await client.LookupAsync(artifact);
+
+// Everything an auditor needs, independently verifiable offline:
+// tokens, certificates, verification report, custody log, SHA-256 manifest.
+byte[] zip = await client.ExportAuditPackageAsync(rec.TransactionId);
+```
+
+Expiry-reminder policy can be set per evidence at creation on every seal
+method: `reminders: "on"` (with `reminderDays: 30/60/90/180`), `"off"` (muted),
+or the default `"inherit"`.
+
 ## Error handling
 
 Producer-time errors throw; verification errors are collected. This split is

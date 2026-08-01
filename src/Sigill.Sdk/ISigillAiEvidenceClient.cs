@@ -55,6 +55,9 @@ public interface ISigillAiEvidenceClient
         string? label = null,
         bool qualified = false,
         bool pqc = false,
+        IReadOnlyList<string>? tags = null,
+        string? reminders = null,
+        int? reminderDays = null,
         CancellationToken cancellationToken = default);
 
     /// <summary>
@@ -97,6 +100,9 @@ public interface ISigillAiEvidenceClient
         bool qualified = false,
         bool pqc = false,
         string? contentType = null,
+        IReadOnlyList<string>? tags = null,
+        string? reminders = null,
+        int? reminderDays = null,
         CancellationToken cancellationToken = default);
 
     /// <summary>
@@ -130,4 +136,29 @@ public interface ISigillAiEvidenceClient
         SealedAiEvidenceEnvelope envelope,
         IReadOnlyDictionary<string, byte[]>? externalPayloads = null,
         CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Download the escrowed signature object for a seal operation, or null when
+    /// nothing is stored. For PAdES this is the /Contents CMS — the input to
+    /// <see cref="SigillClient.CompletePades"/>.
+    /// </summary>
+    Task<byte[]?> GetSealCmsAsync(Guid operationId, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Newest evidence record for an artifact hash as recorded for the
+    /// authenticated tenant, or null when none exists. The CI-gate primitive.
+    /// </summary>
+    Task<EvidenceRecord?> GetEvidenceRecordAsync(string hashHex, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Public consent-gated existence check for an artifact hash, or null when
+    /// no publicly disclosed record exists.
+    /// </summary>
+    Task<PublicLookupResult?> LookupAsync(string hashHex, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Download the evidence's independently-verifiable audit package
+    /// (tokens, certificates, verification report, custody log, manifest).
+    /// </summary>
+    Task<byte[]> ExportAuditPackageAsync(Guid transactionId, CancellationToken cancellationToken = default);
 }

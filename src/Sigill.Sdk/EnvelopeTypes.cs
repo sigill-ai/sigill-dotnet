@@ -87,4 +87,12 @@ public sealed record SealOptions
     /// envelope — does not affect the envelope hash.
     /// </summary>
     public string? Label { get; init; }
+
+    /// <summary>
+    /// Evidence tags attached at creation — the grouping/filter dimension of the
+    /// Sigill evidence store (e.g. a release name or pipeline id). At most 10
+    /// distinct tags per evidence, 40 characters each. Not part of the canonical
+    /// envelope — does not affect the envelope hash.
+    /// </summary>
+    public IReadOnlyList<string>? Tags { get; init; }
 }

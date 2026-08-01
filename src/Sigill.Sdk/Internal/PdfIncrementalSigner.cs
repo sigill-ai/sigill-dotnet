@@ -134,6 +134,46 @@ internal static class PdfIncrementalSigner
         return new PreparedPdf(full, hexOff, hexLen, docHash);
     }
 
+    // ─── Recover: rebuild a PreparedPdf from persisted bytes ─────────────────
+
+    /// <summary>
+    /// Reconstruct a <see cref="PreparedPdf"/> from prepared bytes persisted by a
+    /// caller — the crash-resume path. The placeholder revision's finalized
+    /// /ByteRange carries the real offsets, so the /Contents slot and the document
+    /// hash are re-derived exactly; no state beyond the bytes themselves is needed.
+    /// </summary>
+    internal static PreparedPdf Recover(byte[] preparedBytes)
+    {
+        // The placeholder signature revision is the newest incremental update,
+        // so its /ByteRange is the last one in the file.
+        var text  = Latin1.GetString(preparedBytes);
+        int brKey = text.LastIndexOf("/ByteRange", StringComparison.Ordinal);
+        if (brKey < 0)
+            throw new InvalidOperationException("Not a prepared PDF: no /ByteRange found");
+        int open  = text.IndexOf('[', brKey);
+        int close = open < 0 ? -1 : text.IndexOf(']', open);
+        if (close < 0)
+            throw new InvalidOperationException("Not a prepared PDF: malformed /ByteRange");
+
+        var parts = text[(open + 1)..close].Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length != 4 ||
+            !int.TryParse(parts[0], out var r1)  || !int.TryParse(parts[1], out var r1Len) ||
+            !int.TryParse(parts[2], out var r2)  || !int.TryParse(parts[3], out var r2Len))
+            throw new InvalidOperationException("Not a prepared PDF: /ByteRange still a template or unparseable");
+
+        // The declared ranges must sandwich '<' + hex + '>' exactly and cover
+        // the whole file — anything else means the bytes are not a finalized
+        // placeholder revision from Prepare().
+        int hexOff = r1Len + 1;
+        int hexLen = r2 - r1Len - 2;
+        if (r1 != 0 || hexLen <= 0 || r2 + r2Len != preparedBytes.Length ||
+            preparedBytes[r1Len] != (byte)'<' || preparedBytes[r2 - 1] != (byte)'>')
+            throw new InvalidOperationException("Prepared bytes do not carry a finalized placeholder revision");
+
+        var docHash = HashRanges(preparedBytes, r1, r1Len, r2, r2Len);
+        return new PreparedPdf(preparedBytes, hexOff, hexLen, docHash);
+    }
+
     // ─── Pass 2: Embed ────────────────────────────────────────────────────────
 
     internal static byte[] Embed(PreparedPdf prep, byte[] cmsDer)
