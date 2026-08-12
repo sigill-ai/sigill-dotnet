@@ -1,8 +1,12 @@
 # AiEvidenceEnvelopeV2 — Specification
 
-**Status: DRAFT for founder review, 12 Aug 2026.** Supersedes
-[`AiEvidenceEnvelopeV1`](./README.md) for *producing* evidence once accepted;
+**Status: AGREED, 12 Aug 2026** (founder review Raymond + Hallvard —
+sigill-dotnet#4 / platform#37). Supersedes
+[`AiEvidenceEnvelopeV1`](./README.md) for *producing* evidence;
 v1 envelopes remain verifiable indefinitely and nothing re-signs old evidence.
+Standing review condition: **the opaque-URN requirement on remote paths
+(§3.1) is load-bearing for hashing anonymity and stays normative** — it MUST
+NOT be relaxed to guidance in future revisions.
 
 This is the format contract only. The platform API is specified separately in
 the platform repo (`docs/ai-evidence-jades-profile.md`, PR #37) and will not
