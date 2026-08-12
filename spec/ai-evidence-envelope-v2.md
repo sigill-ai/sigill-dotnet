@@ -4,10 +4,15 @@
 [`AiEvidenceEnvelopeV1`](./README.md) for *producing* evidence once accepted;
 v1 envelopes remain verifiable indefinitely and nothing re-signs old evidence.
 
-This is the format contract only. The platform API that signs v2 envelopes
-(`POST /seal/sign-envelope`) is specified separately in the platform repo
-(`docs/ai-evidence-jades-profile.md`, PR #37) and will not be built until this
-document is agreed.
+This is the format contract only. The platform API is specified separately in
+the platform repo (`docs/ai-evidence-jades-profile.md`, PR #37) and will not
+be built until this document is agreed. That contract is **blind in both
+directions** (platform [D8], 12 Aug): the producer sends digests and opaque
+URIs and receives the JWS; the **artifact is always assembled client-side**;
+platform verification takes the JWS plus a digest map and returns
+cryptographic verdicts. Sigill never receives the envelope — everything
+envelope-shaped in this document (schema validation, canonicalization, role
+coverage) is the SDK's job.
 
 **Scope disambiguation** — "envelope" means three things in the Sigill family
 today. This document versions exactly one of them: the **AI evidence
@@ -120,13 +125,22 @@ Rules (normative):
 
 - **Roles**: `prompt | input | context | output | artifact | log`. The
   envelope says what each object *is*; the signature says what it *hashes to*.
-- **URIs are caller-chosen, opaque identifiers** (`urn:…` recommended;
-  filenames and storage keys accepted). Sigill never dereferences them.
-  (TS 119 182-1 §5.2.8.3.1 frames `pars` entries as resolvable
+- **URIs are caller-chosen, opaque identifiers**. Sigill never dereferences
+  them. (TS 119 182-1 §5.2.8.3.1 frames `pars` entries as resolvable
   URI-references; this profile deliberately uses them as pure identifiers —
   digests are always computed from caller-supplied bytes, never fetched. The
   EU DSS reference validator accepts this; it matches detached objects to
   `pars` entries by name.)
+- **On any remote path, opacity is a privacy requirement, not a style
+  choice**: URIs sent to the platform (blind signing, blind verification)
+  MUST carry no personal data and no content-derived names — hashing
+  anonymity is defeated by a `pars` entry like
+  `contract-olsen-vs-hansen.pdf`. SDKs generate `urn:uuid:`-based
+  identifiers by default; human-meaningful names (filenames, paths) belong
+  in the object's `metadata`, which stays inside the envelope and never
+  leaves the producer. (A stored-seal opt-in on the platform retains the
+  JWS, which embeds the signed URIs — opaque URNs are what keep that
+  retention clean.)
 - **URIs MUST be unique** across `objects[]`, compared **byte-exactly** as
   strings (no normalization, no case folding). Producers MUST reject
   duplicates; verifiers MUST fail on them. The same content MAY appear under
@@ -274,6 +288,10 @@ The wrapper is deliberately trivial. A validator that only understands
 TS 119 182-1 can verify the `signature` member directly, given the canonical
 envelope bytes as object 0 and the payloads the caller can supply.
 
+The artifact is **always assembled by the producer**: under the blind
+platform contract (§8) Sigill returns the `signature` member and has never
+seen the `envelope` member, so no artifact ever exists server-side.
+
 *Alternatives considered and rejected*: distributing envelope and JWS
 separately (loses self-containment — the strongest property of the format);
 carrying the envelope in an unprotected JWS header (legal but semantically
@@ -317,10 +335,27 @@ present.
 signature?" — retained for spot checks; never presented as record
 verification.
 
-The SDKs perform full **offline** verification (JWS + JCS + `hashV` + TST
-parse) with no Sigill dependency — same posture as v1.
+### 7.1 Where verification runs
 
-### 7.1 Error model
+- **Offline (SDK, full fidelity)**: the SDK holds the artifact and the
+  payloads, so it checks everything — JWS + JCS + `hashV` + TST parse,
+  schema conformance, role coverage. No Sigill dependency; same posture as
+  the v1 verifier.
+- **Via the platform (hashing anonymity)**: the request is the JWS
+  `signature` member plus a digest per referenced `pars` URI — the
+  envelope's own digest is simply the entry for `urn:sigill:envelope`,
+  computed client-side with JCS. No special case: the envelope is just
+  object 0. Sigill sees certificates, signed hashes and opaque URNs; never
+  the envelope, never content. The response is the cryptographic verdict
+  set above (per-object, `missing`/`unreferenced`, `complete`, the
+  multiple-signature policy applied server-side).
+- **Division of labour**: the platform verifies *what was signed*; the
+  verifier's own copy of the envelope says *what the objects mean*. Envelope
+  schema validation and role coverage are therefore client-side always —
+  the compound verdict (signature valid ∧ all objects verified ∧ required
+  roles present) is assembled by the SDK, on either path.
+
+### 7.2 Error model
 
 | Error | Meaning |
 |---|---|
@@ -335,20 +370,31 @@ parse) with no Sigill dependency — same posture as v1.
 Verification produces a structured result rather than raising on the first
 issue, so consumers can render a complete report.
 
-## 8. What Sigill persists
+## 8. What Sigill receives and persists
 
-Unchanged principle, restated for the SDK audience: **content-free by
-default** — Sigill persists hashes, identifiers and envelope metadata only;
-there is no parameter to send content bytes. The claim is about *content*,
-not "no personal data": the envelope's actor/activity/model/purpose fields,
-URIs, labels and timestamps can constitute personal data depending on what
-the producer puts in them. See §9.
+**Blind by architecture** (platform [D8]): Sigill's nature is to not accept
+and store GDPR data, and the contract enforces it structurally. On produce,
+Sigill receives digests, opaque URIs, MIME types and the caller-chosen
+label/tags — never the envelope, never content; there is no parameter to send
+either. On verify, Sigill receives the JWS and a digest map. What it
+persists is exactly what any seal operation persists today (operation row,
+`DocumentHash` = envelope hash, timestamp token, label/tags) plus a
+**name-free** digest manifest (digests + ctys + count — no URIs at rest).
+Under the existing detached-seals opt-in it stores the JWS only, never the
+artifact.
+
+The envelope — with its actor/activity/model/purpose metadata that can
+constitute personal data — lives exclusively with the producer, inside the
+artifact they hold. See §9.
 
 ## 9. GDPR posture (producer guidance)
 
 - Keep personal identifiers out of `actor.id`, `uri` values, labels and tags
-  — supply opaque or hashed identifiers. The SDKs offer hashing the actor id
-  at source (opt-in helper).
+  — supply opaque or hashed identifiers. For `uri`, labels and tags this is
+  normative on remote paths (§3.1); for `actor.id` the SDKs offer hashing at
+  source (opt-in helper). Note the actor id never reaches Sigill under the
+  blind contract — hashing it protects the producer's own artifact and
+  whoever they share it with.
 - A workload identity is a system account; an agent acting on-behalf-of a
   person may make the id + timestamps personal data. This is
   producer-supplied and opaque to Sigill.
@@ -410,8 +456,14 @@ Two vector classes are planned:
 ## 12. Open points for this review
 
 Settled by prior review (platform PR #37) and treated as fixed here: the
-self-contained `{envelope, signature}` artifact [D1] and JCS canonicalization
-[D2]. Still open — veto or bless per point:
+self-contained `{envelope, signature}` artifact [D1], JCS canonicalization
+[D2], and the **blind platform contract in both directions** [D8] (12 Aug:
+digests + opaque URIs in / JWS out, artifact assembled client-side, blind
+verification, name-free persistence — design principle: Sigill does not
+accept and store GDPR data). D8 also absorbs the content-type-driven-endpoint
+ask [D7]: a blind endpoint is content-type-agnostic by construction, and
+`EvidenceEnvelopeV3` signs through the identical mechanism with its own cty.
+Still open — veto or bless per point:
 
 - **[O1] `encoding` enum**: reduced to `utf-8 | binary` (base64 fell with
   inline). Sufficient, or does any producer hash base64-normalized content?
