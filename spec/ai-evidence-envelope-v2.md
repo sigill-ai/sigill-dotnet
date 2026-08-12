@@ -74,13 +74,15 @@ and verifiers can render without profile-specific code:
 - **AI-profile fields** (this schema): `purpose`, `model`,
   `processingMetadata`, `policyMetadata`, `sourceTrace`.
 - **`extensions`** is the named extension point: an object whose keys are
-  extension identifiers (a registered profile name, or reverse-DNS for
-  producer-private data) and whose values are objects owned entirely by that
-  extension. Extensions are signed like everything else but carry no
-  cross-profile semantics; unknown extensions are ignored, never rejected.
-  Other profiles carry their trust-model-specific data (e.g. evidence's
-  registry-anchored identity graph) as extensions or as their own profile
-  fields — never mixed into this profile's customer-asserted core.
+  extension identifiers (reverse-DNS recommended) and whose values are
+  objects owned entirely by that extension. Extensions are signed like
+  everything else but carry no cross-profile semantics; unknown extensions
+  are ignored, never rejected. `extensions` is for **producer-private data
+  within a profile** — sibling profiles are not extensions: sigill-evidence
+  is its own profile with its own cty and its own schema, carrying its
+  trust-model-specific data (the registry-anchored identity graph) as
+  profile fields. Trust levels are never mixed into this profile's
+  customer-asserted core.
 
 The schema stays `additionalProperties: false` everywhere: the *only* place
 for unmodelled data is `extensions` (and per-object `metadata`). This
