@@ -326,7 +326,16 @@ cryptographically valid sigD-bearing classical signature wins** (in
 later valid signatures do not broaden the evidence set — one signature
 defines one record. Skipped invalid entries are reported as warnings. The
 ML-DSA signer is verified *against the winning record* (same `pars`, SHA-512
-digests), reported as `pqc: verified | failed | absent`.
+digests), reported as `pqc: verified | failed | absent | not_checked`.
+
+**Hybrid seals are both-required** (normative): a seal carrying an ML-DSA
+signer has made two commitments to the record, and the record-keeping
+verdict requires both. `complete` is reachable only when `pqc` is `absent`
+or `verified`; verifying a hybrid seal with SHA-256 digests alone yields
+`pqc: not_checked` and `complete: false`, with a warning naming the gap —
+the classical verdict never masquerades as full hybrid verification. On the
+remote path the SHA-512 digests travel as a second map (`digests512`),
+keyed by the same URIs.
 
 **Role coverage** ("is a prompt and an output present?") is an
 *envelope-layer* check — `sigD` knows URIs and digests, not roles. The
