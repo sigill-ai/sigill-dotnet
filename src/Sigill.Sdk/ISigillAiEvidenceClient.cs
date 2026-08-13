@@ -106,6 +106,54 @@ public interface ISigillAiEvidenceClient
         CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// Seal an AI evidence v2 record — the blind multi-object JAdES contract
+    /// (<c>spec/ai-evidence-envelope-v2.md</c>). The SDK canonicalizes the
+    /// envelope (RFC 8785), hashes it and every payload locally, and sends
+    /// <em>digests and opaque URIs only</em> to <c>POST /seal/sign-hashes</c>;
+    /// neither the envelope nor any content ever leaves the machine. The
+    /// returned JAdES JWS is assembled with the envelope into the
+    /// self-contained <c>{envelope, signature}</c> artifact — client-side,
+    /// because no artifact ever exists server-side.
+    /// <para>
+    /// <paramref name="envelope"/> carries the descriptive fields (purpose,
+    /// actor, activity, model, …); the SDK fills identity defaults
+    /// (schemaName/Version, evidenceId, createdAt) when absent and OWNS
+    /// <c>objects[]</c>, deriving it from <paramref name="payloads"/> so the
+    /// envelope list and the signed object list are aligned by construction.
+    /// With <see cref="EvidenceV2SealOptions.Pqc"/>, SHA-512 digests are
+    /// computed alongside and an ML-DSA-87 hybrid signer is added.
+    /// </para>
+    /// </summary>
+    Task<AiEvidenceV2Artifact> SealEvidenceV2Async(
+        System.Text.Json.Nodes.JsonObject envelope,
+        IReadOnlyList<AiEvidenceV2Payload> payloads,
+        System.Guid certificateId,
+        EvidenceV2SealOptions? options = null,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Verify an AI evidence v2 artifact via the blind
+    /// <c>POST /seal/verify-objects</c> endpoint (public). Only digests travel:
+    /// the envelope digest is recomputed locally with RFC 8785 and supplied
+    /// payload bytes are hashed locally, keyed by their URIs. For hybrid seals
+    /// the SHA-512 map is sent automatically — a hybrid seal can only reach
+    /// <c>Complete</c> when the ML-DSA commitment verifies too.
+    /// <para>
+    /// The platform returns the cryptographic verdicts (per-object matches,
+    /// missing/unreferenced, pqc, complete); the SDK adds the envelope-layer
+    /// checks that are its job — objects[]/sigD alignment and, when
+    /// <paramref name="requiredRoles"/> is given, role coverage backed by
+    /// verified payloads. <see cref="EvidenceV2VerificationResult.Ok"/> is the
+    /// compound answer.
+    /// </para>
+    /// </summary>
+    Task<EvidenceV2VerificationResult> VerifyEvidenceV2Async(
+        AiEvidenceV2Artifact artifact,
+        IReadOnlyDictionary<string, byte[]>? payloads = null,
+        IReadOnlyList<string>? requiredRoles = null,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// Verify a detached CAdES signature via <c>POST /seal/verify</c>. The endpoint
     /// is public — no API key is required — but the existing HTTP client works fine.
     /// </summary>
