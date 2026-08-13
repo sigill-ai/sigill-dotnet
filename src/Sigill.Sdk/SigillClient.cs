@@ -746,7 +746,8 @@ public sealed class SigillClient : ISigillAiEvidenceClient, IDisposable
         // Hybrid seals are both-required (spec §7): when the JWS carries an
         // ML-DSA signer, the SHA-512 map travels too — otherwise the platform
         // honestly reports pqc: not_checked and complete: false.
-        if (HasMlDsaSigner(artifact.Signature))
+        var hybrid = HasMlDsaSigner(artifact.Signature);
+        if (hybrid)
         {
             var digests512 = new JsonObject
             {
@@ -810,8 +811,15 @@ public sealed class SigillClient : ISigillAiEvidenceClient, IDisposable
                 issues.Add($"Required role(s) not covered by a verified payload: {string.Join(", ", missingRoles)}.");
         }
 
-        var pqc = r["pqc"]?.GetValue<string>() ?? "absent";
-        if (pqc is "not_checked" or "failed")
+        // Defensive on the hybrid dimension: the SDK detected the ML-DSA signer
+        // itself, so a response with no pqc verdict (older or third-party
+        // platform build) must NEVER let the classical verdict stand in for the
+        // hybrid one — that is the exact masquerade the both-required rule
+        // forbids. Missing pqc on a hybrid JWS ⇒ not_checked.
+        var pqc = r["pqc"]?.GetValue<string>() ?? (hybrid ? "not_checked" : "absent");
+        if (hybrid && r["pqc"] is null)
+            issues.Add("Hybrid seal: the verifier returned no pqc verdict — treat the ML-DSA commitment as not checked.");
+        else if (pqc is "not_checked" or "failed")
             issues.Add($"Hybrid seal: the ML-DSA commitment is '{pqc}'.");
         if (r["warnings"] is JsonArray warnArr)
             foreach (var w in warnArr) if (w?.GetValue<string>() is string s) issues.Add(s);

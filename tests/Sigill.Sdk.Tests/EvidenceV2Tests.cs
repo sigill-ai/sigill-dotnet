@@ -275,6 +275,43 @@ public class EvidenceV2Tests
     }
 
     [Fact]
+    public async Task Verify_HybridSeal_AgainstVerifierWithoutPqcVerdict_NeverReportsOk()
+    {
+        // QA scenario: a verifier build that predates the hybrid contract
+        // returns complete=true from the classical dimension and NO pqc field.
+        // The SDK detected the ML-DSA signer itself, so it must refuse to let
+        // that stand in for the hybrid verdict: Pqc → not_checked, Ok → false.
+        var mlHeader = Convert.ToBase64String("""{"alg":"ML-DSA-87"}"""u8.ToArray())
+            .Replace('+', '-').Replace('/', '_').TrimEnd('=');
+        var artifact = ArtifactWith("ignored", ("urn:t:prompt", "prompt"));
+        artifact.Signature["signatures"]!.AsArray()
+            .Add(new JsonObject { ["protected"] = mlHeader, ["signature"] = "cA" });
+
+        var handler = new FakeHandler((_, _) => Task.FromResult(Json(new JsonObject
+        {
+            ["objects"] = new JsonObject
+            {
+                // Legacy shape: classical verdict only, no "pqc" member.
+                ["signatureValid"] = true, ["complete"] = true,
+                ["objectCount"] = 2, ["suppliedCount"] = 2, ["matchedCount"] = 2,
+                ["objects"] = new JsonArray(
+                    new JsonObject { ["par"] = "urn:sigill:envelope", ["supplied"] = true, ["hashMatch"] = true },
+                    new JsonObject { ["par"] = "urn:t:prompt", ["supplied"] = true, ["hashMatch"] = true }),
+                ["missing"] = new JsonArray(), ["unreferenced"] = new JsonArray(),
+            },
+        })));
+        using var client = Client(handler);
+
+        var result = await client.VerifyEvidenceV2Async(
+            artifact, new Dictionary<string, byte[]> { ["urn:t:prompt"] = "p"u8.ToArray() });
+
+        result.Complete.Should().BeTrue("the classical verdict is what the old verifier reported");
+        result.Pqc.Should().Be("not_checked", "a hybrid JWS with no pqc verdict is unchecked, not absent");
+        result.Ok.Should().BeFalse("the classical verdict must never stand in for the hybrid one");
+        result.Issues.Should().Contain(i => i.Contains("no pqc verdict"));
+    }
+
+    [Fact]
     public async Task Verify_SurfacesMisalignment_AndUncoveredRoles()
     {
         // Envelope claims urn:t:prompt, but the signature signed urn:t:evil.

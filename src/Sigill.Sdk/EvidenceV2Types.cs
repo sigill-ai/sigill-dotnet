@@ -154,6 +154,13 @@ public sealed record EvidenceV2VerificationResult
     /// <summary>The full platform response, for diagnostics and rendering.</summary>
     public required JsonObject Raw { get; init; }
 
-    /// <summary>The single answer: complete ∧ aligned ∧ required roles covered.</summary>
-    public bool Ok => Complete && AlignmentOk && MissingRoles.Count == 0;
+    /// <summary>
+    /// The single answer: complete ∧ aligned ∧ required roles covered ∧ the
+    /// hybrid dimension settled (<see cref="Pqc"/> absent-or-verified). The
+    /// last clause is enforced client-side as well as server-side, so an SDK
+    /// talking to an older verifier can never report a hybrid artifact Ok
+    /// from the classical verdict alone.
+    /// </summary>
+    public bool Ok => Complete && AlignmentOk && MissingRoles.Count == 0
+                      && Pqc is "absent" or "verified";
 }
