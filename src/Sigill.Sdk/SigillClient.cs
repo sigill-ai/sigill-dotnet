@@ -659,7 +659,7 @@ public sealed class SigillClient : ISigillAiEvidenceClient, IDisposable
         // aligned by construction (spec §5.2) and every URI is opaque-safe.
         var seenUris = new HashSet<string>(StringComparer.Ordinal);
         var envelopeObjects = new JsonArray();
-        var requestObjects = new JsonArray();
+        var requestObjects = new List<SignedObjectDigest>();
         foreach (var p in payloads)
         {
             if (p.Bytes is null) throw new ArgumentNullException(nameof(payloads), "payload Bytes is required");
@@ -678,16 +678,82 @@ public sealed class SigillClient : ISigillAiEvidenceClient, IDisposable
             if (p.Metadata is not null) envObj["metadata"] = (JsonObject)p.Metadata.DeepClone();
             envelopeObjects.Add(envObj);
 
-            var reqObj = new JsonObject { ["uri"] = uri, ["hashHex"] = EnvelopeHashing.HashHex(p.Bytes) };
-            if (options.Pqc) reqObj["hashHex512"] = EnvelopeHashing.HashHex(p.Bytes, "SHA-512");
-            if (p.ContentType is not null) reqObj["contentType"] = p.ContentType;
-            requestObjects.Add(reqObj);
+            requestObjects.Add(new SignedObjectDigest
+            {
+                Uri = uri,
+                HashHex = EnvelopeHashing.HashHex(p.Bytes),
+                HashHex512 = options.Pqc ? EnvelopeHashing.HashHex(p.Bytes, "SHA-512") : null,
+                ContentType = p.ContentType,
+            });
         }
         envelope["objects"] = envelopeObjects;
 
         // The envelope is hashed AS-IS (no v1 field-stripping — spec §4).
         var canonical = EnvelopeHashing.Canonicalize(envelope);
         var envelopeHashHex = EnvelopeHashing.HashHex(canonical);
+
+        // Delegate to the profile-agnostic tier. EnvelopeContentType stays
+        // unset on purpose: the AI-evidence profile is pinned to its own cty
+        // (the platform default) — that is the profile discriminator (spec §5.2).
+        var result = await SignObjectHashesAsync(
+            envelopeHashHex,
+            requestObjects,
+            certificateId,
+            new ObjectSignOptions
+            {
+                EnvelopeHashHex512 = options.Pqc ? EnvelopeHashing.HashHex(canonical, "SHA-512") : null,
+                Qualified = options.Qualified,
+                Pqc = options.Pqc,
+                Label = options.Label,
+                Tags = options.Tags,
+                Reminders = options.Reminders,
+                ReminderDays = options.ReminderDays,
+            },
+            cancellationToken).ConfigureAwait(false);
+
+        // The artifact exists only here — Sigill never saw the envelope.
+        return new AiEvidenceV2Artifact(envelope, result.Signature, envelopeHashHex);
+    }
+
+    /// <inheritdoc/>
+    public async Task<SignHashesResult> SignObjectHashesAsync(
+        string envelopeHashHex,
+        IReadOnlyList<SignedObjectDigest> objects,
+        Guid certificateId,
+        ObjectSignOptions? options = null,
+        CancellationToken cancellationToken = default)
+    {
+        objects ??= Array.Empty<SignedObjectDigest>();
+        options ??= new ObjectSignOptions();
+
+        if (!IsHex(envelopeHashHex, 64))
+            throw new SigillException("envelopeHashHex must be 64 hex characters (SHA-256 of the canonical envelope).");
+        if (options.Pqc && !IsHex(options.EnvelopeHashHex512, 128))
+            throw new SigillException("Pqc requires EnvelopeHashHex512 — 128 hex characters (SHA-512 of the same canonical envelope).");
+        if (objects.Count > MaxSignHashesObjects)
+            throw new SigillException($"objects[] is capped at {MaxSignHashesObjects} entries per seal.");
+
+        var seenUris = new HashSet<string>(StringComparer.Ordinal);
+        var requestObjects = new JsonArray();
+        foreach (var o in objects)
+        {
+            var uri = o.Uri?.Trim() ?? "";
+            if (uri.Length == 0)
+                throw new SigillException("Every object needs a non-empty opaque URI.");
+            if (string.Equals(uri, AiEvidenceV2Artifact.EnvelopeUri, StringComparison.Ordinal))
+                throw new SigillException($"'{AiEvidenceV2Artifact.EnvelopeUri}' is reserved for the envelope itself.");
+            if (!seenUris.Add(uri))
+                throw new SigillException($"Duplicate object URI '{uri}' — URIs are compared byte-exactly and must be unique.");
+            if (!IsHex(o.HashHex, 64))
+                throw new SigillException($"Object '{uri}': hashHex must be 64 hex characters (SHA-256).");
+            if (options.Pqc && !IsHex(o.HashHex512, 128))
+                throw new SigillException($"Object '{uri}': Pqc requires hashHex512 — 128 hex characters (SHA-512).");
+
+            var reqObj = new JsonObject { ["uri"] = uri, ["hashHex"] = o.HashHex };
+            if (options.Pqc) reqObj["hashHex512"] = o.HashHex512;
+            if (o.ContentType is not null) reqObj["contentType"] = o.ContentType;
+            requestObjects.Add(reqObj);
+        }
 
         var requestBody = new JsonObject
         {
@@ -696,10 +762,11 @@ public sealed class SigillClient : ISigillAiEvidenceClient, IDisposable
             ["objects"] = requestObjects,
             ["qualified"] = options.Qualified,
         };
+        if (options.EnvelopeContentType is not null) requestBody["envelopeContentType"] = options.EnvelopeContentType;
         if (options.Pqc)
         {
             requestBody["pqc"] = true;
-            requestBody["envelopeHashHex512"] = EnvelopeHashing.HashHex(canonical, "SHA-512");
+            requestBody["envelopeHashHex512"] = options.EnvelopeHashHex512;
         }
         if (options.Label is not null) requestBody["label"] = options.Label;
         if (options.Tags is { Count: > 0 }) requestBody["tags"] = new JsonArray(options.Tags.Select(t => (JsonNode)t).ToArray());
@@ -716,8 +783,26 @@ public sealed class SigillClient : ISigillAiEvidenceClient, IDisposable
         if (body["signature"] is not JsonObject signature)
             throw new SigillException("The sealing response did not carry a JWS signature object.");
 
-        // The artifact exists only here — Sigill never saw the envelope.
-        return new AiEvidenceV2Artifact(envelope, (JsonObject)signature.DeepClone(), envelopeHashHex);
+        return new SignHashesResult
+        {
+            Signature     = (JsonObject)signature.DeepClone(),
+            OperationId   = Guid.TryParse(body["operationId"]?.GetValue<string>(), out var opId) ? opId : Guid.Empty,
+            Format        = body["format"]?.GetValue<string>(),
+            TimestampedBy = body["timestampedBy"]?.GetValue<string>(),
+            Qualified     = body["qualified"]?.GetValue<bool>() ?? false,
+            Pqc           = body["pqc"]?.GetValue<bool>() ?? false,
+        };
+    }
+
+    /// <summary>Mirror of the platform's per-seal object cap.</summary>
+    internal const int MaxSignHashesObjects = 128;
+
+    private static bool IsHex(string? s, int length)
+    {
+        if (s is null || s.Length != length) return false;
+        foreach (var c in s)
+            if (!System.Uri.IsHexDigit(c)) return false;
+        return true;
     }
 
     /// <inheritdoc/>
@@ -733,54 +818,40 @@ public sealed class SigillClient : ISigillAiEvidenceClient, IDisposable
         // Hashing anonymity: only digests travel. The envelope digest is just
         // the entry for urn:sigill:envelope, recomputed locally with JCS.
         var canonical = EnvelopeHashing.Canonicalize(artifact.Envelope);
-        var digests = new JsonObject { [AiEvidenceV2Artifact.EnvelopeUri] = EnvelopeHashing.HashHex(canonical) };
+        var digests = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            [AiEvidenceV2Artifact.EnvelopeUri] = EnvelopeHashing.HashHex(canonical),
+        };
         foreach (var (uri, bytes) in payloads)
             digests[uri] = EnvelopeHashing.HashHex(bytes);
-
-        var requestBody = new JsonObject
-        {
-            ["signature"] = artifact.Signature.DeepClone(),
-            ["digests"] = digests,
-        };
 
         // Hybrid seals are both-required (spec §7): when the JWS carries an
         // ML-DSA signer, the SHA-512 map travels too — otherwise the platform
         // honestly reports pqc: not_checked and complete: false.
-        var hybrid = HasMlDsaSigner(artifact.Signature);
-        if (hybrid)
+        Dictionary<string, string>? digests512 = null;
+        if (HasMlDsaSigner(artifact.Signature))
         {
-            var digests512 = new JsonObject
+            digests512 = new Dictionary<string, string>(StringComparer.Ordinal)
             {
                 [AiEvidenceV2Artifact.EnvelopeUri] = EnvelopeHashing.HashHex(canonical, "SHA-512"),
             };
             foreach (var (uri, bytes) in payloads)
                 digests512[uri] = EnvelopeHashing.HashHex(bytes, "SHA-512");
-            requestBody["digests512"] = digests512;
         }
 
-        using var resp = await _http.PostAsJsonAsync("/seal/verify-objects", requestBody, cancellationToken).ConfigureAwait(false);
-        if (!resp.IsSuccessStatusCode)
-        {
-            var detail = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
-            throw new SigillException($"Blind verification failed ({(int)resp.StatusCode}): {detail}");
-        }
-        var body = (await resp.Content.ReadFromJsonAsync<JsonObject>(cancellationToken: cancellationToken).ConfigureAwait(false))!;
-        var r = body["objects"] as JsonObject ?? new JsonObject();
+        // The cryptographic dimension is the profile-agnostic tier's job …
+        var core = await VerifyObjectHashesAsync(
+            artifact.Signature, digests, digests512, tsrBase64: null, cancellationToken).ConfigureAwait(false);
 
+        // … and the envelope-layer checks below are this profile's (spec §7.1).
         var issues = new List<string>();
         var verdicts = new List<EvidenceV2ObjectVerdict>();
         var signedUris = new List<string>();
-        if (r["objects"] is JsonArray objArr)
-            foreach (var o in objArr.OfType<JsonObject>())
-            {
-                var uri = o["par"]?.GetValue<string>() ?? "";
-                signedUris.Add(uri);
-                verdicts.Add(new EvidenceV2ObjectVerdict(
-                    uri,
-                    o["contentType"]?.GetValue<string>(),
-                    o["supplied"]?.GetValue<bool>() ?? false,
-                    o["hashMatch"]?.GetValue<bool>() ?? false));
-            }
+        foreach (var v in core.Objects)
+        {
+            signedUris.Add(v.Uri);
+            verdicts.Add(new EvidenceV2ObjectVerdict(v.Uri, v.ContentType, v.Supplied, v.HashMatch));
+        }
 
         // Envelope-layer checks — the SDK's job, on the SDK's copy (spec §7.1).
         // 1:1 order-preserving alignment between objects[] and pars[1…].
@@ -811,20 +882,91 @@ public sealed class SigillClient : ISigillAiEvidenceClient, IDisposable
                 issues.Add($"Required role(s) not covered by a verified payload: {string.Join(", ", missingRoles)}.");
         }
 
+        // The hybrid dimension (including the defensive not_checked fallback
+        // when the verifier returned no pqc verdict) is handled by the
+        // profile-agnostic tier — its issues carry over verbatim.
+        issues.AddRange(core.Issues);
+
+        return new EvidenceV2VerificationResult
+        {
+            SignatureValid = core.SignatureValid,
+            Complete       = core.Complete,
+            Pqc            = core.Pqc,
+            ObjectCount    = core.ObjectCount,
+            SuppliedCount  = core.SuppliedCount,
+            MatchedCount   = core.MatchedCount,
+            Objects        = verdicts,
+            Missing        = core.Missing.ToList(),
+            Unreferenced   = core.Unreferenced.ToList(),
+            AlignmentOk    = alignmentOk,
+            MissingRoles   = missingRoles,
+            Issues         = issues,
+            Raw            = core.Raw,
+        };
+    }
+
+    /// <inheritdoc/>
+    public async Task<ObjectsVerificationResult> VerifyObjectHashesAsync(
+        JsonObject signature,
+        IReadOnlyDictionary<string, string>? digests = null,
+        IReadOnlyDictionary<string, string>? digests512 = null,
+        string? tsrBase64 = null,
+        CancellationToken cancellationToken = default)
+    {
+        if (signature is null) throw new ArgumentNullException(nameof(signature));
+
+        var requestBody = new JsonObject { ["signature"] = signature.DeepClone() };
+        if (digests is not null)
+        {
+            var d = new JsonObject();
+            foreach (var (uri, hex) in digests) d[uri] = hex;
+            requestBody["digests"] = d;
+        }
+        if (digests512 is not null)
+        {
+            var d = new JsonObject();
+            foreach (var (uri, hex) in digests512) d[uri] = hex;
+            requestBody["digests512"] = d;
+        }
+        if (tsrBase64 is not null) requestBody["tsrBase64"] = tsrBase64;
+
+        var hybrid = HasMlDsaSigner(signature);
+
+        using var resp = await _http.PostAsJsonAsync("/seal/verify-objects", requestBody, cancellationToken).ConfigureAwait(false);
+        if (!resp.IsSuccessStatusCode)
+        {
+            var detail = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
+            throw new SigillException($"Blind verification failed ({(int)resp.StatusCode}): {detail}");
+        }
+        var body = (await resp.Content.ReadFromJsonAsync<JsonObject>(cancellationToken: cancellationToken).ConfigureAwait(false))!;
+        var r = body["objects"] as JsonObject ?? new JsonObject();
+
+        var verdicts = new List<SignedObjectVerdict>();
+        if (r["objects"] is JsonArray objArr)
+            foreach (var o in objArr.OfType<JsonObject>())
+                verdicts.Add(new SignedObjectVerdict(
+                    o["par"]?.GetValue<string>() ?? "",
+                    o["contentType"]?.GetValue<string>(),
+                    o["supplied"]?.GetValue<bool>() ?? false,
+                    o["hashMatch"]?.GetValue<bool>() ?? false));
+
         // Defensive on the hybrid dimension: the SDK detected the ML-DSA signer
         // itself, so a response with no pqc verdict (older or third-party
-        // platform build) must NEVER let the classical verdict stand in for the
+        // verifier build) must NEVER let the classical verdict stand in for the
         // hybrid one — that is the exact masquerade the both-required rule
         // forbids. Missing pqc on a hybrid JWS ⇒ not_checked.
+        var issues = new List<string>();
         var pqc = r["pqc"]?.GetValue<string>() ?? (hybrid ? "not_checked" : "absent");
         if (hybrid && r["pqc"] is null)
             issues.Add("Hybrid seal: the verifier returned no pqc verdict — treat the ML-DSA commitment as not checked.");
         else if (pqc is "not_checked" or "failed")
             issues.Add($"Hybrid seal: the ML-DSA commitment is '{pqc}'.");
+        if (hybrid && digests512 is null)
+            issues.Add("Hybrid seal: no SHA-512 digests were supplied — the ML-DSA commitment cannot verify without them.");
         if (r["warnings"] is JsonArray warnArr)
             foreach (var w in warnArr) if (w?.GetValue<string>() is string s) issues.Add(s);
 
-        return new EvidenceV2VerificationResult
+        return new ObjectsVerificationResult
         {
             SignatureValid = r["signatureValid"]?.GetValue<bool>() ?? false,
             Complete       = r["complete"]?.GetValue<bool>() ?? false,
@@ -835,8 +977,6 @@ public sealed class SigillClient : ISigillAiEvidenceClient, IDisposable
             Objects        = verdicts,
             Missing        = (r["missing"] as JsonArray ?? new JsonArray()).Select(m => m?.GetValue<string>() ?? "").ToList(),
             Unreferenced   = (r["unreferenced"] as JsonArray ?? new JsonArray()).Select(u => u?.GetValue<string>() ?? "").ToList(),
-            AlignmentOk    = alignmentOk,
-            MissingRoles   = missingRoles,
             Issues         = issues,
             Raw            = body,
         };
