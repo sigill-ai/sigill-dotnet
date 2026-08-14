@@ -737,9 +737,14 @@ public sealed class SigillClient : ISigillAiEvidenceClient, IDisposable
         var requestObjects = new JsonArray();
         foreach (var o in objects)
         {
-            var uri = o.Uri?.Trim() ?? "";
+            // URIs are signed byte-exactly and the caller's envelope already
+            // references them — never normalize; reject what the platform
+            // would sign differently than the caller's own copy says.
+            var uri = o.Uri ?? "";
             if (uri.Length == 0)
                 throw new SigillException("Every object needs a non-empty opaque URI.");
+            if (!string.Equals(uri, uri.Trim(), StringComparison.Ordinal))
+                throw new SigillException($"Object URI '{uri}' has leading or trailing whitespace — URIs are signed byte-exactly and are never normalized.");
             if (string.Equals(uri, AiEvidenceV2Artifact.EnvelopeUri, StringComparison.Ordinal))
                 throw new SigillException($"'{AiEvidenceV2Artifact.EnvelopeUri}' is reserved for the envelope itself.");
             if (!seenUris.Add(uri))

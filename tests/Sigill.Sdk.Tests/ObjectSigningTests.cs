@@ -165,6 +165,13 @@ public class ObjectSigningTests
         var duplicate = () => client.SignObjectHashesAsync(EnvelopeHex, new[] { one, one }, cert);
         await duplicate.Should().ThrowAsync<SigillException>().WithMessage("*Duplicate*");
 
+        // Byte-exact identity: a padded URI is rejected, never silently
+        // trimmed — the caller's envelope already references it verbatim, and
+        // a normalized signature would no longer align with that envelope.
+        var padded = () => client.SignObjectHashesAsync(
+            EnvelopeHex, new[] { one with { Uri = "urn:example:1 " } }, cert);
+        await padded.Should().ThrowAsync<SigillException>().WithMessage("*whitespace*");
+
         var badEnvelopeHash = () => client.SignObjectHashesAsync("not-hex", new[] { one }, cert);
         await badEnvelopeHash.Should().ThrowAsync<SigillException>().WithMessage("*envelopeHashHex*");
 
