@@ -154,6 +154,42 @@ public interface ISigillAiEvidenceClient
         CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// Sign a multi-object record by digests — the profile-agnostic tier
+    /// beneath <see cref="SealEvidenceV2Async"/> (spec §2/§12). The caller
+    /// supplies the digest of its own envelope (signed as object 0 under
+    /// <c>urn:sigill:envelope</c>) and a digest + opaque URI per content
+    /// object, and may set <see cref="ObjectSignOptions.EnvelopeContentType"/> —
+    /// the profile discriminator — so sibling profiles sign through the same
+    /// blind mechanism without being presented as AI evidence. Content never
+    /// travels; the caller assembles its own artifact from the returned JWS.
+    /// </summary>
+    Task<SignHashesResult> SignObjectHashesAsync(
+        string envelopeHashHex,
+        IReadOnlyList<SignedObjectDigest> objects,
+        System.Guid certificateId,
+        ObjectSignOptions? options = null,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Verify a multi-object seal by digests via the blind (public)
+    /// <c>POST /seal/verify-objects</c> endpoint — the profile-agnostic tier
+    /// beneath <see cref="VerifyEvidenceV2Async"/>. Digest maps are keyed by
+    /// the signed pars URIs (the envelope digest rides under
+    /// <c>urn:sigill:envelope</c> — no special case); for hybrid seals
+    /// <paramref name="digests512"/> must carry the SHA-512 map or the
+    /// platform honestly reports pqc <c>not_checked</c>. Returns per-object
+    /// verdicts, missing/unreferenced URIs, and the compound
+    /// <see cref="ObjectsVerificationResult.Ok"/>; envelope-layer checks
+    /// (schema, alignment, roles) remain the calling profile's job.
+    /// </summary>
+    Task<ObjectsVerificationResult> VerifyObjectHashesAsync(
+        System.Text.Json.Nodes.JsonObject signature,
+        IReadOnlyDictionary<string, string>? digests = null,
+        IReadOnlyDictionary<string, string>? digests512 = null,
+        string? tsrBase64 = null,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// Verify a detached CAdES signature via <c>POST /seal/verify</c>. The endpoint
     /// is public — no API key is required — but the existing HTTP client works fine.
     /// </summary>
