@@ -51,6 +51,7 @@ internal static class PdfIncrementalSigner
     internal static PreparedPdf Prepare(
         byte[]   originalPdf,
         DateTime signingTime,
+        string?  signerName       = null,
         string?  reason           = null,
         string?  location         = null,
         int      cmsReservedBytes = DefaultCmsReservedBytes)
@@ -83,8 +84,13 @@ internal static class PdfIncrementalSigner
         // PAdES validation rules expect with this subfilter.
         sb.Append("<< /Type /Sig /Filter /Adobe.PPKLite /SubFilter /ETSI.CAdES.detached\n");
         sb.Append($"/ByteRange {brTpl}\n/Contents <{emptyHex}>\n/M ({FmtDate(signingTime)})\n");
-        if (reason   != null) sb.Append($"/Reason ({PdfEsc(reason)})\n");
-        if (location != null) sb.Append($"/Location ({PdfEsc(location)})\n");
+        // /Name is what Acrobat shows in the Signatures panel BEFORE validation
+        // runs (lazy validation shows "Signed by Unknown" without it). The
+        // platform derives it from the seal cert's subject CN; in the delegated
+        // flow the cert lives server-side, so the caller supplies it.
+        if (signerName != null) sb.Append($"/Name ({PdfEsc(signerName)})\n");
+        if (reason     != null) sb.Append($"/Reason ({PdfEsc(reason)})\n");
+        if (location   != null) sb.Append($"/Location ({PdfEsc(location)})\n");
         sb.Append(">>");
         AppendObj(sigId, sb.ToString());
 
@@ -92,7 +98,14 @@ internal static class PdfIncrementalSigner
             $"<< /Type /Annot /Subtype /Widget /Rect [0 0 0 0]\n" +
             $"/FT /Sig /T (Sigill-Seal-1) /V {sigId} 0 R /P {pageId} 0 R /F 132 >>");
 
-        AppendObj(pageId, AddAnnotToPage(s.Page1Content, fldId));
+        // When the page references its /Annots array indirectly, re-emit that
+        // array object instead of the page — rewriting the page would add a
+        // second /Annots key (duplicate keys are undefined behaviour, and a
+        // last-wins parser would silently drop every pre-existing annotation).
+        if (s.AnnotsArrayId > 0)
+            AppendObj(s.AnnotsArrayId, AddRefToAnnotsArray(s.AnnotsArrayContent!, fldId));
+        else
+            AppendObj(pageId, AddAnnotToPage(s.Page1Content, fldId));
 
         AppendObj(afId, s.AcroFormContent != null
             ? AddFieldToAcroForm(s.AcroFormContent, fldId)
@@ -302,7 +315,7 @@ internal static class PdfIncrementalSigner
     /// is the SHA-256 ByteRange digest to send to <c>/tsa/stamp-hash</c>; embed
     /// the returned TimeStampToken with <see cref="EmbedDocTimestamp"/>.
     /// </summary>
-    internal static PreparedDocTimestamp PrepareDocTimestamp(byte[] signedPdf, DateTime now)
+    internal static PreparedDocTimestamp PrepareDocTimestamp(byte[] signedPdf)
     {
         var s    = ParseStructure(signedPdf);
         int next = s.MaxObjectId + 1;
@@ -327,15 +340,21 @@ internal static class PdfIncrementalSigner
 
         // /SubFilter /ETSI.RFC3161 identifies this as a document timestamp; the
         // /Contents slot holds the raw TimeStampToken DER.
+        // No /M: EN 319 142-1 §5.4.3 says /M should not be present in a
+        // DocTimeStamp dict — readers take the time from the token's genTime.
         AppendObj(sigId,
             $"<< /Type /DocTimeStamp /Filter /Adobe.PPKLite /SubFilter /ETSI.RFC3161\n" +
-            $"/ByteRange {brTpl}\n/Contents <{emptyHex}>\n/M ({FmtDate(now)})\n>>");
+            $"/ByteRange {brTpl}\n/Contents <{emptyHex}>\n>>");
 
         AppendObj(fldId,
             $"<< /Type /Annot /Subtype /Widget /Rect [0 0 0 0]\n" +
             $"/FT /Sig /T (Sigill-DocTS-1) /V {sigId} 0 R /P {pageId} 0 R /F 132 >>");
 
-        AppendObj(pageId, AddAnnotToPage(s.Page1Content, fldId));
+        // Same indirect-/Annots handling as Prepare — see comment there.
+        if (s.AnnotsArrayId > 0)
+            AppendObj(s.AnnotsArrayId, AddRefToAnnotsArray(s.AnnotsArrayContent!, fldId));
+        else
+            AppendObj(pageId, AddAnnotToPage(s.Page1Content, fldId));
 
         AppendObj(afId, s.AcroFormContent != null
             ? AddFieldToAcroForm(s.AcroFormContent, fldId)
@@ -387,7 +406,8 @@ internal static class PdfIncrementalSigner
     // ─── PDF structure parser ─────────────────────────────────────────────────
 
     private sealed record Struct(int MaxObjectId, int CatalogId, string CatalogContent,
-        int Page1Id, string Page1Content, int AcroFormId, string? AcroFormContent, long StartXref);
+        int Page1Id, string Page1Content, int AcroFormId, string? AcroFormContent,
+        int AnnotsArrayId, string? AnnotsArrayContent, long StartXref);
 
     private static Struct ParseStructure(byte[] pdf)
     {
@@ -418,6 +438,18 @@ internal static class PdfIncrementalSigner
         int p1Id = WalkToFirstLeafPage(t, offsets, compressed, pages);
         var p1   = GetObj(t, offsets, compressed, p1Id);
 
+        // A page may hold its annotation array inline (/Annots [ ... ]) or as an
+        // indirect reference (/Annots 9 0 R). Resolve the indirect form here so
+        // the signing passes can re-emit the ARRAY object rather than adding a
+        // second /Annots key to the page dictionary.
+        int annotsId = 0; string? annotsContent = null;
+        var anm = Regex.Match(p1, @"/Annots\s+(\d+)\s+\d+\s+R");
+        if (anm.Success && int.TryParse(anm.Groups[1].Value, out int anid))
+        {
+            annotsId = anid;
+            annotsContent = GetObj(t, offsets, compressed, anid);
+        }
+
         int afId = 0; string? afContent = null;
         var am = Regex.Match(cat, @"/AcroForm\s+(\d+)\s+\d+\s+R");
         if (am.Success && int.TryParse(am.Groups[1].Value, out int aid))
@@ -430,7 +462,7 @@ internal static class PdfIncrementalSigner
             offsets.Keys.DefaultIfEmpty(0).Max(),
             compressed.Keys.DefaultIfEmpty(0).Max());
 
-        return new Struct(maxId, catId, cat, p1Id, p1, afId, afContent, sx);
+        return new Struct(maxId, catId, cat, p1Id, p1, afId, afContent, annotsId, annotsContent, sx);
     }
 
     private static int WalkToFirstLeafPage(string t,
@@ -585,8 +617,22 @@ internal static class PdfIncrementalSigner
     {
         var m = Regex.Match(p, @"/Annots\s*\[\s*");
         if (m.Success) { int c = p.IndexOf(']', m.Index + m.Length); return p[..c] + $" {fldId} 0 R" + p[c..]; }
+        // Indirect /Annots must be handled by the caller (re-emit the array
+        // object). Falling through would write a SECOND /Annots key into the
+        // page dict — duplicate keys are undefined per ISO 32000-1 §7.3.7.
+        if (Regex.IsMatch(p, @"/Annots\s+\d+\s+\d+\s+R"))
+            throw new InvalidOperationException(
+                "Page has an indirect /Annots reference — resolve it and patch the array object instead");
         int dd = p.LastIndexOf(">>", StringComparison.Ordinal);
         return p[..dd] + $"\n/Annots [{fldId} 0 R]\n>>";
+    }
+
+    /// <summary>Append a reference to an /Annots ARRAY object body ("[...]").</summary>
+    private static string AddRefToAnnotsArray(string arr, int fldId)
+    {
+        int c = arr.LastIndexOf(']');
+        if (c < 0) throw new InvalidOperationException("/Annots target object is not an array");
+        return arr[..c].TrimEnd() + $" {fldId} 0 R]";
     }
 
     private static string AddFieldToAcroForm(string af, int fldId)

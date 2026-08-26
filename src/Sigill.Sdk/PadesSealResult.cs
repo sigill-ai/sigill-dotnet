@@ -56,6 +56,16 @@ public sealed record PadesSealOptions
     /// </summary>
     public bool AllowUploadFallback { get; init; }
 
+    /// <summary>
+    /// Written into the PDF signature dictionary's /Name field — the signer name
+    /// Acrobat shows in the Signatures panel before validation runs (without it,
+    /// unvalidated signatures show as "Signed by Unknown"). Set it to the seal
+    /// certificate's subject CN; the cert lives server-side in the delegated
+    /// flow, so the SDK cannot derive it. Acrobat replaces it with the
+    /// certificate CN once the signature is validated.
+    /// </summary>
+    public string? SignerName { get; init; }
+
     /// <summary>Written into the PDF signature dictionary's /Reason field.</summary>
     public string? Reason { get; init; }
 

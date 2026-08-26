@@ -31,7 +31,6 @@ public class PdfSignerGoldenVectorTests
         "startxref\n9\n%%EOF\n");
 
     private static readonly DateTime T1 = new(2026, 1, 2, 3, 4, 5, DateTimeKind.Utc);
-    private static readonly DateTime T2 = new(2026, 1, 2, 3, 4, 6, DateTimeKind.Utc);
 
     private static byte[] Pattern(int len, int mod) =>
         Enumerable.Range(0, len).Select(i => (byte)(i % mod)).ToArray();
@@ -50,23 +49,23 @@ public class PdfSignerGoldenVectorTests
         var ocsp  = Pattern(200, 17);
         var token = Pattern(400, 23);
 
-        var prep = PdfIncrementalSigner.Prepare(Pdf, T1, "Golden", "Vector (X)");
-        Sha(prep.Bytes).Should().Be("03ccfbecd8e840624613d05687b0e3a99530593b361d11f6de0461d2eb6fcde5");
+        var prep = PdfIncrementalSigner.Prepare(Pdf, T1, "Golden Vector", "Golden", "Vector (X)");
+        Sha(prep.Bytes).Should().Be("b5d39c763dd5a7e9fc24dad7b070e00b9f0c6c40658c714dca99690b54a6b712");
         string.Concat(prep.DocumentHash.Select(x => x.ToString("x2")))
-            .Should().Be("47266535eedf3ff5f91439055ed9048f171279cf6fe2209cc0d4bf0e2ddbb7e2");
+            .Should().Be("ff51dc7d56810a178dcbc05a43c1cdb34b4f75a0d50351d47ae19faac6a5c83c");
 
         var embedded = PdfIncrementalSigner.Embed(prep, cms);
-        Sha(embedded).Should().Be("fe12166e8359c77615becf76b0be828fa65ef591f5d42b0669f61f6a686b882b");
+        Sha(embedded).Should().Be("cf39c8cc8375423558f89d70efd5f490b473297fee6a4c49fc16794b252603f8");
 
         var dss = PdfIncrementalSigner.AppendDss(embedded, new[] { cert }, new[] { ocsp }, cms);
-        Sha(dss).Should().Be("d2d8ac0179883b29edad8d18f3c0ef69db7613c45bfdb878f6acb043097256d3");
+        Sha(dss).Should().Be("4640e64a37264e912f331539751f220ba8ac73ddcfc489adad61060d4b01da87");
 
-        var dt = PdfIncrementalSigner.PrepareDocTimestamp(dss, T2);
-        Sha(dt.Bytes).Should().Be("6756707d60d22f50ee34a3850c5a48bd0f67db9de8adfc41b5ee47d4f79fd913");
+        var dt = PdfIncrementalSigner.PrepareDocTimestamp(dss);
+        Sha(dt.Bytes).Should().Be("ac259ce36157a452883e48b63f7e5819c1fa10b7d7e594aa0802772a8150ae74");
         string.Concat(dt.DocumentHash.Select(x => x.ToString("x2")))
-            .Should().Be("e6270386b20cfe1a67e2c12e7ae99e2f3e1d223844e6870f09fbfad17cea6148");
+            .Should().Be("811393190bf59d619c02ae2e69b4a6eda7d63007f1554074875c23e8c3b17b24");
 
         var final = PdfIncrementalSigner.EmbedDocTimestamp(dt, token);
-        Sha(final).Should().Be("bd088853743d90d82ee4cdb79aaa1d4fc2f9543ed12078ff0ab58c00c33bdb51");
+        Sha(final).Should().Be("fb4fa1d61ec7a178a005fb9314ecf9650f4a12b111d483be4bf45c507751bdc5");
     }
 }

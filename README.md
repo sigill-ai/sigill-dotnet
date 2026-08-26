@@ -245,8 +245,11 @@ var pdf = await File.ReadAllBytesAsync("contract.pdf");
 PadesSealResult result = await client.SealPadesAsync(pdf, certId, new PadesSealOptions
 {
     Label = "contract.pdf",
-    Qualified = false,        // true → eIDAS-qualified timestamps throughout
-    Reason = "Approved",      // optional, lands in the PDF /Reason field
+    Qualified = false,             // true → eIDAS-qualified timestamps throughout
+    SignerName = "ACME Corp AS",   // recommended: your seal cert's subject CN —
+                                   // lands in /Name, what Acrobat shows before
+                                   // validation runs (otherwise "Unknown")
+    Reason = "Approved",           // optional, lands in the PDF /Reason field
 });
 
 await File.WriteAllBytesAsync("contract_sealed.pdf", result.SealedPdf);
