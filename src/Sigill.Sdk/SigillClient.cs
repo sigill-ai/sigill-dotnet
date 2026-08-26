@@ -162,7 +162,7 @@ public sealed class SigillClient : ISigillAiEvidenceClient, IDisposable
         try
         {
             prep = PdfIncrementalSigner.Prepare(
-                pdf, DateTime.UtcNow, options.Reason, options.Location);
+                pdf, DateTime.UtcNow, options.SignerName, options.Reason, options.Location);
         }
         catch (Exception ex) when (ex is InvalidOperationException or NotSupportedException or KeyNotFoundException)
         {
@@ -190,12 +190,12 @@ public sealed class SigillClient : ISigillAiEvidenceClient, IDisposable
     /// <see cref="PadesSealOptions.AllowUploadFallback"/> for that.
     /// </para>
     /// </summary>
-    public PreparedPadesPdf PreparePades(byte[] pdf, string? reason = null, string? location = null)
+    public PreparedPadesPdf PreparePades(byte[] pdf, string? reason = null, string? location = null, string? signerName = null)
     {
         if (pdf is null) throw new ArgumentNullException(nameof(pdf));
         try
         {
-            var prep = PdfIncrementalSigner.Prepare(pdf, DateTime.UtcNow, reason, location);
+            var prep = PdfIncrementalSigner.Prepare(pdf, DateTime.UtcNow, signerName, reason, location);
             return new PreparedPadesPdf(prep.Bytes, EnvelopeHashing.ToLowerHex(prep.DocumentHash));
         }
         catch (Exception ex) when (ex is InvalidOperationException or NotSupportedException or KeyNotFoundException)
@@ -288,7 +288,7 @@ public sealed class SigillClient : ISigillAiEvidenceClient, IDisposable
 
             try
             {
-                var dtPrep = PdfIncrementalSigner.PrepareDocTimestamp(signedPdf, DateTime.UtcNow);
+                var dtPrep = PdfIncrementalSigner.PrepareDocTimestamp(signedPdf);
                 var stampBody = new JsonObject
                 {
                     ["tsaSlug"] = "auto",
