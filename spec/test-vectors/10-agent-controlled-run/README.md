@@ -27,8 +27,9 @@ Two vector classes, as `ai-evidence-envelope-v2.md` §11 defines them:
 2. **Verification** (`artifacts/` + `objects/`): the signatures are real and
    verify against the Sigill test tenant's certificate. Offline, a verifier
    can check envelope integrity (`hashV[0]`), object completeness, the chain,
-   finalization, binding, the seal-time order (`sigTst` genTime: control
-   before `run_start`, evaluation after `run_end`) and the evaluation subject; signature validity
+   finalization, binding, the seal-time sanity check (`sigTst` genTime of the
+   control not later than `run_start`, within stated accuracy) and the
+   evaluation subject; signature validity
    needs the platform or a TS 119 182-1 validator and is `null` in
    `expected-result.json`.
 
@@ -42,3 +43,8 @@ Refresh: run the end-to-end test with `SIGILL_API_KEY`, `SIGILL_SEAL_CERTIFICATE
 and `SIGILL_AGENT_WRITE_VECTOR=<repo root>` set, then `python _generate.py`
 and `python _validate.py`. The code is the source of truth; this directory is
 its snapshot.
+
+The nine seals were issued by six different TSAs in the platform pool
+(Microsoft, GlobalSign, Sectigo, SwissSign, DigiCert and one unnamed), with
+`accuracy` 500 ms, 1 s or unspecified, and genTime with or without
+fractional seconds. Any time comparison must allow for that.

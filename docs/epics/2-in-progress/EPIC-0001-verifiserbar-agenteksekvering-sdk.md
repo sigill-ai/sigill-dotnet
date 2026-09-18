@@ -80,6 +80,16 @@ ved verifisering.
 | B5 verifierens identitet | Eget sertifikat i samme tenant; sertifikat per kall finnes i SDK-et |
 | B6 kjede uten hovedbok | Kjeden bæres i artefaktene |
 
+## Til backend-leddet
+
+- **CRM-tidskontroll i verifier-komponenten**: `observed-state` inkluderer
+  radens endringstidspunkt, og verifieren kontrollerer at seal-tiden til
+  `tool_call` ligger før skrivetidspunktet. Det er den ene kontrollen som
+  avslører «handling først, segl etterpå» (spec §4.1). Ingen SDK-endring.
+- **Demo-hensyn**: raske kjøringer mot en tilfeldig TSA i poolen. Ingen
+  tidskontroll i SDK-et påvirker utfallet, så en sporadisk rød foran
+  publikum kan ikke komme fra klokkeavvik.
+
 ## Eksplisitt utenfor
 
 - Endringer i `platform` og i `Sigill.Sdk`-kjernen.

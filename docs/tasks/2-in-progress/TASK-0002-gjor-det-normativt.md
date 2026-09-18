@@ -28,7 +28,8 @@ korrigerer ved verifisering.
 | Rollesett | Lukket per profil. Produsentprivate data går i `extensions`. |
 | `binds` | Påkrevd i `run_start`, valgfritt ellers, identisk om gjentatt. |
 | `boundActionHash` | **Strøket 18.09 (eierkorreksjon).** Ingen test trengte feltet, og det innførte en ny bindingsregel. Hva godkjenningen dekker er innholdet i `approval-receipt`. |
-| Tidsrekkefølge | **Lagt til 18.09 (eierkorreksjon).** Verifikatoren leser `sigTst` genTime og krever Control Artifact forseglet før eller samtidig med `run_start`, seal-tider i kjederekkefølge og evaluering etter `run_end`. Brudd gir `run_invalid`. Egen test med styrbar testklokke. |
+| Seal-tid | **Lagt til og korrigert 18.09 (eierkorreksjon).** Verifikatoren leser `sigTst` genTime og `accuracy`. Kontrollens TSA-tid skal ikke ligge etter run_start sin, innenfor accuracy og hele sekunder. Bindingen beviser rekkefølgen allerede; et avvik peker på platform eller TSA, rapporteres som avvik og endrer ikke utfallet. Monotoni langs kjeden er fjernet: `prev` beviser rekkefølgen, og TSA-poolen (seks TSA-er i vektor 10) ville gitt falske røde på raske kjøringer. Egen test med testklokke. |
+| Luken «handling først, segl etterpå» | Verken binding eller tid ser den. Løses i verifier-komponenten: `observed-state` tar med radens endringstidspunkt, og seal-tiden til `tool_call` må ligge før. Hører til backend-leddet (der `observed-state` lages), se spec §4.1. |
 | `evidenceId` | `urn:uuid:`-form, siden profilene alltid refererer hverandre med URI. |
 | Kjerneavhengighet | Sidepakken refererer den publiserte `Sigill.Sdk` 0.5.0 som pakke, ikke prosjektet. Da bygger den nøyaktig slik en kunde gjør, og kjernen kan ikke endres ved et uhell. |
 

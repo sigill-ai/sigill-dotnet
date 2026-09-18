@@ -8,7 +8,6 @@
   "missingObjects": [],
   "binding": "bound",
   "controlSealedBeforeRun": true,
-  "sealOrderValid": true,
   "foreignArtifacts": [],
   "issues": [],
   "finalSeq": 6,

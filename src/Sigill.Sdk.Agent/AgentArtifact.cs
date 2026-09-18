@@ -44,7 +44,10 @@ public sealed class AgentArtifact
         }
     }
 
-    /// <summary>Platformens tidsstempel (sigTst genTime), eller null når det ikke finnes.</summary>
+    /// <summary>TSA-ens oppgitte nøyaktighet for seal-tiden, eller null.</summary>
+    public TimeSpan? SealAccuracy => Agent.SealTime.Accuracy(Signature);
+
+    /// <summary>TSA-ens tidsstempel (sigTst genTime), eller null når det ikke finnes.</summary>
     public DateTimeOffset? SealTime
     {
         get

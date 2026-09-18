@@ -11,13 +11,22 @@ namespace Sigill.Sdk.Agent;
 
 /// <summary>
 /// Seal-tiden er <c>genTime</c> i <c>sigTst</c> (RFC 3161) i den klassiske
-/// signaturens ubeskyttede <c>etsiU</c>-header. Det er platformens tidsstempel,
-/// ikke produsentens klokke, og det er den som beviser rekkefølgen «kontroll
-/// forseglet før run_start».
+/// signaturens ubeskyttede <c>etsiU</c>-header: TSA-ens klokke, ikke
+/// produsentens. Rekkefølgen mellom artefaktene er allerede bevist av
+/// bindingene; seal-tiden er forsvar i dybden mot feil i platform eller TSA.
 /// </summary>
 public static class SealTime
 {
-    public static DateTimeOffset? Of(JsonObject signature)
+    public static DateTimeOffset? Of(JsonObject signature) => Read(signature)?.TokenInfo.Timestamp;
+
+    /// <summary>TSTInfo <c>accuracy</c> når TSA-en oppgir den, ellers null.</summary>
+    public static TimeSpan? Accuracy(JsonObject signature)
+    {
+        var micros = Read(signature)?.TokenInfo.AccuracyInMicroseconds;
+        return micros is null ? null : TimeSpan.FromTicks(micros.Value * 10);
+    }
+
+    private static Rfc3161TimestampToken? Read(JsonObject signature)
     {
         var entry = Binding.ClassicalEntry(signature);
         if (entry?["header"]?["etsiU"] is not JsonArray etsiU) return null;
@@ -31,7 +40,7 @@ public static class SealTime
                 if (value is null) continue;
                 var bytes = TryDecodeBase64(value);
                 if (bytes is not null && Rfc3161TimestampToken.TryDecode(bytes, out var token, out _))
-                    return token.TokenInfo.Timestamp;
+                    return token;
             }
         }
         return null;

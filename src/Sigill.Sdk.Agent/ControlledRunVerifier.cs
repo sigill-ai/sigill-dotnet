@@ -110,40 +110,25 @@ public sealed class ControlledRunVerifier
             : (controls.Count > 0 ? Bindings.ControlOnly : Bindings.Unbound);
         if (binding == Bindings.RunOnly) issues.Add("run_start binder et Control Artifact som ikke er levert.");
 
-        // Steg 6b: tidsrekkefølgen. Bindingen beviser at Control Artifact fantes før
-        // run_start ble signert; sigTst beviser det uavhengig, med platformens klokke.
-        // Sammenlignes på hele sekunder: RFC 3161 garanterer bare sekundpresisjon, og
-        // TSA-ene i platformens pool gir ulik presisjon (vektor 10: 36.113 mot 36).
+        // Steg 7: seal-tid som forsvar i dybden. Bindingen i steg 6 beviser at Control
+        // Artifact fantes før run_start ble signert; en TSA-tid som sier noe annet er en
+        // feil hos platform eller TSA, ikke hos produsenten, og endrer ikke utfallet.
+        // Toleranse: TSTInfo accuracy der den er oppgitt, og hele sekunder fordi
+        // TSA-ene i poolen gir ulik presisjon (vektor 10: seks TSA-er, 36.113 mot 36).
         bool? controlSealedBeforeRun = null;
         if (boundControl is not null && runStart is not null)
         {
             if (boundControl.SealTime is null || runStart.SealTime is null)
-                issues.Add("Seal-tid (sigTst) mangler på Control Artifact eller run_start; tidsrekkefølgen kan ikke bevises.");
+                issues.Add("Seal-tid (sigTst) mangler på Control Artifact eller run_start; tidsrekkefølgen kan ikke kontrolleres.");
             else
             {
-                controlSealedBeforeRun = Seconds(boundControl.SealTime) <= Seconds(runStart.SealTime);
+                var controlEarliest = Seconds(boundControl.SealTime - (boundControl.SealAccuracy ?? TimeSpan.Zero));
+                var runLatest = Seconds(runStart.SealTime + (runStart.SealAccuracy ?? TimeSpan.Zero));
+                controlSealedBeforeRun = controlEarliest <= runLatest;
                 if (controlSealedBeforeRun == false)
-                    issues.Add($"Control Artifact er forseglet {boundControl.SealTime:O}, etter run_start {runStart.SealTime:O}: kontrollgrunnlaget var ikke låst før kjøringen.");
+                    issues.Add($"TSA-tiden på Control Artifact ({boundControl.SealTime:O}) ligger etter run_start ({runStart.SealTime:O}) selv om run_start binder dens signatur: avvik hos platform eller TSA.");
             }
         }
-        bool? sealOrderValid = null;
-        if (executions.Count > 0 && executions.All(a => a.SealTime is not null))
-        {
-            sealOrderValid = true;
-            for (var i = 1; i < executions.Count; i++)
-                if (Seconds(executions[i].SealTime) < Seconds(executions[i - 1].SealTime))
-                {
-                    sealOrderValid = false;
-                    issues.Add($"seq {executions[i].Seq} er forseglet før seq {executions[i - 1].Seq}.");
-                }
-            if (runEnd is not null)
-                foreach (var evaluation in evaluations.Where(e => e.SealTime is not null && Seconds(e.SealTime) < Seconds(runEnd.SealTime)))
-                {
-                    sealOrderValid = false;
-                    issues.Add($"Evalueringen {Label(evaluation)} er forseglet før run_end.");
-                }
-        }
-        if (controlSealedBeforeRun == false || sealOrderValid == false) runVerdict = RunVerdicts.Invalid;
         var controlArtifact = controls.Count == 0 ? "missing"
             : controls.All(c => status[c].Complete && status[c].SignatureValid != false && status[c].EnvelopeMatchesSignature) ? "verified"
             : "invalid";
@@ -186,7 +171,6 @@ public sealed class ControlledRunVerifier
             MissingObjects = missingObjects,
             Binding = binding,
             ControlSealedBeforeRun = controlSealedBeforeRun,
-            SealOrderValid = sealOrderValid,
             Evaluations = evaluationResults,
             ForeignArtifacts = foreign,
             Issues = issues,
