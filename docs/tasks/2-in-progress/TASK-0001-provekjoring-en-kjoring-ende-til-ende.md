@@ -3,7 +3,7 @@
 EPIC-0001, ledd 1. Status: In progress 18.09.2026 — bestilt av eier samme dag.
 Første ende-til-ende-kjøring mot testmiljøet er grønn (ni artefakter,
 platformen bekrefter signaturene, verifikatoren gir run_finalized og bound).
-Venter på at eier og Raymond ser kjøringen (akseptanse 4).
+Venter på at eieren ser kjøringen (akseptanse 4).
 
 ## Formål
 
@@ -66,9 +66,9 @@ fra et dokument.
 
 1. `dotnet test` grønn på grenen. Sabotasjetestene kjører uten nettverk.
 2. Ende-til-ende-testen er grønn mot testmiljøet, og de lagrede
-   artefaktene ligger igjen så eier og Raymond kan åpne dem.
+   artefaktene ligger igjen så eieren kan åpne dem.
 3. `git diff main -- src/Sigill.Sdk tests/Sigill.Sdk.Tests` er tom.
-4. Eier og Raymond har sett kjøringen og sagt ja eller nei til å gå
+4. Eieren har sett kjøringen og sagt ja eller nei til å gå
    videre.
 
 ## Anslag

@@ -4,7 +4,7 @@ Status: In progress 18.09.2026 — godkjent av eier; TASK-0001 startet.
 
 Gren: `initiativ/agenteksekvering` i dette repoet. Eierordre 18.09.2026:
 initiativet lever på egne grener i alle berørte repoer, merges ikke til
-`main` før Hallvard og Raymond begge sier klart, og kan bli forkastet i sin
+`main` før eieren sier klart, og kan bli forkastet i sin
 helhet. Alt i denne epicen skal derfor kunne slettes uten spor i
 `Sigill.Sdk`.
 
@@ -84,6 +84,8 @@ ved verifisering.
 
 1. TASK-0001 viser én kjøring som verifikatoren rapporterer som komplett,
    uendret og bundet, og tre manipulasjoner som den avviser.
-2. Eier og Raymond har tatt stilling til om initiativet går videre.
+2. Eieren har tatt stilling til om initiativet går videre. Kravspesifikasjonen
+   er utarbeidet av eieren sammen med Raymond; demonstrasjon for Raymond
+   skjer når en MCP-løsning er på plass fra frontend og nedover, ikke per task.
 3. Sletting av sidepakkens mapper og tilbakestilling av `Sigill.Sdk.sln`
    gir `main` tilbake.

@@ -1,7 +1,7 @@
 # TASK-0003: Speiling av agentprofilene til sigill-python
 
-EPIC-0001, ledd 3. Status: Backlog — bestilles i sigill-python når eier
-og Raymond har godkjent TASK-0002. Gjøres på en initiativgren der også.
+EPIC-0001, ledd 3. Status: Backlog — bestilles i sigill-python når eieren
+har godkjent TASK-0002. Gjøres på en initiativgren der også.
 
 ## Formål
 

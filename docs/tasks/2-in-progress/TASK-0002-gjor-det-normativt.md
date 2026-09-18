@@ -67,4 +67,4 @@ korrigerer ved verifisering.
 2. Alle åtte sabotasjetester grønne uten nettverk. **Oppfylt.**
 3. Omfanget er revidert mot det TASK-0001 faktisk viste. **Oppfylt**, se
    beslutningstabellen.
-4. Eier og Raymond har verifisert på grenen. **Åpent.**
+4. Eieren har verifisert på grenen. **Åpent.**
