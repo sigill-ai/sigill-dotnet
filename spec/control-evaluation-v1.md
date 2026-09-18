@@ -61,11 +61,15 @@ Artifact.
 
 ## 3. Object roles
 
-Closed set: `observed-state`, `control-set`. Exactly one `control-set`
-object is REQUIRED and MUST have the same URI and digest as the
-`control-set` object in the Control Artifact; that is how a verifier proves
-the same controls applied before and after. At least one `observed-state`
-object is REQUIRED.
+Closed set: `observed-state`, `control-set`, `baseline-state`. Exactly one
+`control-set` object is REQUIRED and MUST have the same URI and digest as
+the `control-set` object in the Control Artifact; that is how a verifier
+proves the same controls applied before and after. At least one
+`observed-state` object is REQUIRED. When the Control Artifact carries a
+`baseline-state`, the evaluation SHOULD carry the same object (URI and
+digest); every "unchanged" result then rests on a baseline that was sealed
+before the run and is bound to the conclusion. A different baseline digest
+is reported by the run verifier as `baselineDigestMatches: false`.
 
 ## 4. Identity
 

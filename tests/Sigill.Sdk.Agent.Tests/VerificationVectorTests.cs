@@ -42,7 +42,29 @@ public class VerificationVectorTests
         evaluation.Overall.Should().Be(expectedEvaluation["overall"]!.GetValue<string>());
         evaluation.SubjectBound.Should().BeTrue();
         evaluation.ControlSetDigestMatches.Should().BeTrue();
+        evaluation.BaselineDigestMatches.Should().BeNull("vektor 10 ble forseglet før baseline-state fantes");
         evaluation.Controls.Should().HaveCount(4);
+    }
+
+    [Fact]
+    public async Task Sabotasje_9_evaluering_med_annen_grunnlinje_avvises()
+    {
+        var run = await ReferenceRun.BuildAsync(new FakeArtifactSealer(), DateTimeOffset.UtcNow);
+        var intact = await new ControlledRunVerifier().VerifyAsync(run.All(), run.Payloads);
+        intact.Evaluations.Single().BaselineDigestMatches.Should().BeTrue();
+
+        // Evalueringen binder en grunnlinje der status allerede var suspended: da ville «status-unchanged» bestått.
+        var baselineUri = run.Evaluation.UriOfRole(AgentProfiles.Roles.BaselineState)!;
+        var otherBaseline = "{\"address\":\"Storgata 1\",\"accountNumber\":\"1234.56.78903\",\"creditLimit\":50000,\"status\":\"suspended\"}"u8.ToArray();
+        var otherDigest = EnvelopeHashing.HashHex(otherBaseline);
+        var forged = FakeArtifactSealer.WithReplacedObjectDigest(run.Evaluation, baselineUri, otherDigest);
+        var payloads = new Dictionary<string, byte[]>(run.Payloads, StringComparer.Ordinal) { [baselineUri] = otherBaseline };
+
+        var result = await new ControlledRunVerifier().VerifyAsync(run.All().Where(a => !ReferenceEquals(a, run.Evaluation)).Append(forged).ToList(), payloads);
+
+        result.Evaluations.Single().BaselineDigestMatches.Should().BeFalse();
+        result.Issues.Should().Contain(i => i.Contains("Grunnlinjen"));
+        result.ObjectsComplete.Should().BeFalse("den utbyttede grunnlinjen matcher ikke digesten i Control Artifact");
     }
 
     [Fact]

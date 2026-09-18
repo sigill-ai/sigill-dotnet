@@ -175,7 +175,7 @@
     },
     "objects": {
       "type": "array",
-      "description": "Exactly one control-set (same URI and digest as in the Control Artifact); at least one observed-state.",
+      "description": "Exactly one control-set and at most one baseline-state (both same URI and digest as in the Control Artifact); at least one observed-state.",
       "items": {
         "type": "object",
         "additionalProperties": false,
@@ -193,7 +193,8 @@
             "type": "string",
             "enum": [
               "observed-state",
-              "control-set"
+              "control-set",
+              "baseline-state"
             ]
           },
           "contentType": {
@@ -246,6 +247,21 @@
             ]
           },
           "minContains": 1
+        },
+        {
+          "contains": {
+            "type": "object",
+            "properties": {
+              "role": {
+                "const": "baseline-state"
+              }
+            },
+            "required": [
+              "role"
+            ]
+          },
+          "minContains": 0,
+          "maxContains": 1
         }
       ]
     }

@@ -29,6 +29,7 @@ public sealed class ReferenceRun
         }
 
         var controlSet = Obj(AgentProfiles.Roles.ControlSet, controlSetJson, "application/json");
+        var baseline = Obj(AgentProfiles.Roles.BaselineState, """{"address":"Storgata 1","accountNumber":"1234.56.78903","creditLimit":50000,"status":"active"}""", "application/json");
         var control = await new ControlArtifactBuilder
         {
             ActorId = "urn:acme:harness:prod",
@@ -45,7 +46,7 @@ public sealed class ReferenceRun
             Obj(AgentProfiles.Roles.ToolManifest, """{"tools":["crm.update_customer"]}""", "application/json"),
             Obj(AgentProfiles.Roles.ExecutionPolicy, """{"allowedFields":["address"]}""", "application/json"),
             controlSet,
-            Obj(AgentProfiles.Roles.BaselineState, """{"address":"Storgata 1","accountNumber":"1234.56.78903","creditLimit":50000,"status":"active"}""", "application/json"),
+            baseline,
             Obj(AgentProfiles.Roles.Authority, "eyJhbGciOiJub25lIn0.eyJkZWxlZ2F0ZWRCeSI6InVybjphY21lOnVzZXI6NDEiLCJzY29wZXMiOlsiY3VzdG9tZXIuYWRkcmVzcy53cml0ZSJdfQ.", "application/jwt"),
         }, sealer);
 
@@ -88,7 +89,8 @@ public sealed class ReferenceRun
         }.SealAsync(
             Obj(AgentProfiles.Roles.ObservedState, """{"address":"Nygata 4","accountNumber":"1234.56.78903","creditLimit":50000,"status":"suspended"}""", "application/json"),
             new DetachedObject(AgentProfiles.Roles.ControlSet, controlSet.Bytes, controlSet.ContentType, controlSet.Uri),
-            sealer);
+            sealer,
+            new DetachedObject(AgentProfiles.Roles.BaselineState, baseline.Bytes, baseline.ContentType, baseline.Uri));
 
         return new ReferenceRun
         {

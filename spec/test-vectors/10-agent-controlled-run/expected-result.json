@@ -18,7 +18,8 @@
       "verifierVersion": "1.3.0",
       "overall": "FAIL",
       "subjectBound": true,
-      "controlSetDigestMatches": true
+      "controlSetDigestMatches": true,
+      "baselineDigestMatches": null
     }
   ]
 }

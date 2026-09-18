@@ -30,6 +30,7 @@ korrigerer ved verifisering.
 | `boundActionHash` | **Strøket 18.09 (eierkorreksjon).** Ingen test trengte feltet, og det innførte en ny bindingsregel. Hva godkjenningen dekker er innholdet i `approval-receipt`. |
 | Seal-tid | **Lagt til og korrigert 18.09 (eierkorreksjon).** Verifikatoren leser `sigTst` genTime og `accuracy`. Kontrollens TSA-tid skal ikke ligge etter run_start sin, innenfor accuracy og hele sekunder. Bindingen beviser rekkefølgen allerede; et avvik peker på platform eller TSA, rapporteres som avvik og endrer ikke utfallet. Monotoni langs kjeden er fjernet: `prev` beviser rekkefølgen, og TSA-poolen (seks TSA-er i vektor 10) ville gitt falske røde på raske kjøringer. Egen test med testklokke. |
 | `baseline-state` | **Lagt til 18.09 (eierkorreksjon).** Én valgfri rolle i Control Artifact for tilstanden før kjøringen. Lagt inn nå fordi rollesettet er lukket; innholdet brukes av verifier-komponenten i backend, ikke av SDK-et. |
+| Binding av grunnlinjen | **Lagt til 18.09 (eierbestilling).** Control Evaluation legger ved `baseline-state` på samme måte som `control-set`; verifikatoren rapporterer `baselineDigestMatches`. Test: evaluering med annen grunnlinje avvises. Endringen er i sidepakken, ikke i kjernen. |
 | Luken «handling først, segl etterpå» | Verken binding eller tid ser den. Løses i verifier-komponenten: `observed-state` tar med radens endringstidspunkt, og seal-tiden til `tool_call` må ligge før. Hører til backend-leddet (der `observed-state` lages), se spec §4.1. |
 | `evidenceId` | `urn:uuid:`-form, siden profilene alltid refererer hverandre med URI. |
 | Kjerneavhengighet | Sidepakken refererer den publiserte `Sigill.Sdk` 0.5.0 som pakke, ikke prosjektet. Da bygger den nøyaktig slik en kunde gjør, og kjernen kan ikke endres ved et uhell. |
@@ -50,7 +51,7 @@ korrigerer ved verifisering.
 4. **Tester**: kanoniseringsvektorer (bytes, hash, `hashV[0]`), intakt sett
    mot forventet resultat, alle åtte sabotasjetester fra notatet 8.3 på
    kopier av vektoren, byggernes regler. 33 tester, kjører uten nettverk.
-5. **Pakke** `Sigill.Sdk.Agent` 0.1.0-preview.2 med metadata og README;
+5. **Pakke** `Sigill.Sdk.Agent` 0.1.0-preview.3 med metadata og README;
    `dotnet pack` gir en nupkg med avhengighet `Sigill.Sdk 0.5.0`.
    Publisering er egen eierbeslutning.
 6. **CI**: vektor 10 regenereres og valideres i `spec-vectors`-jobben.

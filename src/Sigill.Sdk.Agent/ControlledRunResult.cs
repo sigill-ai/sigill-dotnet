@@ -51,6 +51,8 @@ public sealed class EvaluationResult
     public required bool SubjectBound { get; init; }
     /// <summary>Null når kontrollsettet ikke er levert som objekt i begge artefakter.</summary>
     public required bool? ControlSetDigestMatches { get; init; }
+    /// <summary>Grunnlinjen evalueringen bygger på er den samme som ble forseglet før kjøringen. Null når en av dem mangler baseline-state.</summary>
+    public required bool? BaselineDigestMatches { get; init; }
 }
 
 public static class RunVerdicts

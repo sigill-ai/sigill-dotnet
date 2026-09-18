@@ -117,7 +117,8 @@ when earlier ones fail, so the report is complete.
 8. **Evaluations:** for each Control Evaluation, `subject` matches the run's
    `run_end` and the bound Control Artifact → `subjectBound`; the
    `control-set` object digest equals the one in the Control Artifact →
-   `controlSetDigestMatches`. `overall` and `controls[]` are reported
+   `controlSetDigestMatches`; likewise for `baseline-state` when both carry
+   it → `baselineDigestMatches`. `overall` and `controls[]` are reported
    **unchanged**. The verifier never evaluates controls.
 
 ### 4.1 What verification does not say

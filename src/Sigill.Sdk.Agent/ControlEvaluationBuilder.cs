@@ -32,12 +32,19 @@ public sealed class ControlEvaluationBuilder
     public required DateTimeOffset EvaluatedAt { get; init; }
     public DateTimeOffset? CreatedAt { get; init; }
 
+    /// <summary>
+    /// Forsegler evalueringen. <c>baselineState</c> er tilstanden før kjøringen, samme objekt (URI og bytes)
+    /// som i Control Artifact; uten den er «uendret» verifierens ord alene.
+    /// </summary>
     public Task<AgentArtifact> SealAsync(
         DetachedObject observedState,
         DetachedObject controlSet,
         IArtifactSealer sealer,
+        DetachedObject? baselineState = null,
         CancellationToken cancellationToken = default)
     {
+        if (baselineState is not null && baselineState.Role != AgentProfiles.Roles.BaselineState)
+            throw new SigillException($"Grunnlinjen må ha rollen '{AgentProfiles.Roles.BaselineState}'.");
         if (observedState is null) throw new ArgumentNullException(nameof(observedState));
         if (controlSet is null) throw new ArgumentNullException(nameof(controlSet));
         if (observedState.Role != AgentProfiles.Roles.ObservedState)
@@ -69,8 +76,8 @@ public sealed class ControlEvaluationBuilder
         envelope["overall"] = Overall;
         envelope["evaluatedAt"] = Json.Timestamp(EvaluatedAt);
 
-        return Envelopes.SealAsync(
-            envelope, new[] { observedState, controlSet }, AgentProfiles.ControlEvaluationContentType, sealer, cancellationToken);
+        var objects = baselineState is null ? new[] { observedState, controlSet } : new[] { observedState, controlSet, baselineState };
+        return Envelopes.SealAsync(envelope, objects, AgentProfiles.ControlEvaluationContentType, sealer, cancellationToken);
     }
 
     private static bool IsResult(string value) =>

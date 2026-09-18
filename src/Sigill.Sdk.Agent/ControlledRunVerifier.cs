@@ -135,6 +135,7 @@ public sealed class ControlledRunVerifier
 
         // Steg 7: evalueringene gjengis, bindes, og kontrollsettets digest sammenlignes.
         var controlSetHash = boundControl is null ? null : HashOfRole(boundControl, AgentProfiles.Roles.ControlSet);
+        var baselineHash = boundControl is null ? null : HashOfRole(boundControl, AgentProfiles.Roles.BaselineState);
         var evaluationResults = new List<EvaluationResult>();
         foreach (var evaluation in evaluations)
         {
@@ -148,6 +149,11 @@ public sealed class ControlledRunVerifier
                 : string.Equals(controlSetHash, evaluationControlSetHash, StringComparison.Ordinal);
             if (!subjectBound) issues.Add($"Evalueringen {Label(evaluation)} er ikke bundet til denne kjøringens run_end og Control Artifact.");
             if (digestMatches == false) issues.Add($"Kontrollsettet i {Label(evaluation)} har en annen digest enn i Control Artifact.");
+            var evaluationBaselineHash = HashOfRole(evaluation, AgentProfiles.Roles.BaselineState);
+            bool? baselineMatches = baselineHash is null || evaluationBaselineHash is null
+                ? null
+                : string.Equals(baselineHash, evaluationBaselineHash, StringComparison.Ordinal);
+            if (baselineMatches == false) issues.Add($"Grunnlinjen (baseline-state) i {Label(evaluation)} er en annen enn den som ble forseglet i Control Artifact.");
             evaluationResults.Add(new EvaluationResult
             {
                 EvidenceId = Json.ReadString(evaluation.Envelope["evidenceId"]) ?? "",
@@ -157,6 +163,7 @@ public sealed class ControlledRunVerifier
                 Controls = evaluation.Envelope["controls"]?.DeepClone() as JsonArray ?? new JsonArray(),
                 SubjectBound = subjectBound,
                 ControlSetDigestMatches = digestMatches,
+                BaselineDigestMatches = baselineMatches,
             });
         }
 
