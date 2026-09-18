@@ -31,6 +31,7 @@ public class VerificationVectorTests
         result.MissingObjects.Should().BeEmpty();
         result.Binding.Should().Be(expected["binding"]!.GetValue<string>());
         result.ControlSealedBeforeRun.Should().Be(expected["controlSealedBeforeRun"]!.GetValue<bool>());
+        result.EventTimesPlausible.Should().Be(expected["eventTimesPlausible"]!.GetValue<bool>());
         result.ForeignArtifacts.Should().BeEmpty();
         result.Issues.Should().BeEmpty();
         result.FinalSeq.Should().Be(expected["finalSeq"]!.GetValue<int>());

@@ -113,7 +113,10 @@ when earlier ones fail, so the report is complete.
    are **not** compared along the chain: `prevSignatureSha256` proves that
    order already, and TSA pools with failover (vector 10 was stamped by six
    TSAs with accuracies of 500 ms, 1 s and unspecified) would produce false
-   negatives on fast runs.
+   negatives on fast runs. In the same spirit, no event may claim an
+   `eventTime` later than its own seal time (one-second granularity) →
+   `eventTimesPlausible`. `eventTime` stays the producer's claim; this only
+   bounds how far it can lie, and a `false` is reported, never fatal.
 8. **Evaluations:** for each Control Evaluation, `subject` matches the run's
    `run_end` and the bound Control Artifact → `subjectBound`; the
    `control-set` object digest equals the one in the Control Artifact →

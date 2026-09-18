@@ -7,7 +7,9 @@ står åpen; lukkingen 18.09 var utledet, ikke bekreftet.
 
 Endringer etter første levering, alle i sidepakken: preview.2 (SealTime,
 baseline-state som rolle), preview.3 (baseline-state i Control Evaluation,
-`baselineDigestMatches`, 40 tester). Backend refererer preview.3. Hver
+`baselineDigestMatches`, 40 tester), preview.4 (`eventTimesPlausible`:
+eventTime ikke etter egen seal-tid, rapportert avvik, 41 tester). Backend
+refererer preview.4. Hver
 endring har fått nytt versjonsnummer, siden NuGet cacher per versjon i
 ~/.nuget/packages og en ny nupkg med samme nummer ville blitt ignorert
 lokalt mens Docker-bygget fikk den nye.

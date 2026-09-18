@@ -90,6 +90,33 @@ public class SealTimeOrderTests
     }
 
     [Fact]
+    public async Task EventTime_etter_seal_tid_rapporteres_uten_aa_endre_utfallet()
+    {
+        // Produsentens klokke påstår at hendelsen skjedde ti minutter etter at den ble forseglet.
+        var sealer = new FakeArtifactSealer { Clock = T0 };
+        var correlationId = "urn:uuid:" + Guid.NewGuid();
+        var controlSet = new DetachedObject(AgentProfiles.Roles.ControlSet, "{}"u8.ToArray(), "application/json");
+        var control = await new ControlArtifactBuilder
+        {
+            ActorId = "urn:acme:harness", ActivityName = "x", CorrelationId = correlationId,
+            AgentId = "a", AgentVersion = "1", ControlSetId = "cs", ControlSetVersion = "1", CreatedAt = T0,
+        }.SealAsync(new[] { controlSet }, sealer);
+        var agentRun = new AgentRun(sealer, "x", correlationId, "a");
+        await agentRun.StartAsync(control, T0.AddMinutes(10));
+        await agentRun.FinishAsync(AgentProfiles.Dispositions.Completed, T0.AddMinutes(10));
+
+        var result = await new ControlledRunVerifier().VerifyAsync(new[] { control }.Concat(agentRun.Artifacts).ToList(),
+            new Dictionary<string, byte[]> { [controlSet.Uri] = controlSet.Bytes });
+
+        result.EventTimesPlausible.Should().BeFalse();
+        result.RunVerdict.Should().Be(RunVerdicts.Finalized);
+        result.Issues.Should().Contain(i => i.Contains("produsentens klokke"));
+
+        var honest = await ReferenceRun.BuildAsync(new FakeArtifactSealer { Clock = T0.AddSeconds(5) }, T0);
+        (await new ControlledRunVerifier().VerifyAsync(honest.All(), honest.Payloads)).EventTimesPlausible.Should().BeTrue();
+    }
+
+    [Fact]
     public async Task Uten_sigTst_kan_tiden_ikke_kontrolleres_og_det_sies()
     {
         var run = await ReferenceRun.BuildAsync(new FakeArtifactSealer { Clock = T0 }, T0);

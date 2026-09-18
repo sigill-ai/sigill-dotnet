@@ -110,6 +110,26 @@ public sealed class ControlledRunVerifier
             : (controls.Count > 0 ? Bindings.ControlOnly : Bindings.Unbound);
         if (binding == Bindings.RunOnly) issues.Add("run_start binder et Control Artifact som ikke er levert.");
 
+        // Steg 7b: eventTime er produsentens påstand. En hendelse kan ikke være forseglet før den
+        // skjedde, så eventTime > seal-tid (hele sekunder) er en klokke som lyver eller går feil.
+        bool? eventTimesPlausible = null;
+        var withSeal = executions.Where(a => a.SealTime is not null).ToList();
+        if (withSeal.Count == executions.Count && executions.Count > 0)
+        {
+            eventTimesPlausible = true;
+            foreach (var a in executions)
+            {
+                var eventTimeText = Json.ReadString(a.Envelope["step"]?["eventTime"]);
+                if (!DateTimeOffset.TryParse(eventTimeText, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.AssumeUniversal, out var eventTime))
+                { eventTimesPlausible = false; issues.Add($"{Label(a)} har ulesbar eventTime."); continue; }
+                if (Seconds(eventTime) > Seconds(a.SealTime))
+                {
+                    eventTimesPlausible = false;
+                    issues.Add($"{Label(a)} påstår eventTime {eventTime:O}, etter sin egen seal-tid {a.SealTime:O}: produsentens klokke kan ikke stemme.");
+                }
+            }
+        }
+
         // Steg 7: seal-tid som forsvar i dybden. Bindingen i steg 6 beviser at Control
         // Artifact fantes før run_start ble signert; en TSA-tid som sier noe annet er en
         // feil hos platform eller TSA, ikke hos produsenten, og endrer ikke utfallet.
@@ -178,6 +198,7 @@ public sealed class ControlledRunVerifier
             MissingObjects = missingObjects,
             Binding = binding,
             ControlSealedBeforeRun = controlSealedBeforeRun,
+            EventTimesPlausible = eventTimesPlausible,
             Evaluations = evaluationResults,
             ForeignArtifacts = foreign,
             Issues = issues,

@@ -33,6 +33,12 @@ public sealed class ControlledRunResult
     /// Null når en av seal-tidene mangler.
     /// </summary>
     public required bool? ControlSealedBeforeRun { get; init; }
+    /// <summary>
+    /// Forsvar i dybden: ingen hendelse påstår et eventTime etter sin egen seal-tid (hele sekunder).
+    /// eventTime er produsentens klokke og bevises ikke; dette avgrenser bare hvor mye den kan lyve.
+    /// Null når seal-tider mangler. Påvirker ikke RunVerdict.
+    /// </summary>
+    public required bool? EventTimesPlausible { get; init; }
     public required IReadOnlyList<EvaluationResult> Evaluations { get; init; }
     public required IReadOnlyList<string> ForeignArtifacts { get; init; }
     public required IReadOnlyList<string> Issues { get; init; }
