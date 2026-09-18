@@ -36,6 +36,21 @@ public class EndToEndTests
 
         var outDir = Path.Combine(AppContext.BaseDirectory, "artifacts", run.CorrelationId.Replace("urn:uuid:", ""));
         run.WriteTo(outDir);
+        // SIGILL_AGENT_WRITE_VECTOR=<repo-rot>: fornyer spec/test-vectors/10-agent-controlled-run fra denne kjøringen.
+        // Spesifikasjonen er et øyeblikksbilde av koden; dette er knappen som tar bildet på nytt.
+        var repoRoot = Environment.GetEnvironmentVariable("SIGILL_AGENT_WRITE_VECTOR");
+        if (!string.IsNullOrWhiteSpace(repoRoot))
+        {
+            var vectorDir = Path.Combine(repoRoot, "spec", "test-vectors", "10-agent-controlled-run");
+            foreach (var stale in Directory.GetFiles(Path.Combine(vectorDir, "artifacts"))) File.Delete(stale);
+            foreach (var stale in Directory.GetFiles(Path.Combine(vectorDir, "objects"))) File.Delete(stale);
+            run.WriteTo(vectorDir);
+            Directory.Move(Path.Combine(vectorDir, "objects.json"), Path.Combine(vectorDir, "objects.json.tmp"));
+            foreach (var f in Directory.GetFiles(vectorDir, "*.json").Where(f => !f.EndsWith("expected-result.json", StringComparison.Ordinal)))
+                File.Move(f, Path.Combine(vectorDir, "artifacts", Path.GetFileName(f)), overwrite: true);
+            File.Move(Path.Combine(vectorDir, "objects.json.tmp"), Path.Combine(vectorDir, "objects.json"), overwrite: true);
+            _output.WriteLine($"Vektor 10 fornyet i {vectorDir}; kjør _generate.py og _validate.py.");
+        }
         _output.WriteLine($"Artefaktene ligger i {outDir}");
         Console.Error.WriteLine($"Artefaktene ligger i {outDir}");
 

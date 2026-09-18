@@ -27,7 +27,8 @@ Two vector classes, as `ai-evidence-envelope-v2.md` §11 defines them:
 2. **Verification** (`artifacts/` + `objects/`): the signatures are real and
    verify against the Sigill test tenant's certificate. Offline, a verifier
    can check envelope integrity (`hashV[0]`), object completeness, the chain,
-   finalization, binding and the evaluation subject; signature validity
+   finalization, binding, the seal-time order (`sigTst` genTime: control
+   before `run_start`, evaluation after `run_end`) and the evaluation subject; signature validity
    needs the platform or a TS 119 182-1 validator and is `null` in
    `expected-result.json`.
 
@@ -36,3 +37,8 @@ event removed, events swapped, `run_end` removed, foreign event inserted,
 Control Artifact swapped, evaluation with wrong subject, control set swapped
 in the evaluation) are exercised by `Sigill.Sdk.Agent.Tests` against copies
 of this set.
+
+Refresh: run the end-to-end test with `SIGILL_API_KEY`, `SIGILL_SEAL_CERTIFICATE_ID`
+and `SIGILL_AGENT_WRITE_VECTOR=<repo root>` set, then `python _generate.py`
+and `python _validate.py`. The code is the source of truth; this directory is
+its snapshot.

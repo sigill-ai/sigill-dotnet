@@ -183,11 +183,6 @@
           "type": "string",
           "description": "An identifier, not a name."
         },
-        "boundActionHash": {
-          "type": "string",
-          "pattern": "^[0-9a-f]{64}$",
-          "description": "SHA-256 of the tool-arguments object the approval covers."
-        },
         "finalSeq": {
           "type": "integer",
           "minimum": 0

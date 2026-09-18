@@ -57,7 +57,7 @@ public sealed class ReferenceRun
             new JsonObject { ["decision"] = "allow_with_human_approval", ["policyId"] = "customer-write-policy-v2" });
         await run.RecordAsync(AgentProfiles.Steps.HumanApproval, t0.AddSeconds(31),
             new JsonObject { ["decision"] = "approved", ["approver"] = "urn:acme:user:41" },
-            new[] { Obj(AgentProfiles.Roles.ApprovalReceipt, """{"approved":true,"boundActionHash":"…"}""", "application/json") });
+            new[] { Obj(AgentProfiles.Roles.ApprovalReceipt, """{"approved":true,"approver":"urn:acme:user:41"}""", "application/json") });
         await run.RecordAsync(AgentProfiles.Steps.ToolResult, t0.AddSeconds(32), null,
             new[] { Obj(AgentProfiles.Roles.ToolResult, """{"updated":true}""", "application/json") });
         await run.RecordAsync(AgentProfiles.Steps.ModelOutput, t0.AddSeconds(34), null,

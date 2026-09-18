@@ -35,6 +35,14 @@ konseptet ende til ende først, og spesifikasjonen skrives fra koden som
 virker. Ende-til-ende-tester mot testmiljøet er styringsverktøyet, og
 kursen korrigeres underveis.
 
+Eierpresisering 18.09 kveld: det som koster ved senere endringer er ikke
+gjennomgangene, men at spesifikasjon, skjema, vektor og CI må endres i
+takt med koden. Så lenge initiativet kan bli forkastet, er koden sannheten
+og spesifikasjonen et øyeblikksbilde av den. Vektoren fornyes fra koden;
+prosaen får et banner som sier det. Kjernepåstander, som at kontroll-
+grunnlaget var forseglet før kjøringen, hører hjemme i en tidlig test, ikke
+i en gjennomgang.
+
 ## Rammer
 
 1. **Sidepakke, ikke kjerneendring.** Ett prosjekt ved siden av

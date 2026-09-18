@@ -1,5 +1,11 @@
 # AgentExecutionEvidence v1 — Specification
 
+> **Snapshot, not source of truth.** While the initiative may still be
+> withdrawn, the code in `src/Sigill.Sdk.Agent` is the truth and this
+> document is a snapshot of it. Test vector 10 is regenerated from the code
+> (`SIGILL_AGENT_WRITE_VECTOR`); the prose and schemas are updated to match,
+> never the other way round. Owner decision 2026-09-18.
+
 **Content type:** `application/vnd.sigill.agent-execution+json`
 **Schema:** [`agent-execution-evidence-v1.schema.json`](./agent-execution-evidence-v1.schema.json)
 **Common rules:** [`agent-profiles-common-v1.md`](./agent-profiles-common-v1.md)
@@ -60,7 +66,7 @@ Type-specific fields:
 |---|---|
 | `tool_call` | `tool.name` REQUIRED, `tool.operation` optional |
 | `authorization` | `decision` REQUIRED (producer-defined vocabulary, e.g. `allowed`, `allow_with_human_approval`, `denied`), `policyId` optional |
-| `human_approval` | `decision` REQUIRED (`approved` or `rejected`), `approver` optional (an identifier, not a name), `boundActionHash` optional: lowercase SHA-256 hex of the `tool-arguments` object the approval covers |
+| `human_approval` | `decision` REQUIRED (`approved` or `rejected`), `approver` optional (an identifier, not a name). What the approval covers is the content of the `approval-receipt` object, held by the producer |
 | `run_end` | `finalSeq`, `finalPrevSignatureSha256`, `runDisposition` REQUIRED; `runDisposition` is `completed`, `aborted` or `failed` |
 | all | `detail` optional free text |
 

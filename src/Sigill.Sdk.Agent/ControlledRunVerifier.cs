@@ -109,6 +109,41 @@ public sealed class ControlledRunVerifier
             ? (boundControl is not null ? Bindings.Bound : Bindings.RunOnly)
             : (controls.Count > 0 ? Bindings.ControlOnly : Bindings.Unbound);
         if (binding == Bindings.RunOnly) issues.Add("run_start binder et Control Artifact som ikke er levert.");
+
+        // Steg 6b: tidsrekkefølgen. Bindingen beviser at Control Artifact fantes før
+        // run_start ble signert; sigTst beviser det uavhengig, med platformens klokke.
+        // Sammenlignes på hele sekunder: RFC 3161 garanterer bare sekundpresisjon, og
+        // TSA-ene i platformens pool gir ulik presisjon (vektor 10: 36.113 mot 36).
+        bool? controlSealedBeforeRun = null;
+        if (boundControl is not null && runStart is not null)
+        {
+            if (boundControl.SealTime is null || runStart.SealTime is null)
+                issues.Add("Seal-tid (sigTst) mangler på Control Artifact eller run_start; tidsrekkefølgen kan ikke bevises.");
+            else
+            {
+                controlSealedBeforeRun = Seconds(boundControl.SealTime) <= Seconds(runStart.SealTime);
+                if (controlSealedBeforeRun == false)
+                    issues.Add($"Control Artifact er forseglet {boundControl.SealTime:O}, etter run_start {runStart.SealTime:O}: kontrollgrunnlaget var ikke låst før kjøringen.");
+            }
+        }
+        bool? sealOrderValid = null;
+        if (executions.Count > 0 && executions.All(a => a.SealTime is not null))
+        {
+            sealOrderValid = true;
+            for (var i = 1; i < executions.Count; i++)
+                if (Seconds(executions[i].SealTime) < Seconds(executions[i - 1].SealTime))
+                {
+                    sealOrderValid = false;
+                    issues.Add($"seq {executions[i].Seq} er forseglet før seq {executions[i - 1].Seq}.");
+                }
+            if (runEnd is not null)
+                foreach (var evaluation in evaluations.Where(e => e.SealTime is not null && Seconds(e.SealTime) < Seconds(runEnd.SealTime)))
+                {
+                    sealOrderValid = false;
+                    issues.Add($"Evalueringen {Label(evaluation)} er forseglet før run_end.");
+                }
+        }
+        if (controlSealedBeforeRun == false || sealOrderValid == false) runVerdict = RunVerdicts.Invalid;
         var controlArtifact = controls.Count == 0 ? "missing"
             : controls.All(c => status[c].Complete && status[c].SignatureValid != false && status[c].EnvelopeMatchesSignature) ? "verified"
             : "invalid";
@@ -150,6 +185,8 @@ public sealed class ControlledRunVerifier
             ObjectsComplete = objectsComplete,
             MissingObjects = missingObjects,
             Binding = binding,
+            ControlSealedBeforeRun = controlSealedBeforeRun,
+            SealOrderValid = sealOrderValid,
             Evaluations = evaluationResults,
             ForeignArtifacts = foreign,
             Issues = issues,
@@ -194,6 +231,8 @@ public sealed class ControlledRunVerifier
             result.SignatureValid,
             missing.Concat(platformMissing).Distinct(StringComparer.Ordinal).ToList());
     }
+
+    private static long Seconds(DateTimeOffset? time) => time!.Value.ToUnixTimeSeconds();
 
     private static string? HashOfRole(AgentArtifact artifact, string role)
     {

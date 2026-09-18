@@ -1,5 +1,11 @@
 # Agent Evidence Profiles v1 — Common Rules
 
+> **Snapshot, not source of truth.** While the initiative may still be
+> withdrawn, the code in `src/Sigill.Sdk.Agent` is the truth and this
+> document is a snapshot of it. Test vector 10 is regenerated from the code
+> (`SIGILL_AGENT_WRITE_VECTOR`); the prose and schemas are updated to match,
+> never the other way round. Owner decision 2026-09-18.
+
 **Status:** v1, experimental. Produced on the `initiativ/agenteksekvering`
 branch; may be withdrawn. Field names are frozen for v1 by this document.
 
@@ -89,13 +95,25 @@ when earlier ones fail, so the report is complete.
 4. **Finalization:** the last artifact is `run_end`, its `step.finalSeq`
    equals its own `chain.seq`, and `step.finalPrevSignatureSha256` equals
    `signatureSha256` of the second-to-last artifact.
-5. **Run verdict:** any failure in steps 1, 3 or 4 → `run_invalid`; no
+5. **Run verdict:** any failure in steps 1, 3, 4 or 7 → `run_invalid`; no
    `run_end` → `run_open`; otherwise `run_finalized`.
 6. **Binding:** `run_start.binds.controlArtifactSignatureSha256` equals
    `signatureSha256` of a supplied Control Artifact → `bound`; a run without
    its Control Artifact → `run_only`; a Control Artifact without a run →
    `control_only`; neither → `unbound`.
-7. **Evaluations:** for each Control Evaluation, `subject` matches the run's
+7. **Time order (the core claim):** `sigTst` genTime of the bound Control
+   Artifact is on or before that of `run_start` → `controlSealedBeforeRun`;
+   seal times are non-decreasing along the chain and every Control
+   Evaluation is sealed after `run_end` → `sealOrderValid`. The binding in
+   step 6 already proves the Control Artifact existed before `run_start` was
+   signed; this step proves it independently, with the platform's clock,
+   and distinguishes "sealed before the run" from "made afterwards and bound
+   in". Times are compared at one-second granularity: RFC 3161 guarantees
+   no more, and TSAs in one pool differ in whether they emit fractional
+   seconds (vector 10 shows both). A failure here makes the run
+   `run_invalid`. Missing `sigTst` gives `null` and an explicit issue,
+   never a silent pass.
+8. **Evaluations:** for each Control Evaluation, `subject` matches the run's
    `run_end` and the bound Control Artifact → `subjectBound`; the
    `control-set` object digest equals the one in the Control Artifact →
    `controlSetDigestMatches`. `overall` and `controls[]` are reported

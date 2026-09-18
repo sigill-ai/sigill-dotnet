@@ -1,5 +1,11 @@
 # ControlEvaluation v1 — Specification
 
+> **Snapshot, not source of truth.** While the initiative may still be
+> withdrawn, the code in `src/Sigill.Sdk.Agent` is the truth and this
+> document is a snapshot of it. Test vector 10 is regenerated from the code
+> (`SIGILL_AGENT_WRITE_VECTOR`); the prose and schemas are updated to match,
+> never the other way round. Owner decision 2026-09-18.
+
 **Content type:** `application/vnd.sigill.control-evaluation+json`
 **Schema:** [`control-evaluation-v1.schema.json`](./control-evaluation-v1.schema.json)
 **Common rules:** [`agent-profiles-common-v1.md`](./agent-profiles-common-v1.md)

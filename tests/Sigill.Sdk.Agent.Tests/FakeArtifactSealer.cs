@@ -14,6 +14,9 @@ public sealed class FakeArtifactSealer : IArtifactSealer
 {
     public int Calls { get; private set; }
 
+    /// <summary>Klokken tidsstempelet (sigTst) får. Settes av testen for å styre tidsrekkefølgen.</summary>
+    public DateTimeOffset Clock { get; set; } = new(2026, 9, 16, 8, 0, 0, TimeSpan.Zero);
+
     public Task<JsonObject> SealAsync(
         string envelopeHashHex, IReadOnlyList<SignedObjectDigest> objects, string envelopeContentType,
         CancellationToken cancellationToken = default)
@@ -44,13 +47,26 @@ public sealed class FakeArtifactSealer : IArtifactSealer
         };
         var protectedB64 = B64Url(Encoding.UTF8.GetBytes(header.ToJsonString()));
         var signatureValue = SHA256.HashData(Encoding.UTF8.GetBytes("fake-signer:" + envelopeHashHex + ":" + Calls));
+        var sigTst = new JsonObject
+        {
+            ["sigTst"] = new JsonObject
+            {
+                ["tstTokens"] = new JsonArray { new JsonObject { ["val"] = Convert.ToBase64String(TestTsa.Token(SHA256.HashData(signatureValue), Clock)) } },
+            },
+        };
         var signature = new JsonObject
         {
             ["signatures"] = new JsonArray
             {
-                new JsonObject { ["protected"] = protectedB64, ["signature"] = B64Url(signatureValue) },
+                new JsonObject
+                {
+                    ["protected"] = protectedB64,
+                    ["header"] = new JsonObject { ["etsiU"] = new JsonArray { B64Url(Encoding.UTF8.GetBytes(sigTst.ToJsonString())) } },
+                    ["signature"] = B64Url(signatureValue),
+                },
             },
         };
+        Clock = Clock.AddSeconds(1);
         return Task.FromResult(signature);
     }
 

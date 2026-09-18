@@ -19,6 +19,7 @@
          published public surface of Sigill.Sdk, exactly like a consumer does, and
          the core is not changed on this branch. -->
     <PackageReference Include="Sigill.Sdk" Version="0.5.0" />
+    <PackageReference Include="System.Security.Cryptography.Pkcs" Version="9.0.0" />
     <PackageReference Include="PolySharp" Version="1.14.1" PrivateAssets="all" />
   </ItemGroup>
 

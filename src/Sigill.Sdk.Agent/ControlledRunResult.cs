@@ -26,6 +26,13 @@ public sealed class ControlledRunResult
     public required IReadOnlyList<string> MissingObjects { get; init; }
     /// <summary>bound | control_only | run_only | unbound</summary>
     public required string Binding { get; init; }
+    /// <summary>
+    /// Kjernepåstanden: Control Artifact ble forseglet (sigTst) før eller samtidig med run_start.
+    /// Null når en av seal-tidene mangler.
+    /// </summary>
+    public required bool? ControlSealedBeforeRun { get; init; }
+    /// <summary>Seal-tidene følger kjederekkefølgen, og evalueringen er forseglet etter run_end. Null når seal-tider mangler.</summary>
+    public required bool? SealOrderValid { get; init; }
     public required IReadOnlyList<EvaluationResult> Evaluations { get; init; }
     public required IReadOnlyList<string> ForeignArtifacts { get; init; }
     public required IReadOnlyList<string> Issues { get; init; }

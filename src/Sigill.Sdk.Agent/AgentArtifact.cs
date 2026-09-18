@@ -17,6 +17,8 @@ namespace Sigill.Sdk.Agent;
 public sealed class AgentArtifact
 {
     private string? _signatureSha256;
+    private bool _sealTimeRead;
+    private DateTimeOffset? _sealTime;
 
     public AgentArtifact(JsonObject envelope, JsonObject signature)
     {
@@ -39,6 +41,16 @@ public sealed class AgentArtifact
             var entry = Binding.ClassicalEntry(Signature);
             var ctys = entry is null ? null : Binding.ProtectedHeader(entry)?["sigD"]?["ctys"] as JsonArray;
             return ctys is { Count: > 0 } ? Json.ReadString(ctys[0]) : null;
+        }
+    }
+
+    /// <summary>Platformens tidsstempel (sigTst genTime), eller null når det ikke finnes.</summary>
+    public DateTimeOffset? SealTime
+    {
+        get
+        {
+            if (!_sealTimeRead) { _sealTime = Agent.SealTime.Of(Signature); _sealTimeRead = true; }
+            return _sealTime;
         }
     }
 

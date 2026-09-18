@@ -27,7 +27,8 @@ korrigerer ved verifisering.
 | `activity.name` | Påkrevd i alle tre profilene. |
 | Rollesett | Lukket per profil. Produsentprivate data går i `extensions`. |
 | `binds` | Påkrevd i `run_start`, valgfritt ellers, identisk om gjentatt. |
-| `boundActionHash` | Valgfritt felt i `human_approval`: SHA-256 av `tool-arguments`-objektet godkjenningen dekker. |
+| `boundActionHash` | **Strøket 18.09 (eierkorreksjon).** Ingen test trengte feltet, og det innførte en ny bindingsregel. Hva godkjenningen dekker er innholdet i `approval-receipt`. |
+| Tidsrekkefølge | **Lagt til 18.09 (eierkorreksjon).** Verifikatoren leser `sigTst` genTime og krever Control Artifact forseglet før eller samtidig med `run_start`, seal-tider i kjederekkefølge og evaluering etter `run_end`. Brudd gir `run_invalid`. Egen test med styrbar testklokke. |
 | `evidenceId` | `urn:uuid:`-form, siden profilene alltid refererer hverandre med URI. |
 | Kjerneavhengighet | Sidepakken refererer den publiserte `Sigill.Sdk` 0.5.0 som pakke, ikke prosjektet. Da bygger den nøyaktig slik en kunde gjør, og kjernen kan ikke endres ved et uhell. |
 
@@ -52,6 +53,15 @@ korrigerer ved verifisering.
    Publisering er egen eierbeslutning.
 6. **CI**: vektor 10 regenereres og valideres i `spec-vectors`-jobben.
 7. **Bestilling av Python-speiling** som TASK-0003 i backlog.
+
+## Prinsipp: koden er sannheten (eierkorreksjon 18.09)
+
+Så lenge initiativet kan bli forkastet, er spesifikasjon, skjema, vektor og
+CI et øyeblikksbilde av koden, ikke omvendt. Kostnaden ved en justering
+holdes nede slik: vektor 10 fornyes fra koden med én kjøring
+(`SIGILL_AGENT_WRITE_VECTOR`), skjemaene håndheves kun av `_validate.py`,
+og prosaen har et banner som sier at koden gjelder ved avvik. Prosa og
+skjema oppdateres når koden har satt seg, ikke ved hver endring.
 
 ## Ikke levert, med grunn
 
