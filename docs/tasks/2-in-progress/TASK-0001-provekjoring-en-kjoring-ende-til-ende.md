@@ -1,9 +1,12 @@
 # TASK-0001: Prøvekjøring — én kjøring ende til ende
 
-EPIC-0001, ledd 1. Status: Completed 18.09.2026 — eier gjennomgikk kjøringen samme dag og bestilte TASK-0002 og backend-leddet på grunnlag av den.
+EPIC-0001, ledd 1. Status: In progress. Kode og tester levert 18.09.2026.
+Eierkorreksjon 19.09: lukkingen 18.09 bygget på en slutning (bestilling av
+neste ledd ble tolket som verifisering). Eieren har sett dokumentene, ikke
+artefaktene. Akseptanse 4 står åpen til eieren har åpnet dem.
 Første ende-til-ende-kjøring mot testmiljøet er grønn (ni artefakter,
 platformen bekrefter signaturene, verifikatoren gir run_finalized og bound).
-Akseptanse 4 oppfylt ved eierens gjennomgang 18.09.
+Akseptanse 4 er åpen: eieren har ikke åpnet artefaktene.
 
 ## Formål
 

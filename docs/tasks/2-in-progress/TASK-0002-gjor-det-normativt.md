@@ -1,8 +1,16 @@
 # TASK-0002: Gjør det normativt
 
-EPIC-0001, ledd 2. Status: Completed 18.09.2026 — levert, korrigert etter
-eierens gjennomgang (tidsrekkefølge, boundActionHash, monotoni, grunnlinje)
-og pushet til initiativgrenen etter eiers ja.
+EPIC-0001, ledd 2. Status: In progress. Levert og korrigert etter eierens
+gjennomgang (tidsrekkefølge, boundActionHash, monotoni, grunnlinje), pushet
+etter eiers ja. Eierkorreksjon 19.09: akseptanse 4 (verifisert på grenen)
+står åpen; lukkingen 18.09 var utledet, ikke bekreftet.
+
+Endringer etter første levering, alle i sidepakken: preview.2 (SealTime,
+baseline-state som rolle), preview.3 (baseline-state i Control Evaluation,
+`baselineDigestMatches`, 40 tester). Backend refererer preview.3. Hver
+endring har fått nytt versjonsnummer, siden NuGet cacher per versjon i
+~/.nuget/packages og en ny nupkg med samme nummer ville blitt ignorert
+lokalt mens Docker-bygget fikk den nye.
 
 ## Formål
 
@@ -80,4 +88,4 @@ skjema oppdateres når koden har satt seg, ikke ved hver endring.
 2. Alle åtte sabotasjetester grønne uten nettverk. **Oppfylt.**
 3. Omfanget er revidert mot det TASK-0001 faktisk viste. **Oppfylt**, se
    beslutningstabellen.
-4. Eieren har verifisert på grenen. **Oppfylt 18.09.**
+4. Eieren har verifisert på grenen. **Åpent.**

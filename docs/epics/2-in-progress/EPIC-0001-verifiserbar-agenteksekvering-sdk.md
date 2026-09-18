@@ -1,6 +1,6 @@
 # EPIC-0001: Verifiserbar agenteksekvering — SDK-laget
 
-Status: Completed 18.09.2026 — SDK-laget levert på initiativgrenen (TASK-0001 og TASK-0002); TASK-0003 parkert. Backend-leddet fortsetter i sigill-backend EPIC-0025.
+Status: In progress. SDK-laget levert på initiativgrenen (TASK-0001 og TASK-0002); TASK-0003 parkert; backend-leddet fortsetter i sigill-backend EPIC-0025. Lukkes når eieren har åpnet artefaktene og verifisert på grenen, ikke før (eierkorreksjon 19.09: godkjenning utledes aldri av andre handlinger).
 
 Gren: `initiativ/agenteksekvering` i dette repoet. Eierordre 18.09.2026:
 initiativet lever på egne grener i alle berørte repoer, merges ikke til
