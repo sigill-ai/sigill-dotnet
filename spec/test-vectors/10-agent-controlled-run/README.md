@@ -22,8 +22,8 @@ with `overall: FAIL` on `status-unchanged`. All payloads are synthetic.
 
 Two vector classes, as `ai-evidence-envelope-v2.md` §11 defines them:
 
-1. **Canonicalization** (`canonical/`): both SDKs must reproduce these bytes
-   and digests exactly. CI regenerates them and fails on any drift.
+1. **Canonicalization** (`canonical/`): any implementation, including a
+   later Python port, must reproduce these bytes and digests exactly. CI regenerates them and fails on any drift.
 2. **Verification** (`artifacts/` + `objects/`): the signatures are real and
    verify against the Sigill test tenant's certificate. Offline, a verifier
    can check envelope integrity (`hashV[0]`), object completeness, the chain,

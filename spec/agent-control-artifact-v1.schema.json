@@ -157,7 +157,8 @@
               "tool-manifest",
               "execution-policy",
               "control-set",
-              "authority"
+              "authority",
+              "baseline-state"
             ]
           },
           "contentType": {
@@ -248,6 +249,21 @@
             "properties": {
               "role": {
                 "const": "authority"
+              }
+            },
+            "required": [
+              "role"
+            ]
+          },
+          "minContains": 0,
+          "maxContains": 1
+        },
+        {
+          "contains": {
+            "type": "object",
+            "properties": {
+              "role": {
+                "const": "baseline-state"
               }
             },
             "required": [

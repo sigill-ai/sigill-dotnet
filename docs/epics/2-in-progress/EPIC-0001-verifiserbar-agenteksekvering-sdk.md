@@ -62,10 +62,10 @@ i en gjennomgang.
 |---|---|---|
 | TASK-0001 | Prøvekjøring: én kjøring ende til ende, signert, lenket og verifisert | kap. 4, 5, 6.2, 8.2 |
 | TASK-0002 | Spesifikasjon, skjema, testvektor fra den ekte kjøringen, alle åtte sabotasjetester, pakkemetadata | kap. 5, 7.2, 8.3 |
-| TASK-0003 | Speiling til sigill-python | kap. 7.2 |
+| TASK-0003 | Speiling til sigill-python — parkert, senere intensjon | kap. 7.2 |
 
-TASK-0002 ble bestilt 18.09 etter grønn prøvekjøring. TASK-0003 bestilles
-i sigill-python etter godkjent TASK-0002.
+TASK-0002 ble bestilt 18.09 etter grønn prøvekjøring. TASK-0003 er parkert
+og tas opp etter eiers ja til å gå videre med initiativet.
 
 ## Beslutninger
 
@@ -76,7 +76,7 @@ ved verifisering.
 | Punkt | Beslutning |
 |---|---|
 | B1 søsterprofiler eller extensions | Søsterprofiler, tre MIME-typer |
-| B2 hvem eier spesifikasjonen | sigill-dotnet `spec/`, speilet til sigill-python (TASK-0003) |
+| B2 hvem eier spesifikasjonen | sigill-dotnet `spec/`; Python-speiling er senere intensjon (TASK-0003 parkert) |
 | B5 verifierens identitet | Eget sertifikat i samme tenant; sertifikat per kall finnes i SDK-et |
 | B6 kjede uten hovedbok | Kjeden bæres i artefaktene |
 
@@ -86,6 +86,10 @@ ved verifisering.
   radens endringstidspunkt, og verifieren kontrollerer at seal-tiden til
   `tool_call` ligger før skrivetidspunktet. Det er den ene kontrollen som
   avslører «handling først, segl etterpå» (spec §4.1). Ingen SDK-endring.
+- **Baseline-state**: rollen `baseline-state` finnes nå i Control Artifact
+  (én rolle, skjema oppdatert). Backend-harnesset leser kunderaden før
+  kjøringen og forsegler den der; verifier-komponenten sammenligner
+  `observed-state` mot den. Uten dette er «uendret» bare verifierens ord.
 - **Demo-hensyn**: raske kjøringer mot en tilfeldig TSA i poolen. Ingen
   tidskontroll i SDK-et påvirker utfallet, så en sporadisk rød foran
   publikum kan ikke komme fra klokkeavvik.

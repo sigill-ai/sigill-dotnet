@@ -49,9 +49,19 @@ of it stays with the producer; the artifact binds digests.
 ## 3. Object roles
 
 Closed set: `instruction-set`, `tool-manifest`, `execution-policy`,
-`control-set`, `authority`. Exactly one `control-set` object is REQUIRED; it
-is what the Control Evaluation is later compared against. Each other role
-appears at most once. `objects[]` MUST NOT be empty.
+`control-set`, `authority`, `baseline-state`. Exactly one `control-set`
+object is REQUIRED; it is what the Control Evaluation is later compared
+against. Each other role appears at most once. `objects[]` MUST NOT be
+empty.
+
+`baseline-state` is the target's state as read **before** the run, sealed
+with the control basis. Every "unchanged" control (account number, credit
+limit, status) rests on it: the verifier compares `observed-state` after the
+run against `baseline-state` from before, and both digests are sealed with
+independent timestamps. Without it, "unchanged" is the verifier's word
+alone. The role is defined now because the role set is closed and adding it
+later would cost a schema and vector change; the SDK does nothing with its
+content.
 
 ## 4. Timing
 

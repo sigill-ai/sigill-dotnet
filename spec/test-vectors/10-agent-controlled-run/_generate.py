@@ -3,7 +3,7 @@
 For every artifact in artifacts/, writes canonical/<name>.canonical.json (the
 exact JCS bytes of the envelope) and canonical/<name>.envelope-hash.txt, and
 asserts that the hash equals hashV[0] in the artifact's classical signature.
-Both SDKs must reproduce these bytes exactly.
+Any implementation must reproduce these bytes exactly.
 """
 import base64
 import hashlib

@@ -1,7 +1,11 @@
 # TASK-0003: Speiling av agentprofilene til sigill-python
 
-EPIC-0001, ledd 3. Status: Backlog — bestilles i sigill-python når eieren
-har godkjent TASK-0002. Gjøres på en initiativgren der også.
+EPIC-0001, ledd 3. Status: **Parkert** 18.09.2026 (eierbeslutning). Speilingen
+gir ingenting til ende-til-ende-testingen og dobler kostnaden ved hver
+endring så lenge koden er sannheten. Tas opp etter eiers ja til å gå videre
+med initiativet. Ingenting går tapt: vektor 10 med kanoniske bytes,
+forventet resultat og sabotasjekopier er fasiten en senere port oversettes
+mot. Gjøres på en initiativgren i sigill-python når den tid kommer.
 
 ## Formål
 
@@ -21,5 +25,5 @@ krever for alt i `spec/`.
 
 ## Akseptanse
 
-Begge SDK-er gir identiske kanoniske bytes for alle ni konvolutter og
-identisk verifikasjonsresultat for det intakte settet.
+Porten gir identiske kanoniske bytes for alle ni konvolutter i vektor 10
+og identisk verifikasjonsresultat for det intakte settet.

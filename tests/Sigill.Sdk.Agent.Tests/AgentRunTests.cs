@@ -70,3 +70,17 @@ public class AgentRunTests
         }
     }
 }
+
+public class ControlArtifactRoleTests
+{
+    [Fact]
+    public async Task Baseline_state_forsegles_i_Control_Artifact_og_kan_finnes_igjen()
+    {
+        var run = await ReferenceRun.BuildAsync(new FakeArtifactSealer(), new DateTimeOffset(2026, 9, 16, 8, 0, 0, TimeSpan.Zero));
+        var uri = run.ControlArtifact.UriOfRole(AgentProfiles.Roles.BaselineState);
+
+        uri.Should().NotBeNull();
+        var signed = run.ControlArtifact.SignedObjects.Single(o => o.Uri == uri);
+        signed.HashHex.Should().Be(EnvelopeHashing.HashHex(run.Payloads[uri!]));
+    }
+}

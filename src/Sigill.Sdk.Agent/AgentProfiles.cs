@@ -54,6 +54,7 @@ public static class AgentProfiles
         public const string ExecutionPolicy = "execution-policy";
         public const string ControlSet = "control-set";
         public const string Authority = "authority";
+        public const string BaselineState = "baseline-state";
         public const string ToolArguments = "tool-arguments";
         public const string ToolResult = "tool-result";
         public const string ApprovalReceipt = "approval-receipt";

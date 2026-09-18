@@ -20,7 +20,7 @@ korrigerer ved verifisering.
 | Punkt | Beslutning |
 |---|---|
 | B1 | Søsterprofiler med tre MIME-typer. Profilen leses fra `sigD.ctys[0]`. |
-| B2 | Spesifikasjonen eies av sigill-dotnet i `spec/`, speiles til sigill-python. |
+| B2 | Spesifikasjonen eies av sigill-dotnet i `spec/`. Speiling til sigill-python er en senere intensjon, ikke en beslutning (TASK-0003 parkert 18.09). |
 | B5 | Verifieren signerer med eget sertifikat i samme tenant. Signeringskallet tar sertifikat per kall, så det er én konfigurasjonsverdi. Egen tenant dokumentert som produksjonsmønster. |
 | B6 | Kjeden bæres i artefaktene. Tenant-global rekkefølge og «ingen kjøring er slettet» bevises ikke i denne fasen. |
 | Feltnavn | Engelsk, som resten av konvoluttfamilien. Notatets navn som de står. |
@@ -29,6 +29,7 @@ korrigerer ved verifisering.
 | `binds` | Påkrevd i `run_start`, valgfritt ellers, identisk om gjentatt. |
 | `boundActionHash` | **Strøket 18.09 (eierkorreksjon).** Ingen test trengte feltet, og det innførte en ny bindingsregel. Hva godkjenningen dekker er innholdet i `approval-receipt`. |
 | Seal-tid | **Lagt til og korrigert 18.09 (eierkorreksjon).** Verifikatoren leser `sigTst` genTime og `accuracy`. Kontrollens TSA-tid skal ikke ligge etter run_start sin, innenfor accuracy og hele sekunder. Bindingen beviser rekkefølgen allerede; et avvik peker på platform eller TSA, rapporteres som avvik og endrer ikke utfallet. Monotoni langs kjeden er fjernet: `prev` beviser rekkefølgen, og TSA-poolen (seks TSA-er i vektor 10) ville gitt falske røde på raske kjøringer. Egen test med testklokke. |
+| `baseline-state` | **Lagt til 18.09 (eierkorreksjon).** Én valgfri rolle i Control Artifact for tilstanden før kjøringen. Lagt inn nå fordi rollesettet er lukket; innholdet brukes av verifier-komponenten i backend, ikke av SDK-et. |
 | Luken «handling først, segl etterpå» | Verken binding eller tid ser den. Løses i verifier-komponenten: `observed-state` tar med radens endringstidspunkt, og seal-tiden til `tool_call` må ligge før. Hører til backend-leddet (der `observed-state` lages), se spec §4.1. |
 | `evidenceId` | `urn:uuid:`-form, siden profilene alltid refererer hverandre med URI. |
 | Kjerneavhengighet | Sidepakken refererer den publiserte `Sigill.Sdk` 0.5.0 som pakke, ikke prosjektet. Da bygger den nøyaktig slik en kunde gjør, og kjernen kan ikke endres ved et uhell. |
@@ -53,7 +54,7 @@ korrigerer ved verifisering.
    `dotnet pack` gir en nupkg med avhengighet `Sigill.Sdk 0.5.0`.
    Publisering er egen eierbeslutning.
 6. **CI**: vektor 10 regenereres og valideres i `spec-vectors`-jobben.
-7. **Bestilling av Python-speiling** som TASK-0003 i backlog.
+7. **TASK-0003 (Python-speiling)** skrevet og parkert; tas opp etter eiers ja til å gå videre.
 
 ## Prinsipp: koden er sannheten (eierkorreksjon 18.09)
 

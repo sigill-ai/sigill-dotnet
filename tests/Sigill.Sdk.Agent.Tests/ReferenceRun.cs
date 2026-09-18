@@ -45,6 +45,7 @@ public sealed class ReferenceRun
             Obj(AgentProfiles.Roles.ToolManifest, """{"tools":["crm.update_customer"]}""", "application/json"),
             Obj(AgentProfiles.Roles.ExecutionPolicy, """{"allowedFields":["address"]}""", "application/json"),
             controlSet,
+            Obj(AgentProfiles.Roles.BaselineState, """{"address":"Storgata 1","accountNumber":"1234.56.78903","creditLimit":50000,"status":"active"}""", "application/json"),
             Obj(AgentProfiles.Roles.Authority, "eyJhbGciOiJub25lIn0.eyJkZWxlZ2F0ZWRCeSI6InVybjphY21lOnVzZXI6NDEiLCJzY29wZXMiOlsiY3VzdG9tZXIuYWRkcmVzcy53cml0ZSJdfQ.", "application/jwt"),
         }, sealer);
 
