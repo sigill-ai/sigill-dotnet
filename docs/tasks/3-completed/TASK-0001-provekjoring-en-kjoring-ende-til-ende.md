@@ -1,9 +1,9 @@
 # TASK-0001: Prøvekjøring — én kjøring ende til ende
 
-EPIC-0001, ledd 1. Status: In progress 18.09.2026 — bestilt av eier samme dag.
+EPIC-0001, ledd 1. Status: Completed 18.09.2026 — eier gjennomgikk kjøringen samme dag og bestilte TASK-0002 og backend-leddet på grunnlag av den.
 Første ende-til-ende-kjøring mot testmiljøet er grønn (ni artefakter,
 platformen bekrefter signaturene, verifikatoren gir run_finalized og bound).
-Venter på at eieren ser kjøringen (akseptanse 4).
+Akseptanse 4 oppfylt ved eierens gjennomgang 18.09.
 
 ## Formål
 
