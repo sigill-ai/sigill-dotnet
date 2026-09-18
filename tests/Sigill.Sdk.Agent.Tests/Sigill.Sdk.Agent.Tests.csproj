@@ -18,4 +18,11 @@
     <ProjectReference Include="..\..\src\Sigill.Sdk.Agent\Sigill.Sdk.Agent.csproj" />
   </ItemGroup>
 
+  <!-- The agent test vector is loaded at runtime from spec/test-vectors/10-agent-controlled-run. -->
+  <ItemGroup>
+    <Content Include="..\..\spec\test-vectors\10-agent-controlled-run\**\*" Link="spec\test-vectors\10-agent-controlled-run\%(RecursiveDir)%(Filename)%(Extension)">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+  </ItemGroup>
+
 </Project>

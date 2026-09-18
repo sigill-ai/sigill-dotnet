@@ -54,6 +54,29 @@ public sealed class FakeArtifactSealer : IArtifactSealer
         return Task.FromResult(signature);
     }
 
+    /// <summary>
+    /// Kopi av et artefakt der digesten for ett objekt i sigD.hashV er byttet ut og
+    /// signaturverdien lagd på nytt: en forfalsket evaluering som binder et annet kontrollsett.
+    /// </summary>
+    public static AgentArtifact WithReplacedObjectDigest(AgentArtifact artifact, string uri, string newHashHex)
+    {
+        var entry = Binding.ClassicalEntry(artifact.Signature)!;
+        var header = Binding.ProtectedHeader(entry)!;
+        var pars = (JsonArray)header["sigD"]!["pars"]!;
+        var hashV = (JsonArray)header["sigD"]!["hashV"]!;
+        var index = pars.Select((p, i) => (p, i)).First(t => t.p!.GetValue<string>() == uri).i;
+        hashV[index] = B64Url(Convert.FromHexString(newHashHex));
+        var protectedB64 = B64Url(Encoding.UTF8.GetBytes(header.ToJsonString()));
+        var signature = new JsonObject
+        {
+            ["signatures"] = new JsonArray
+            {
+                new JsonObject { ["protected"] = protectedB64, ["signature"] = B64Url(SHA256.HashData(Encoding.UTF8.GetBytes(protectedB64))) },
+            },
+        };
+        return new AgentArtifact(artifact.Envelope.DeepClone().AsObject(), signature);
+    }
+
     private static string B64Url(byte[] bytes) =>
         Convert.ToBase64String(bytes).TrimEnd('=').Replace('+', '-').Replace('/', '_');
 }

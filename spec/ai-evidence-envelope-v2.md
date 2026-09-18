@@ -195,6 +195,12 @@ semantics are **deliberately open in v2.0**: what constitutes a "step"
 artifact's classical signature), are fixed only when a real agent case
 exists. Producers other than experiments SHOULD omit `chain` until then.
 
+> **Fixed for agent runs (v1 sibling profiles, Sept 2026):** the step
+> granularity, the preimage and the run-finalization rules are normative in
+> [`agent-profiles-common-v1.md`](./agent-profiles-common-v1.md) §2 and
+> [`agent-execution-evidence-v1.md`](./agent-execution-evidence-v1.md) §2.
+> This profile's own `chain` stays reserved.
+
 ## 4. Canonicalization
 
 The envelope is canonicalized with **RFC 8785 / JCS** before hashing — the

@@ -53,19 +53,24 @@ kursen korrigeres underveis.
 | Task | Innhold | Notatet |
 |---|---|---|
 | TASK-0001 | Prøvekjøring: én kjøring ende til ende, signert, lenket og verifisert | kap. 4, 5, 6.2, 8.2 |
-| TASK-0002 | Etter ja: spesifikasjon, skjema, testvektorer, resten av sabotasjetestene, pakkemetadata | kap. 5, 7.2, 8.3 |
+| TASK-0002 | Spesifikasjon, skjema, testvektor fra den ekte kjøringen, alle åtte sabotasjetester, pakkemetadata | kap. 5, 7.2, 8.3 |
+| TASK-0003 | Speiling til sigill-python | kap. 7.2 |
 
-TASK-0002 starter ikke før eier og Raymond har sett TASK-0001 virke og
-sagt ja til å gå videre.
+TASK-0002 ble bestilt 18.09 etter grønn prøvekjøring. TASK-0003 bestilles
+i sigill-python etter godkjent TASK-0002.
 
 ## Beslutninger
 
-| Punkt | I prøvekjøringen | Avgjøres |
-|---|---|---|
-| B1 søsterprofiler eller extensions | Søsterprofiler, tre MIME-typer | Bekreftes før TASK-0002 |
-| B2 hvem eier spesifikasjonen | Ikke aktuelt før TASK-0002 | Før TASK-0002 |
-| B5 verifierens identitet | Samme sertifikat som agenten, notert som forenkling. `SignObjectHashesAsync` tar `certificateId` per kall, så et eget verifier-sertifikat i samme tenant krever kun én konfigurasjonsverdi | Før TASK-0002 |
-| B6 kjede uten hovedbok | Kjeden bæres i artefaktene | Bekreftes før TASK-0002 |
+Tatt 18.09.2026 ved bestillingen av TASK-0002, etter notatets
+anbefalinger; detaljene står i TASK-0002. Eier bekrefter eller korrigerer
+ved verifisering.
+
+| Punkt | Beslutning |
+|---|---|
+| B1 søsterprofiler eller extensions | Søsterprofiler, tre MIME-typer |
+| B2 hvem eier spesifikasjonen | sigill-dotnet `spec/`, speilet til sigill-python (TASK-0003) |
+| B5 verifierens identitet | Eget sertifikat i samme tenant; sertifikat per kall finnes i SDK-et |
+| B6 kjede uten hovedbok | Kjeden bæres i artefaktene |
 
 ## Eksplisitt utenfor
 
