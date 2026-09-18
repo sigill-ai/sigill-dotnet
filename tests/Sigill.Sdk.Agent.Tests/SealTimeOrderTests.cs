@@ -22,8 +22,8 @@ public class SealTimeOrderTests
 
         control.SealTime.Should().NotBeNull();
         runStart.SealTime.Should().NotBeNull();
-        control.SealAccuracy.Should().Be(TimeSpan.FromMilliseconds(500), "Microsoft-TSA oppgir 500 ms");
-        runStart.SealAccuracy.Should().Be(TimeSpan.FromSeconds(1));
+        // Hvilken TSA i poolen som svarte varierer per forsegling; accuracy er oppgitt (positiv) eller null.
+        new[] { control.SealAccuracy, runStart.SealAccuracy }.Should().OnlyContain(a => a == null || a > TimeSpan.Zero);
         // Ulik presisjon fra ulike TSA-er: 36.113 mot 36. Derfor hele sekunder.
         control.SealTime!.Value.ToUnixTimeSeconds().Should().BeLessThanOrEqualTo(runStart.SealTime!.Value.ToUnixTimeSeconds());
     }
@@ -112,7 +112,8 @@ public class SealTimeOrderTests
         result.RunVerdict.Should().Be(RunVerdicts.Finalized);
         result.Issues.Should().Contain(i => i.Contains("produsentens klokke"));
 
-        var honest = await ReferenceRun.BuildAsync(new FakeArtifactSealer { Clock = T0.AddSeconds(5) }, T0);
+        // Ærlig produsent: forseglingen skjer etter hendelsene (falsk klokke ligger foran tidslinjen).
+        var honest = await ReferenceRun.BuildAsync(new FakeArtifactSealer(), T0);
         (await new ControlledRunVerifier().VerifyAsync(honest.All(), honest.Payloads)).EventTimesPlausible.Should().BeTrue();
     }
 

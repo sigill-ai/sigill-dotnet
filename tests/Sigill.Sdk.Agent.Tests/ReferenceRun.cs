@@ -17,8 +17,11 @@ public sealed class ReferenceRun
 
     public List<AgentArtifact> All() => new[] { ControlArtifact }.Concat(Events).Append(Evaluation).ToList();
 
-    public static async Task<ReferenceRun> BuildAsync(IArtifactSealer sealer, DateTimeOffset t0, string controlSetJson = DefaultControlSet)
+    // now: klokken eventTime tas fra. Standard er en fast tidslinje fra t0 (til falske forseglere);
+    // mot ekte forsegling må den være den virkelige klokken, ellers påstår hendelsene tider etter sin egen seal-tid.
+    public static async Task<ReferenceRun> BuildAsync(IArtifactSealer sealer, DateTimeOffset t0, string controlSetJson = DefaultControlSet, Func<DateTimeOffset>? now = null)
     {
+        DateTimeOffset At(int seconds) => now?.Invoke() ?? t0.AddSeconds(seconds);
         var correlationId = $"urn:uuid:{Guid.NewGuid()}";
         var payloads = new Dictionary<string, byte[]>(StringComparer.Ordinal);
         DetachedObject Obj(string role, string content, string contentType)
@@ -39,7 +42,7 @@ public sealed class ReferenceRun
             AgentVersion = "17",
             ControlSetId = "customer-write-v4",
             ControlSetVersion = "4",
-            CreatedAt = t0,
+            CreatedAt = At(0),
         }.SealAsync(new[]
         {
             Obj(AgentProfiles.Roles.InstructionSet, "Endre adresse. Ikke annet.", "text/plain"),
@@ -51,20 +54,20 @@ public sealed class ReferenceRun
         }, sealer);
 
         var run = new AgentRun(sealer, "customer-address-change", correlationId, "contract-agent");
-        await run.StartAsync(control, t0.AddSeconds(5));
-        await run.RecordAsync(AgentProfiles.Steps.ToolCall, t0.AddSeconds(6),
+        await run.StartAsync(control, At(5));
+        await run.RecordAsync(AgentProfiles.Steps.ToolCall, At(6),
             new JsonObject { ["tool"] = new JsonObject { ["name"] = "crm.update_customer", ["operation"] = "update" } },
             new[] { Obj(AgentProfiles.Roles.ToolArguments, """{"id":"c-1017","address":"Nygata 4"}""", "application/json") });
-        await run.RecordAsync(AgentProfiles.Steps.Authorization, t0.AddSeconds(6),
+        await run.RecordAsync(AgentProfiles.Steps.Authorization, At(6),
             new JsonObject { ["decision"] = "allow_with_human_approval", ["policyId"] = "customer-write-policy-v2" });
-        await run.RecordAsync(AgentProfiles.Steps.HumanApproval, t0.AddSeconds(31),
+        await run.RecordAsync(AgentProfiles.Steps.HumanApproval, At(31),
             new JsonObject { ["decision"] = "approved", ["approver"] = "urn:acme:user:41" },
             new[] { Obj(AgentProfiles.Roles.ApprovalReceipt, """{"approved":true,"approver":"urn:acme:user:41"}""", "application/json") });
-        await run.RecordAsync(AgentProfiles.Steps.ToolResult, t0.AddSeconds(32), null,
+        await run.RecordAsync(AgentProfiles.Steps.ToolResult, At(32), null,
             new[] { Obj(AgentProfiles.Roles.ToolResult, """{"updated":true}""", "application/json") });
-        await run.RecordAsync(AgentProfiles.Steps.ModelOutput, t0.AddSeconds(34), null,
+        await run.RecordAsync(AgentProfiles.Steps.ModelOutput, At(34), null,
             new[] { Obj(AgentProfiles.Roles.ModelOutput, "Adressen er oppdatert til Nygata 4.", "text/plain") });
-        var runEnd = await run.FinishAsync(AgentProfiles.Dispositions.Completed, t0.AddSeconds(35));
+        var runEnd = await run.FinishAsync(AgentProfiles.Dispositions.Completed, At(35));
 
         var evaluation = await new ControlEvaluationBuilder
         {
@@ -84,8 +87,8 @@ public sealed class ReferenceRun
                 new ControlResult("status-unchanged", AgentProfiles.Results.Fail, "status endret fra active til suspended"),
             },
             Overall = AgentProfiles.Results.Fail,
-            EvaluatedAt = t0.AddSeconds(58),
-            CreatedAt = t0.AddSeconds(60),
+            EvaluatedAt = At(58),
+            CreatedAt = At(60),
         }.SealAsync(
             Obj(AgentProfiles.Roles.ObservedState, """{"address":"Nygata 4","accountNumber":"1234.56.78903","creditLimit":50000,"status":"suspended"}""", "application/json"),
             new DetachedObject(AgentProfiles.Roles.ControlSet, controlSet.Bytes, controlSet.ContentType, controlSet.Uri),

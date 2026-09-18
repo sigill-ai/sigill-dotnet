@@ -15,7 +15,8 @@ public sealed class FakeArtifactSealer : IArtifactSealer
     public int Calls { get; private set; }
 
     /// <summary>Klokken tidsstempelet (sigTst) får. Settes av testen for å styre tidsrekkefølgen.</summary>
-    public DateTimeOffset Clock { get; set; } = new(2026, 9, 16, 8, 0, 0, TimeSpan.Zero);
+    /// <remarks>Standard ligger fem minutter etter referansekjøringens faste tidslinje, så en falsk kjøring forsegles etter hendelsene, som en ærlig produsent.</remarks>
+    public DateTimeOffset Clock { get; set; } = new(2026, 9, 16, 8, 5, 0, TimeSpan.Zero);
 
     public Task<JsonObject> SealAsync(
         string envelopeHashHex, IReadOnlyList<SignedObjectDigest> objects, string envelopeContentType,

@@ -111,7 +111,9 @@ public sealed class ControlledRunVerifier
         if (binding == Bindings.RunOnly) issues.Add("run_start binder et Control Artifact som ikke er levert.");
 
         // Steg 7b: eventTime er produsentens påstand. En hendelse kan ikke være forseglet før den
-        // skjedde, så eventTime > seal-tid (hele sekunder) er en klokke som lyver eller går feil.
+        // skjedde, så eventTime langt etter seal-tiden er en klokke som lyver eller går feil.
+        // Toleranse: TSA-ens accuracy pluss EventTimeSkewTolerance, fordi vertens klokke og TSA-ens
+        // avviker med sekunder (vektor 10: TSA 2 s bak verten). Minutter absorberes ikke.
         bool? eventTimesPlausible = null;
         var withSeal = executions.Where(a => a.SealTime is not null).ToList();
         if (withSeal.Count == executions.Count && executions.Count > 0)
@@ -122,7 +124,7 @@ public sealed class ControlledRunVerifier
                 var eventTimeText = Json.ReadString(a.Envelope["step"]?["eventTime"]);
                 if (!DateTimeOffset.TryParse(eventTimeText, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.AssumeUniversal, out var eventTime))
                 { eventTimesPlausible = false; issues.Add($"{Label(a)} har ulesbar eventTime."); continue; }
-                if (Seconds(eventTime) > Seconds(a.SealTime))
+                if (Seconds(eventTime) > Seconds(a.SealTime + (a.SealAccuracy ?? TimeSpan.Zero) + EventTimeSkewTolerance))
                 {
                     eventTimesPlausible = false;
                     issues.Add($"{Label(a)} påstår eventTime {eventTime:O}, etter sin egen seal-tid {a.SealTime:O}: produsentens klokke kan ikke stemme.");
@@ -243,6 +245,9 @@ public sealed class ControlledRunVerifier
             result.SignatureValid,
             missing.Concat(platformMissing).Distinct(StringComparer.Ordinal).ToList());
     }
+
+    /// <summary>Slingringsmonn mellom produsentens klokke og TSA-ens, ut over oppgitt accuracy.</summary>
+    public static readonly TimeSpan EventTimeSkewTolerance = TimeSpan.FromSeconds(5);
 
     private static long Seconds(DateTimeOffset? time) => time!.Value.ToUnixTimeSeconds();
 

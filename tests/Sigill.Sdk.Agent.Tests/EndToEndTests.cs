@@ -32,7 +32,8 @@ public class EndToEndTests
 
         var client = new SigillClient(apiKey, baseUrl);
         var sealer = new SigillArtifactSealer(client, certificateId, qualified: false);
-        var run = await ReferenceRun.BuildAsync(sealer, DateTimeOffset.UtcNow);
+        // Ekte klokke for eventTime: hendelsene påstår tiden de faktisk skjedde.
+        var run = await ReferenceRun.BuildAsync(sealer, DateTimeOffset.UtcNow, now: () => DateTimeOffset.UtcNow);
 
         var outDir = Path.Combine(AppContext.BaseDirectory, "artifacts", run.CorrelationId.Replace("urn:uuid:", ""));
         run.WriteTo(outDir);

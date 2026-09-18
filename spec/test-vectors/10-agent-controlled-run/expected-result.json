@@ -20,7 +20,7 @@
       "overall": "FAIL",
       "subjectBound": true,
       "controlSetDigestMatches": true,
-      "baselineDigestMatches": null
+      "baselineDigestMatches": true
     }
   ]
 }

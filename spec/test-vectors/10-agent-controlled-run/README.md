@@ -1,7 +1,9 @@
 # Test vector 10 — agent controlled run
 
 One complete controlled agent run, sealed for real by the Sigill test tenant
-on 2026-09-18 (standard timestamps, no PQC). It is the design example: the
+on 2026-09-19 (standard timestamps, no PQC; resealed after the first set
+turned out to carry fabricated `eventTime` values, which
+`eventTimesPlausible` caught). It is the design example: the
 run `customer-address-change`, agent `contract-agent` v17, control set
 `customer-write-v4`, seven events (seq 0 to 6) and one Control Evaluation
 with `overall: FAIL` on `status-unchanged`. All payloads are synthetic.

@@ -43,7 +43,7 @@ public class VerificationVectorTests
         evaluation.Overall.Should().Be(expectedEvaluation["overall"]!.GetValue<string>());
         evaluation.SubjectBound.Should().BeTrue();
         evaluation.ControlSetDigestMatches.Should().BeTrue();
-        evaluation.BaselineDigestMatches.Should().BeNull("vektor 10 ble forseglet før baseline-state fantes");
+        evaluation.BaselineDigestMatches.Should().BeTrue("vektor 10 (forseglet på nytt 19.09) binder grunnlinjen");
         evaluation.Controls.Should().HaveCount(4);
     }
 
