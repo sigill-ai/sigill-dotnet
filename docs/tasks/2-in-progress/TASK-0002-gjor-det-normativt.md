@@ -50,7 +50,7 @@ korrigerer ved verifisering.
 4. **Tester**: kanoniseringsvektorer (bytes, hash, `hashV[0]`), intakt sett
    mot forventet resultat, alle åtte sabotasjetester fra notatet 8.3 på
    kopier av vektoren, byggernes regler. 33 tester, kjører uten nettverk.
-5. **Pakke** `Sigill.Sdk.Agent` 0.1.0-preview.1 med metadata og README;
+5. **Pakke** `Sigill.Sdk.Agent` 0.1.0-preview.2 med metadata og README;
    `dotnet pack` gir en nupkg med avhengighet `Sigill.Sdk 0.5.0`.
    Publisering er egen eierbeslutning.
 6. **CI**: vektor 10 regenereres og valideres i `spec-vectors`-jobben.
