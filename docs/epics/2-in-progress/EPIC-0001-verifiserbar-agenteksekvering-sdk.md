@@ -1,6 +1,6 @@
 # EPIC-0001: Verifiserbar agenteksekvering — SDK-laget
 
-Status: Backlog — utkast til eiergodkjenning 18.09.2026.
+Status: In progress 18.09.2026 — godkjent av eier; TASK-0001 startet.
 
 Gren: `initiativ/agenteksekvering` i dette repoet. Eierordre 18.09.2026:
 initiativet lever på egne grener i alle berørte repoer, merges ikke til

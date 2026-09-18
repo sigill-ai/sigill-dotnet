@@ -1,7 +1,9 @@
 # TASK-0001: Prøvekjøring — én kjøring ende til ende
 
-EPIC-0001, ledd 1. Status: Backlog — utkast til eiergodkjenning 18.09.2026.
-Kan starte uten andre beslutninger.
+EPIC-0001, ledd 1. Status: In progress 18.09.2026 — bestilt av eier samme dag.
+Første ende-til-ende-kjøring mot testmiljøet er grønn (ni artefakter,
+platformen bekrefter signaturene, verifikatoren gir run_finalized og bound).
+Venter på at eier og Raymond ser kjøringen (akseptanse 4).
 
 ## Formål
 
