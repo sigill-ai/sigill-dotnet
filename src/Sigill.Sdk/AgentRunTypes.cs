@@ -14,8 +14,8 @@ namespace Sigill.Sdk;
 public sealed record AgentModelRef(string Provider, string Name, string? DeploymentId = null);
 
 /// <summary>
-/// The agent's configuration (spec §3.2): the four objects every
-/// <c>run_start</c> and identity record bind. The bytes stay local; only their
+/// The agent's configuration (spec §3.2): the objects every <c>run_start</c>
+/// and identity record bind (the model configuration is optional). The bytes stay local; only their
 /// digests are sealed. They are usually confidential — share them only with
 /// parties entitled to read them.
 /// </summary>
@@ -27,8 +27,8 @@ public sealed record AgentConfiguration
     /// <summary>The tool manifest: which tools exist and their schemas.</summary>
     public required byte[] ToolManifest { get; init; }
 
-    /// <summary>Model configuration (sampling parameters, limits).</summary>
-    public required byte[] ModelConfig { get; init; }
+    /// <summary>Optional model configuration (sampling parameters, limits).</summary>
+    public byte[]? ModelConfig { get; init; }
 
     /// <summary>What the agent is allowed to do: scope, allowlists, approval rules, limits.</summary>
     public required byte[] ExecutionPolicy { get; init; }
@@ -70,7 +70,7 @@ public sealed record AgentDefinition
 /// </summary>
 public sealed record AgentRunObject
 {
-    /// <summary>Profile kind (spec §3.4), e.g. <c>tool-arguments</c>, <c>model-output</c>.</summary>
+    /// <summary>Profile kind (spec §3.5), e.g. <c>tool-arguments</c>, <c>assistant-reply</c>.</summary>
     public required string Kind { get; init; }
 
     /// <summary>v2 role: prompt | input | context | output | artifact | log.</summary>
@@ -90,6 +90,26 @@ public sealed record AgentRunObject
     /// <summary>A JSON object, serialized in canonical (JCS) form so equal values hash equally.</summary>
     public static AgentRunObject Json(string kind, string role, JsonNode value) =>
         new() { Kind = kind, Role = role, Bytes = AgentExecutionProfile.Canonical(value), ContentType = "application/json" };
+}
+
+/// <summary>A policy decision taken before an action (spec §3.4).</summary>
+public sealed record AgentAuthorization
+{
+    /// <summary><c>allowed</c> or <c>denied</c>.</summary>
+    public required string Decision { get; init; }
+
+    public string? PolicyId { get; init; }
+    public string? Reason { get; init; }
+
+    internal JsonObject ToJson()
+    {
+        if (Decision is not ("allowed" or "denied"))
+            throw new ArgumentException("Authorization decision must be 'allowed' or 'denied'.");
+        var json = new JsonObject { ["decision"] = Decision };
+        if (PolicyId is not null) json["policyId"] = PolicyId;
+        if (Reason is not null) json["reason"] = Reason;
+        return json;
+    }
 }
 
 /// <summary>

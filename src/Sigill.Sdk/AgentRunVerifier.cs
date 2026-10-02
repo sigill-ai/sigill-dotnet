@@ -241,10 +241,52 @@ public static class AgentRunVerifier
         if (ext.ContainsKey("objectKinds") && !(ext["objectKinds"] is JsonObject ok && ok.All(kv => S(kv.Value) is not null)))
             errs.Add("objectKinds is not an object of strings");
 
+        errs.AddRange(CheckBlocks(ext, stepType));
+
         if (isIdentity)
         {
             if (env.ContainsKey("chain")) errs.Add("the identity record must not carry chain");
             if (S(ext["agentId"]) is not { } agentId || agentId != S(actor?["id"])) errs.Add("agentId must equal actor.id");
+        }
+        return errs;
+    }
+
+    /// <summary>The §3.4 tool / authorization / approval block shapes.</summary>
+    private static List<string> CheckBlocks(JsonObject ext, string stepType)
+    {
+        string? S(JsonNode? n) => AgentExecutionProfile.Str(n);
+        var errs = new List<string>();
+        if (ext.ContainsKey("tool"))
+        {
+            if (ext["tool"] is not JsonObject tool || string.IsNullOrEmpty(S(tool["name"])))
+                errs.Add("tool must be an object with a non-empty string name");
+            else
+                foreach (var k in new[] { "operation", "useId" })
+                    if (tool.ContainsKey(k) && S(tool[k]) is null) errs.Add($"tool.{k} is not a string");
+        }
+        if (ext.ContainsKey("authorization"))
+        {
+            if (ext["authorization"] is not JsonObject auth) errs.Add("authorization must be an object");
+            else
+            {
+                if (S(auth["decision"]) is not ("allowed" or "denied")) errs.Add("authorization.decision must be 'allowed' or 'denied'");
+                foreach (var k in new[] { "policyId", "reason" })
+                    if (auth.ContainsKey(k) && S(auth[k]) is null) errs.Add($"authorization.{k} is not a string");
+            }
+        }
+        else if (stepType == "authorization") errs.Add("an authorization step must carry an authorization block");
+        if (ext.ContainsKey("approval") || stepType == "human_approval")
+        {
+            if (ext["approval"] is not JsonObject appr || string.IsNullOrEmpty(S(appr["decision"])))
+                errs.Add("approval must be an object with a non-empty string decision");
+            else
+            {
+                if (appr.ContainsKey("approverRef") && S(appr["approverRef"]) is null) errs.Add("approval.approverRef is not a string");
+                if (appr.ContainsKey("actionEvidenceId") && !EnvelopeSchema.IsUuid(S(appr["actionEvidenceId"])))
+                    errs.Add("approval.actionEvidenceId is not a UUID");
+                if (appr.ContainsKey("decidedAt") && !EnvelopeSchema.TryParseDateTime(S(appr["decidedAt"]), out _))
+                    errs.Add("approval.decidedAt is not a date-time");
+            }
         }
         return errs;
     }
@@ -739,22 +781,22 @@ public static class AgentRunVerifier
         var (stD, stUnique) = start is not null
             ? DigestsByKind(start, startArt, "run_start", AgentExecutionProfile.ConfigurationKinds)
             : (new Dictionary<string, string>(), true);
-        var missingKinds = AgentExecutionProfile.IdentityKinds.Where(k => !idD.ContainsKey(k)).ToList();
+        var optional = AgentExecutionProfile.OptionalConfigurationKinds;
+        var missingKinds = AgentExecutionProfile.IdentityKinds.Where(k => !idD.ContainsKey(k) && !optional.Contains(k)).ToList();
         foreach (var k in missingKinds) findings.Add($"Identity record: no signed object of kind '{k}'.");
         var kindsComplete = idUnique && stUnique && missingKinds.Count == 0;
+        // Required kinds must be present and equal; an optional kind is on both sides (and equal) or on neither.
         var configMatches = AgentExecutionProfile.ConfigurationKinds.All(k =>
-            idD.TryGetValue(k, out var a) && stD.TryGetValue(k, out var b) && a == b);
+            (idD.TryGetValue(k, out var a) && stD.TryGetValue(k, out var b) && a == b)
+            || (optional.Contains(k) && !idD.ContainsKey(k) && !stD.ContainsKey(k)));
         if (!configMatches)
             findings.Add("run_start's instruction set / tool manifest / model config / execution policy do not match the identity record's.");
         var configDigestValid = false;
-        if (new[] { "agent-manifest" }.Concat(AgentExecutionProfile.ConfigurationKinds).All(idD.ContainsKey))
+        if (new[] { "agent-manifest", "instruction-set", "tool-manifest", "execution-policy" }.All(idD.ContainsKey))
         {
-            var recomputed = EnvelopeHashing.HashHex(EnvelopeHashing.Canonicalize(new JsonObject
-            {
-                ["agentManifest"] = idD["agent-manifest"], ["instructionSet"] = idD["instruction-set"],
-                ["toolManifest"] = idD["tool-manifest"], ["modelConfig"] = idD["model-config"],
-                ["executionPolicy"] = idD["execution-policy"],
-            }));
+            var recomputed = AgentExecutionProfile.ConfigurationDigestFromHex(
+                idD["agent-manifest"], idD["instruction-set"], idD["tool-manifest"],
+                idD.TryGetValue("model-config", out var mc) ? mc : null, idD["execution-policy"]);
             configDigestValid = recomputed == sa.ConfigSha256;
         }
         if (!configDigestValid) findings.Add("Identity record: configSha256 does not match the digest of its configuration objects.");

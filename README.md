@@ -343,8 +343,9 @@ or the default `"inherit"`.
 ## Agent runs: verifiable multi-step execution
 
 For agents that call tools, retrieve context and act over several steps, a
-single envelope is not enough: you need to show *what happened, in what
-order, under which configuration* — and that nothing was removed afterwards.
+single envelope is not enough: you need to show which security-relevant steps
+were captured, in the order they were captured, under which configuration —
+and that nothing captured was changed or removed afterwards.
 `AgentRun` records a run under
 [AgentExecutionProfileV1](spec/agent-execution-profile-v1.md): every step is
 an ordinary v2 artifact, sealed blind and chained to the previous step's
@@ -360,15 +361,29 @@ var agent = new AgentDefinition
     {
         InstructionSet  = systemPromptBytes,
         ToolManifest    = toolSchemasJson,
-        ModelConfig     = samplingParamsJson,
         ExecutionPolicy = allowlistAndLimitsJson,
+        ModelConfig     = samplingParamsJson,       // optional
     },
 };
 
+var policy = new AgentAuthorization { Decision = "allowed", PolicyId = "support-tools-v1" };
+
 var run = await client.StartAgentRunAsync(agent, new AgentRunOptions { CertificateId = certId });
-await run.RecordToolCallAsync("lookup_ticket", argsJson);
+await run.RecordToolCallAsync("lookup_ticket", argsJson, operation: "read", authorization: policy);
 await run.RecordToolResultAsync("lookup_ticket", resultJson);
-await run.RecordToolCallAsync("close_ticket", argsJson, consequential: true); // side effect → timestamped now
+
+// A write that needs a human: record the decision, then the approval, then the call.
+var gate = await run.RecordAuthorizationAsync(
+    new AgentAuthorization { Decision = "allowed", PolicyId = "support-tools-v1", Reason = "write requires approval" },
+    tool: "close_ticket", operation: "write");
+await run.RecordHumanApprovalAsync("approved",
+    receipt: approvalReceiptJson,          // bound by digest; bytes stay with you
+    identityAssertion: approverIdToken,    // e.g. the IdP token of the approver
+    approverRef: "urn:example:approver:42", // opaque — never a name or e-mail
+    actionEvidenceId: gate.EvidenceId);
+await run.RecordToolCallAsync("close_ticket", argsJson, operation: "write",
+    authorization: policy, consequential: true); // side effect → timestamped now
+
 await run.RecordModelOutputAsync(answerBytes);
 AgentRunBundle bundle = await run.FinishAsync("completed");
 
@@ -400,7 +415,7 @@ What to know:
   `AgentTimestampPolicy.PerEvent` to timestamp everything, and
   `run.CheckpointAsync()` from a timer to anchor an idle run.
 - **Configuration is bound.** The first run registers an *identity record*
-  (instructions, tools, model config, execution policy). Store `run.Identity`
+  (instructions, tools, execution policy and, optionally, model config). Store `run.Identity`
   and pass it as `AgentRunOptions.Identity` while the configuration is
   unchanged; a changed configuration needs a new one.
 - **Persist as you go.** `OnArtifactSealed` runs after each step is sealed. A

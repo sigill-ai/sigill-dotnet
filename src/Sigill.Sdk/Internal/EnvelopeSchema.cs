@@ -71,6 +71,9 @@ internal static class EnvelopeSchema
                 DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out value);
     }
 
+    /// <summary>A UUID; the <c>urn:uuid:</c> form is accepted for compatibility (profile §2).</summary>
+    internal static bool IsUuid(string? s) => s is not null && Uuid.IsMatch(s);
+
     /// <summary>Every violation of the AI evidence v2 envelope schema.</summary>
     public static List<string> ValidateEnvelopeV2(JsonNode? envelope)
     {

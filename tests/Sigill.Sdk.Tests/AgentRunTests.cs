@@ -92,6 +92,10 @@ public class AgentRunTests
             InstructionSet = B("instructionSet"), ToolManifest = B("toolManifest"),
             ModelConfig = B("modelConfig"), ExecutionPolicy = B("executionPolicy"),
         }).Should().Be(v["expected"]!.GetValue<string>());
+        AgentExecutionProfile.ConfigurationDigest(B("agentManifest"), new AgentConfiguration
+        {
+            InstructionSet = B("instructionSet"), ToolManifest = B("toolManifest"), ExecutionPolicy = B("executionPolicy"),
+        }).Should().Be(v["expectedWithoutModelConfig"]!.GetValue<string>());
     }
 
     public static IEnumerable<object[]> RunVectors() =>
@@ -164,7 +168,7 @@ public class AgentRunTests
 
     [Fact]
     public void RunVectors_AreAllPresent() =>
-        RunVectors().Should().HaveCount(24);
+        RunVectors().Should().HaveCount(30);
 
     [Fact]
     public async Task MalformedEnvelope_IsAnInvalidVerdict_NeverAnException()
@@ -245,7 +249,7 @@ public class AgentRunTests
         var run = await AgentRun.StartCoreAsync(client, Agent(), new AgentRunOptions
         {
             CertificateId = Cert,
-            StartObjects = new[] { new AgentRunObject { Kind = "user-request", Role = "prompt", Bytes = Secret, ContentType = "text/plain" } },
+            StartObjects = new[] { new AgentRunObject { Kind = "user-turn", Role = "prompt", Bytes = Secret, ContentType = "text/plain" } },
             OnArtifactSealed = (a, _) => { sealedSteps.Add(a.StepType); return Task.CompletedTask; },
         }, Clock(), CancellationToken.None);
         await run.RecordToolCallAsync("lookup_ticket", Encoding.UTF8.GetBytes("""{"ticket":"4411"}"""));
@@ -281,6 +285,69 @@ public class AgentRunTests
             if (a.Envelope["activity"]!["parentEvidenceId"] is { } parent) Guid.TryParse(parent.GetValue<string>(), out _).Should().BeTrue();
             a.Envelope["actor"]!["type"]!.GetValue<string>().Should().Be("agent");
         }
+    }
+
+    [Fact]
+    public async Task AuthorizationAndHumanApprovalFlow_VerifiesAsFinalized()
+    {
+        var sealer = new StubSealer();
+        using var client = Client(sealer);
+        var run = await AgentRun.StartCoreAsync(client, Agent(), new AgentRunOptions { CertificateId = Cert }, Clock(), CancellationToken.None);
+        var auth = await run.RecordAuthorizationAsync(
+            new AgentAuthorization { Decision = "allowed", PolicyId = "support-tools-v1", Reason = "write requires approval" },
+            tool: "close_ticket", operation: "write");
+        var approval = await run.RecordHumanApprovalAsync("approved",
+            receipt: Encoding.UTF8.GetBytes("""{"decision":"approved"}"""),
+            identityAssertion: Encoding.UTF8.GetBytes("eyJhbGciOiJFUzI1NiJ9.x.y"),
+            approverRef: "urn:example:approver:42", actionEvidenceId: auth.EvidenceId);
+        await run.RecordToolCallAsync("close_ticket", Encoding.UTF8.GetBytes("""{"ticket":"4411"}"""), operation: "write",
+            authorization: new AgentAuthorization { Decision = "allowed", PolicyId = "support-tools-v1" }, consequential: true);
+        var bundle = await run.FinishAsync();
+
+        var ext = approval.Envelope["extensions"]![AgentExecutionProfile.ExtensionKey]!;
+        ext["approval"]!.ToJsonString().Should().Be(
+            $$"""{"decision":"approved","approverRef":"urn:example:approver:42","actionEvidenceId":"{{auth.EvidenceId}}"}""");
+        ext["timestamp"]!.GetValue<string>().Should().Be("required", "an approval is consequential by default");
+        ext["objectKinds"]!.AsObject().Select(kv => kv.Value!.GetValue<string>()).Should()
+            .BeEquivalentTo("approval-receipt", "identity-assertion");
+        var call = bundle.Artifacts[3].Envelope["extensions"]![AgentExecutionProfile.ExtensionKey]!;
+        call["tool"]!.ToJsonString().Should().Be("""{"name":"close_ticket","operation":"write"}""");
+        call["authorization"]!.ToJsonString().Should().Be("""{"decision":"allowed","policyId":"support-tools-v1"}""");
+
+        var result = await AgentRunVerifier.VerifyAsync(bundle, StubVerify);
+        result.Verdict.Should().Be("run_finalized", string.Join("\n", result.Findings));
+        string.Join("\n", sealer.Requests.Select(r => r.ToJsonString())).Should().NotContain("eyJhbGciOiJFUzI1NiJ9");
+    }
+
+    [Fact]
+    public async Task InvalidAuthorizationDecision_IsRejectedBeforeSealing()
+    {
+        using var client = Client(new StubSealer());
+        var run = await AgentRun.StartCoreAsync(client, Agent(), new AgentRunOptions { CertificateId = Cert }, Clock(), CancellationToken.None);
+        await run.Invoking(r => r.RecordAuthorizationAsync(new AgentAuthorization { Decision = "maybe" }))
+            .Should().ThrowAsync<ArgumentException>();
+        run.IsBroken.Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task RunWithoutModelConfig_VerifiesAsFinalized()
+    {
+        using var client = Client(new StubSealer());
+        var agent = Agent() with
+        {
+            Configuration = new AgentConfiguration
+            {
+                InstructionSet = Encoding.UTF8.GetBytes("You triage."),
+                ToolManifest = Encoding.UTF8.GetBytes("{}"),
+                ExecutionPolicy = Encoding.UTF8.GetBytes("{}"),
+            },
+        };
+        var run = await AgentRun.StartCoreAsync(client, agent, new AgentRunOptions { CertificateId = Cert }, Clock(), CancellationToken.None);
+        run.Artifacts[0].Envelope["extensions"]![AgentExecutionProfile.ExtensionKey]!["objectKinds"]!.AsObject()
+            .Select(kv => kv.Value!.GetValue<string>()).Should().NotContain("model-config");
+        var result = await AgentRunVerifier.VerifyAsync(await run.FinishAsync(), StubVerify);
+        result.Verdict.Should().Be("run_finalized", string.Join("\n", result.Findings));
+        result.Checks["identity"].Should().Be("ok");
     }
 
     [Fact]

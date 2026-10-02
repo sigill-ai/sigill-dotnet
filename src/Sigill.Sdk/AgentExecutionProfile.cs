@@ -13,7 +13,7 @@ namespace Sigill.Sdk;
 /// <summary>
 /// Constants and the normative digests of AgentExecutionProfileV1
 /// (<c>spec/agent-execution-profile-v1.md</c>): the chain digest (§4) and
-/// the configuration digest (§3.5). Recording and verification build on these;
+/// the configuration digest (§3.6). Recording and verification build on these;
 /// they are public so other producers and verifiers can reproduce them.
 /// </summary>
 public static class AgentExecutionProfile
@@ -27,11 +27,14 @@ public static class AgentExecutionProfile
     /// <summary>Key of the signed profile block under <c>extensions</c>.</summary>
     public const string ExtensionKey = "ai.sigill.agent-execution";
 
-    /// <summary>The configuration object kinds every <c>run_start</c> and identity record carry (§3.2).</summary>
+    /// <summary>The configuration object kinds bound by <c>run_start</c> and the identity record (§3.2).</summary>
     public static IReadOnlyList<string> ConfigurationKinds { get; } =
         new[] { "instruction-set", "tool-manifest", "model-config", "execution-policy" };
 
-    /// <summary>The object kinds an identity record carries, exactly one each (§3.5).</summary>
+    /// <summary>Configuration kinds that may be absent — on both sides, or on neither (§3.2).</summary>
+    public static IReadOnlyList<string> OptionalConfigurationKinds { get; } = new[] { "model-config" };
+
+    /// <summary>The object kinds an identity record carries, at most one each; all but the optional configuration kinds are required (§3.6).</summary>
     public static IReadOnlyList<string> IdentityKinds { get; } =
         new[] { "agent-manifest", "instruction-set", "tool-manifest", "model-config", "execution-policy", "registration-record" };
 
@@ -68,23 +71,48 @@ public static class AgentExecutionProfile
     }
 
     /// <summary>
-    /// The configuration digest (§3.5): SHA-256 over the JCS of the five
-    /// configuration objects' SHA-256 digests. One value identifies one agent
-    /// configuration; a changed configuration needs a new identity record.
+    /// The configuration digest (§3.6): SHA-256 over the JCS of the
+    /// configuration objects' SHA-256 digests (<c>modelConfig</c> only when
+    /// bound). One value identifies one agent configuration; a changed
+    /// configuration needs a new identity record.
     /// </summary>
     public static string ConfigurationDigest(byte[] agentManifest, AgentConfiguration configuration)
     {
         if (agentManifest is null) throw new ArgumentNullException(nameof(agentManifest));
         if (configuration is null) throw new ArgumentNullException(nameof(configuration));
+        return ConfigurationDigestFromHex(
+            EnvelopeHashing.HashHex(agentManifest), EnvelopeHashing.HashHex(configuration.InstructionSet),
+            EnvelopeHashing.HashHex(configuration.ToolManifest),
+            configuration.ModelConfig is { } mc ? EnvelopeHashing.HashHex(mc) : null,
+            EnvelopeHashing.HashHex(configuration.ExecutionPolicy));
+    }
+
+    internal static string ConfigurationDigestFromHex(
+        string manifest, string instructionSet, string toolManifest, string? modelConfig, string executionPolicy)
+    {
         var digests = new JsonObject
         {
-            ["agentManifest"]   = EnvelopeHashing.HashHex(agentManifest),
-            ["instructionSet"]  = EnvelopeHashing.HashHex(configuration.InstructionSet),
-            ["toolManifest"]    = EnvelopeHashing.HashHex(configuration.ToolManifest),
-            ["modelConfig"]     = EnvelopeHashing.HashHex(configuration.ModelConfig),
-            ["executionPolicy"] = EnvelopeHashing.HashHex(configuration.ExecutionPolicy),
+            ["agentManifest"]   = manifest,
+            ["instructionSet"]  = instructionSet,
+            ["toolManifest"]    = toolManifest,
+            ["executionPolicy"] = executionPolicy,
         };
+        if (modelConfig is not null) digests["modelConfig"] = modelConfig;
         return EnvelopeHashing.HashHex(EnvelopeHashing.Canonicalize(digests));
+    }
+
+    /// <summary>The configuration as detached objects, in a fixed order.</summary>
+    internal static List<AgentRunObject> ConfigurationObjects(AgentConfiguration c)
+    {
+        var objects = new List<AgentRunObject>
+        {
+            new() { Kind = "instruction-set", Role = "input", ContentType = "text/plain",       Bytes = c.InstructionSet },
+            new() { Kind = "tool-manifest",   Role = "input", ContentType = "application/json", Bytes = c.ToolManifest },
+        };
+        if (c.ModelConfig is { } mc)
+            objects.Add(new AgentRunObject { Kind = "model-config", Role = "input", ContentType = "application/json", Bytes = mc });
+        objects.Add(new AgentRunObject { Kind = "execution-policy", Role = "input", ContentType = "application/json", Bytes = c.ExecutionPolicy });
+        return objects;
     }
 
     // ── internals shared by the recorder and the verifier ────────────────────

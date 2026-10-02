@@ -122,13 +122,7 @@ public sealed class AgentRun
                 foreach (var o in IdentityObjects(agent, identity)) run._payloads[o.Key] = o.Value;
         }
 
-        var objects = new List<AgentRunObject>
-        {
-            new() { Kind = "instruction-set",  Role = "input", ContentType = "text/plain",       Bytes = agent.Configuration.InstructionSet },
-            new() { Kind = "tool-manifest",    Role = "input", ContentType = "application/json", Bytes = agent.Configuration.ToolManifest },
-            new() { Kind = "model-config",     Role = "input", ContentType = "application/json", Bytes = agent.Configuration.ModelConfig },
-            new() { Kind = "execution-policy", Role = "input", ContentType = "application/json", Bytes = agent.Configuration.ExecutionPolicy },
-        };
+        var objects = AgentExecutionProfile.ConfigurationObjects(agent.Configuration);
         if (options.StartObjects is not null) objects.AddRange(options.StartObjects);
 
         var block = new JsonObject
@@ -142,7 +136,7 @@ public sealed class AgentRun
     }
 
     /// <summary>
-    /// Registers an identity record (spec §3.5) for the agent's current
+    /// Registers an identity record (spec §3.6) for the agent's current
     /// configuration. Store the result and pass it as
     /// <see cref="AgentRunOptions.Identity"/> while the configuration is
     /// unchanged.
@@ -175,13 +169,14 @@ public sealed class AgentRun
 
         var objects = new List<AgentRunObject>
         {
-            new() { Kind = "agent-manifest",      Role = "input", ContentType = "application/json", Bytes = manifest },
-            new() { Kind = "instruction-set",     Role = "input", ContentType = "text/plain",       Bytes = agent.Configuration.InstructionSet },
-            new() { Kind = "tool-manifest",       Role = "input", ContentType = "application/json", Bytes = agent.Configuration.ToolManifest },
-            new() { Kind = "model-config",        Role = "input", ContentType = "application/json", Bytes = agent.Configuration.ModelConfig },
-            new() { Kind = "execution-policy",    Role = "input", ContentType = "application/json", Bytes = agent.Configuration.ExecutionPolicy },
-            new() { Kind = "registration-record", Role = "input", ContentType = "application/json", Bytes = AgentExecutionProfile.Canonical(registration) },
+            new() { Kind = "agent-manifest", Role = "input", ContentType = "application/json", Bytes = manifest },
         };
+        objects.AddRange(AgentExecutionProfile.ConfigurationObjects(agent.Configuration));
+        objects.Add(new AgentRunObject
+        {
+            Kind = "registration-record", Role = "input", ContentType = "application/json",
+            Bytes = AgentExecutionProfile.Canonical(registration),
+        });
         var block = new JsonObject
         {
             ["recordType"] = "agent-identity",
@@ -230,30 +225,66 @@ public sealed class AgentRun
 
     /// <summary>Retrieved context (RAG) the agent read.</summary>
     public Task<AgentRunArtifact> RecordRetrievalAsync(byte[] context, string contentType = "text/plain", CancellationToken cancellationToken = default) =>
-        RecordAsync("retrieval", new[] { Obj("retrieved-context", "context", context, contentType) }, cancellationToken: cancellationToken);
+        RecordAsync("retrieval", new[] { Obj("retrieval-result", "context", context, contentType) }, cancellationToken: cancellationToken);
 
-    /// <summary>A tool call the agent decided to make. Mark write-class calls <paramref name="consequential"/>.</summary>
-    public Task<AgentRunArtifact> RecordToolCallAsync(string tool, byte[] arguments, bool consequential = false,
-        string contentType = "application/json", CancellationToken cancellationToken = default) =>
-        RecordAsync("tool_call", new[] { Obj("tool-arguments", "input", arguments, contentType) },
-            new JsonObject { ["tool"] = tool }, consequential, cancellationToken);
+    /// <summary>
+    /// A tool call the agent decided to make (spec §3.4). <paramref name="operation"/>
+    /// classifies it (e.g. <c>read</c>, <c>write</c>); mark write-class calls
+    /// <paramref name="consequential"/>. <paramref name="authorization"/> records
+    /// the policy decision taken before the call.
+    /// </summary>
+    public Task<AgentRunArtifact> RecordToolCallAsync(string tool, byte[] arguments, string? operation = null,
+        AgentAuthorization? authorization = null, bool consequential = false,
+        string contentType = "application/json", CancellationToken cancellationToken = default)
+    {
+        var ext = new JsonObject { ["tool"] = ToolBlock(tool, operation) };
+        if (authorization is not null) ext["authorization"] = authorization.ToJson();
+        return RecordAsync("tool_call", new[] { Obj("tool-arguments", "input", arguments, contentType) },
+            ext, consequential, cancellationToken);
+    }
 
-    /// <summary>The result a tool returned.</summary>
+    /// <summary>The result a tool returned — context for the model's next turn.</summary>
     public Task<AgentRunArtifact> RecordToolResultAsync(string tool, byte[] result,
         string contentType = "application/json", CancellationToken cancellationToken = default) =>
-        RecordAsync("tool_result", new[] { Obj("tool-result", "output", result, contentType) },
-            new JsonObject { ["tool"] = tool }, cancellationToken: cancellationToken);
+        RecordAsync("tool_result", new[] { Obj("tool-result", "context", result, contentType) },
+            new JsonObject { ["tool"] = ToolBlock(tool, null) }, cancellationToken: cancellationToken);
 
-    /// <summary>A human or policy approval decision. Consequential by default: it authorizes a side effect.</summary>
-    public Task<AgentRunArtifact> RecordApprovalAsync(byte[] decision, bool consequential = true,
-        string contentType = "application/json", CancellationToken cancellationToken = default) =>
-        RecordAsync("approval", new[] { Obj("approval-decision", "input", decision, contentType) },
-            consequential: consequential, cancellationToken: cancellationToken);
+    /// <summary>A standalone policy decision (spec §3.4), e.g. "this write needs approval".</summary>
+    public Task<AgentRunArtifact> RecordAuthorizationAsync(AgentAuthorization authorization, string? tool = null,
+        string? operation = null, CancellationToken cancellationToken = default)
+    {
+        if (authorization is null) throw new ArgumentNullException(nameof(authorization));
+        var ext = new JsonObject { ["authorization"] = authorization.ToJson() };
+        if (tool is not null) ext["tool"] = ToolBlock(tool, operation);
+        return RecordAsync("authorization", extension: ext, cancellationToken: cancellationToken);
+    }
+
+    /// <summary>
+    /// A human approval (spec §3.4). <paramref name="approverRef"/> is opaque —
+    /// never a name or e-mail address. The receipt and an identity assertion
+    /// (e.g. an IdP token) are bound as detached objects; their bytes stay
+    /// local. Consequential by default: an approval authorizes a side effect.
+    /// </summary>
+    public Task<AgentRunArtifact> RecordHumanApprovalAsync(string decision, byte[]? receipt = null,
+        byte[]? identityAssertion = null, string? approverRef = null, string? actionEvidenceId = null,
+        DateTimeOffset? decidedAt = null, bool consequential = true, string receiptContentType = "application/json",
+        string identityAssertionContentType = "application/jwt", CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrEmpty(decision)) throw new ArgumentException("decision is required.", nameof(decision));
+        var approval = new JsonObject { ["decision"] = decision };
+        if (approverRef is not null) approval["approverRef"] = approverRef;
+        if (actionEvidenceId is not null) approval["actionEvidenceId"] = actionEvidenceId;
+        if (decidedAt is { } at) approval["decidedAt"] = AgentExecutionProfile.FormatTime(at);
+        var objects = new List<AgentRunObject>();
+        if (receipt is not null) objects.Add(Obj("approval-receipt", "input", receipt, receiptContentType));
+        if (identityAssertion is not null) objects.Add(Obj("identity-assertion", "input", identityAssertion, identityAssertionContentType));
+        return RecordAsync("human_approval", objects, new JsonObject { ["approval"] = approval }, consequential, cancellationToken);
+    }
 
     /// <summary>What the model produced.</summary>
     public Task<AgentRunArtifact> RecordModelOutputAsync(byte[] output, string contentType = "text/plain",
         CancellationToken cancellationToken = default) =>
-        RecordAsync("model_output", new[] { Obj("model-output", "output", output, contentType) }, cancellationToken: cancellationToken);
+        RecordAsync("model_output", new[] { Obj("assistant-reply", "output", output, contentType) }, cancellationToken: cancellationToken);
 
     /// <summary>
     /// Anchors the chain head with a timestamped <c>checkpoint</c> step (spec
@@ -386,6 +417,14 @@ public sealed class AgentRun
             throw new ArgumentException("TimestampPolicy.Profile must be 'throughput' or 'per-event'.");
         if (p.EveryEvents < 0 || p.EverySeconds < 0)
             throw new ArgumentException("TimestampPolicy cadence values must be zero or positive.");
+    }
+
+    private static JsonObject ToolBlock(string name, string? operation)
+    {
+        if (string.IsNullOrEmpty(name)) throw new ArgumentException("tool name is required.", nameof(name));
+        var block = new JsonObject { ["name"] = name };
+        if (operation is not null) block["operation"] = operation;
+        return block;
     }
 
     private static AgentRunObject Obj(string kind, string role, byte[] bytes, string contentType) =>
