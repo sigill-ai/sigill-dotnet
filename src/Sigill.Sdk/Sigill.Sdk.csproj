@@ -27,6 +27,11 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- The v2 envelope schema, validated against at run verification (agent profile §2). -->
+    <EmbeddedResource Include="../../spec/ai-evidence-envelope-v2.schema.json" LogicalName="Sigill.Sdk.ai-evidence-envelope-v2.schema.json" />
+  </ItemGroup>
+
+  <ItemGroup>
     <!-- Test project needs access to internal types like JsonCanonicalizer for unit tests. -->
     <InternalsVisibleTo Include="Sigill.Sdk.Tests" />
   </ItemGroup>

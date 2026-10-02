@@ -340,6 +340,76 @@ Expiry-reminder policy can be set per evidence at creation on every seal
 method: `reminders: "on"` (with `reminderDays: 30/60/90/180`), `"off"` (muted),
 or the default `"inherit"`.
 
+## Agent runs: verifiable multi-step execution
+
+For agents that call tools, retrieve context and act over several steps, a
+single envelope is not enough: you need to show *what happened, in what
+order, under which configuration* — and that nothing was removed afterwards.
+`AgentRun` records a run under
+[AgentExecutionProfileV1](spec/agent-execution-profile-v1.md): every step is
+an ordinary v2 artifact, sealed blind and chained to the previous step's
+signature.
+
+```csharp
+var agent = new AgentDefinition
+{
+    AgentId = "urn:example:agent:support-triage",   // opaque — no personal data
+    AgentVersion = "2.4.0",
+    Model = new AgentModelRef("anthropic", "claude-sonnet-5"),
+    Configuration = new AgentConfiguration
+    {
+        InstructionSet  = systemPromptBytes,
+        ToolManifest    = toolSchemasJson,
+        ModelConfig     = samplingParamsJson,
+        ExecutionPolicy = allowlistAndLimitsJson,
+    },
+};
+
+var run = await client.StartAgentRunAsync(agent, new AgentRunOptions { CertificateId = certId });
+await run.RecordToolCallAsync("lookup_ticket", argsJson);
+await run.RecordToolResultAsync("lookup_ticket", resultJson);
+await run.RecordToolCallAsync("close_ticket", argsJson, consequential: true); // side effect → timestamped now
+await run.RecordModelOutputAsync(answerBytes);
+AgentRunBundle bundle = await run.FinishAsync("completed");
+
+File.WriteAllText("run.json", bundle.ToJsonString());
+```
+
+Later, anyone holding the bundle can verify it:
+
+```csharp
+var result = await client.VerifyAgentRunAsync(AgentRunBundle.Parse(File.ReadAllText("run.json")));
+// result.Verdict  -> "run_finalized" | "run_open" | "run_invalid"
+// result.Checks   -> correlation, sequence, chain, envelope, signatures,
+//                    timestamps, objects, finalization, identity: ok | warn | bad
+// result.Findings -> exactly what failed, e.g. "Sequence gap: no artifact for seq 2 (deleted or withheld)."
+Console.WriteLine(result.Scope); // what a verdict does — and does not — establish
+```
+
+What to know:
+
+- **Content never leaves your machine.** Sealing and verification send digests
+  and opaque URNs only. A bundle carries digests by default; set
+  `RetainPayloads` (or use `bundle.WithPayloads(...)`) only when the recipient
+  may read the content — supplying payloads upgrades the `objects` check from
+  "digests match" to "content matches".
+- **Timestamps where they matter.** By default (`throughput`) every step is
+  signed and chained, and RFC 3161 timestamps go on `run_end`, consequential
+  steps and every 10 events / 300 seconds. The policy is signed into
+  `run_start`, so the verifier knows which steps had to carry one. Use
+  `AgentTimestampPolicy.PerEvent` to timestamp everything, and
+  `run.CheckpointAsync()` from a timer to anchor an idle run.
+- **Configuration is bound.** The first run registers an *identity record*
+  (instructions, tools, model config, execution policy). Store `run.Identity`
+  and pass it as `AgentRunOptions.Identity` while the configuration is
+  unchanged; a changed configuration needs a new one.
+- **Persist as you go.** `OnArtifactSealed` runs after each step is sealed. A
+  sealing failure stops the chain; the partial bundle (`run.ToBundle()`)
+  verifies as open or invalid, never as finalized.
+- **Bring your own verifier.** `AgentRunVerifier.VerifyAsync(bundle, verifier)`
+  accepts any `BlindObjectsVerifier`; `AgentRunVerifier.Remote(client)` is the
+  blind endpoint used above.
+
 ## Error handling
 
 Producer-time errors throw; verification errors are collected. This split is

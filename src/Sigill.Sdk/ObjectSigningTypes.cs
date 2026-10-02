@@ -44,6 +44,13 @@ public sealed record ObjectSignOptions
     /// <summary>Request an eIDAS-qualified signature timestamp.</summary>
     public bool Qualified { get; init; }
 
+    /// <summary>
+    /// Embed an RFC 3161 signature timestamp (default). False seals B-B: the
+    /// signature only, for records that are anchored later by a timestamped
+    /// successor (e.g. the steps of a chained agent run).
+    /// </summary>
+    public bool Timestamp { get; init; } = true;
+
     /// <summary>Add the ML-DSA-87 hybrid signer; SHA-512 digests must be supplied throughout.</summary>
     public bool Pqc { get; init; }
 
