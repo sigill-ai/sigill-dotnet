@@ -120,7 +120,7 @@ public class AgentRunTests
 
     [Fact]
     public void RunVectors_AreAllPresent() =>
-        RunVectors().Should().HaveCount(54);
+        RunVectors().Should().HaveCount(56);
 
     [Theory]
     [MemberData(nameof(RunVectors))]
@@ -825,6 +825,83 @@ public class AgentRunTests
         await run.Invoking(r => r.RecordToolCallAsync("lookup_ticket", Encoding.UTF8.GetBytes("{}"))).Should().ThrowAsync<IOException>();
         run.IsBroken.Should().BeFalse();
         await run.RecordModelOutputAsync(Encoding.UTF8.GetBytes("ok"));
+        (await AgentRunVerifier.VerifyAsync(await run.FinishAsync(), StubVerify)).Verdict.Should().Be("run_finalized");
+    }
+
+    [Fact]
+    public async Task OptionalInputs_AreSealed_AndVerify()
+    {
+        var sealer = new StubSealer();
+        using var client = Client(sealer);
+        var agent = Agent() with { IdentityRef = "urn:example:identity:triage" };
+        var options = Options() with
+        {
+            Authority = Encoding.UTF8.GetBytes("eyJhbGciOiJub25lIn0.e30."),
+            ControlActor = new AgentRunActor("system", "urn:example:harness:prod", "4.1"),
+            Qualified = true,
+        };
+        var run = await AgentRun.StartCoreAsync(client, agent, options, Clock(), CancellationToken.None);
+        var ctl = run.ControlArtifact.Envelope;
+        ctl["agent"]!["identityRef"]!.GetValue<string>().Should().Be("urn:example:identity:triage");
+        ctl["actor"]!.ToJsonString().Should().Be("""{"type":"system","id":"urn:example:harness:prod","version":"4.1"}""");
+        ctl["objects"]!.AsArray().Select(o => o!["role"]!.GetValue<string>()).Should().Contain(new[] { "authority", "baseline-state" });
+        sealer.Requests[0]["qualified"]!.GetValue<bool>().Should().BeTrue("the Control Artifact is timestamped");
+        (sealer.Requests[1]["qualified"]?.GetValue<bool>() ?? false).Should().BeFalse("B-B events are never qualified");
+
+        var retrieval = await run.RecordRetrievalAsync(Encoding.UTF8.GetBytes("kb article 7"));
+        retrieval.Envelope["objects"]![0]!["role"]!.GetValue<string>().Should().Be("retrieved-context");
+        var call = await run.RecordToolCallAsync("lookup_ticket", Encoding.UTF8.GetBytes("{}"), useId: "call-7");
+        call.Envelope["step"]!["tool"]!["useId"]!.GetValue<string>().Should().Be("call-7");
+        var bundle = await run.FinishAsync();
+
+        var evaluatedAt = new DateTimeOffset(2026, 10, 1, 9, 30, 0, 123, TimeSpan.Zero).AddTicks(4_567);
+        var evaluation = await ControlEvaluation.SealCoreAsync(client, new ControlEvaluationRequest
+        {
+            CertificateId = VerifierCert, VerifierId = "urn:example:verifier", VerifierVersion = "1",
+            ControlArtifact = run.ControlArtifact, RunEnd = bundle.Artifacts[^1],
+            ObservedState = new[] { AgentRunObject.Text("observed-state", "closed") },
+            Controls = new[] { new ControlResult("ticket-closed", "PASS") }, Overall = "PASS",
+            IncludeBaseline = false, EvaluatedAt = evaluatedAt,
+        }, Clock(), CancellationToken.None);
+        evaluation.Envelope["evaluatedAt"]!.GetValue<string>().Should().Be("2026-10-01T09:30:00.123Z");
+        evaluation.Envelope["objects"]!.AsArray().Select(o => o!["role"]!.GetValue<string>())
+            .Should().Equal("observed-state", "control-set");
+
+        var r = await AgentRunVerifier.VerifyAsync(bundle.WithEvaluations(evaluation), StubVerify);
+        r.Verdict.Should().Be("run_finalized", string.Join("\n", r.Findings));
+        r.Evaluations.Single().BaselineDigestMatches.Should().BeNull("the evaluation carries no baseline");
+        r.Evaluations.Single().SignatureValid.Should().BeTrue();
+    }
+
+    [Fact]
+    public void Bundle_ParseEnforcesItsLimits()
+    {
+        var v = JsonNode.Parse(File.ReadAllText(Path.Combine(VectorsDir, "runs", "01-finalized-digests-only.json")))!["bundle"]!;
+        var tooMany = v.DeepClone();
+        var one = tooMany["artifacts"]![0]!;
+        tooMany["artifacts"] = new JsonArray(Enumerable.Range(0, AgentRunBundle.MaxArtifacts + 1).Select(_ => one.DeepClone()).ToArray());
+        tooMany["evaluations"] = new JsonArray(Enumerable.Range(0, AgentRunBundle.MaxEvaluations + 1)
+            .Select(_ => v["evaluations"]![0]!.DeepClone()).ToArray());
+        var act = () => AgentRunBundle.Parse(tooMany);
+        var errors = act.Should().Throw<AgentRunBundleFormatException>().Which.Errors;
+        errors.Should().Contain(e => e.Contains($"more than {AgentRunBundle.MaxArtifacts} artifacts"));
+        errors.Should().Contain(e => e.Contains($"more than {AgentRunBundle.MaxEvaluations} evaluations"));
+    }
+
+    [Fact]
+    public async Task StartCallbackFailure_StillHandsBackTheStartedRun()
+    {
+        var sealer = new StubSealer();
+        using var client = Client(sealer);
+        var ex = await FluentActions.Invoking(() => Start(client, Options() with
+        {
+            OnArtifactSealed = (a, _) => a.SchemaName == AgentProfiles.ControlArtifactSchema ? throw new IOException("disk full") : Task.CompletedTask,
+        })).Should().ThrowAsync<AgentRunCallbackException>();
+        ex.Which.InnerException.Should().BeOfType<IOException>();
+        var run = ex.Which.Run;
+        run.Artifacts.Should().ContainSingle().Which.StepType.Should().Be("run_start", "run_start is sealed before any callback");
+        run.IsBroken.Should().BeFalse();
+        await run.RecordModelOutputAsync(Encoding.UTF8.GetBytes("carries on"));
         (await AgentRunVerifier.VerifyAsync(await run.FinishAsync(), StubVerify)).Verdict.Should().Be("run_finalized");
     }
 

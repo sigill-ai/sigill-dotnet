@@ -164,7 +164,7 @@ public sealed record AgentEvaluationVerdict
     /// <summary>Same baseline (URI and digest) as the Control Artifact; null unless the evaluation carries one.</summary>
     public bool? BaselineDigestMatches { get; init; }
 
-    /// <summary>Valid signature with an established signer (and an expected one, when given).</summary>
+    /// <summary>Valid signature over this very envelope, with an established signer (and an expected one, when given).</summary>
     public bool SignatureValid { get; init; }
     public bool TimestampValid { get; init; }
     public string? TimestampGenTime { get; init; }
@@ -340,7 +340,7 @@ public static class AgentRunVerifier
 
     private sealed class ArtifactCheck
     {
-        public bool SignatureValid, ObjectsComplete, TimestampPresent;
+        public bool SignatureValid, ObjectsComplete, TimestampPresent, EnvelopeCovered;
         public bool? TimestampValid;
         public string? GenTime, TsaName, Error;
         public SignerCertificateInfo? Certificate;
@@ -417,6 +417,7 @@ public static class AgentRunVerifier
                 }
             }
             var env = r.Objects.Where(x => x.Uri == AgentProfiles.EnvelopeUri).Select(x => (bool?)x.HashMatch).FirstOrDefault();
+            c.EnvelopeCovered = env == true;
             if (env != true)
             {
                 c.ObjectsComplete = false;
@@ -559,7 +560,6 @@ public static class AgentRunVerifier
 
         int tsRequired = 0, tsPresent = 0, tsValid = 0;
         var anchorValid = false;
-        bool? plausible = null;
         var certificates = new List<SignerCertificateInfo>();
         void AddCertificate(SignerCertificateInfo? cert)
         {
@@ -569,7 +569,7 @@ public static class AgentRunVerifier
         string? prevSigHash = null;
         var prevSeq = -1;
         var coverage = new AgentProfiles.TimestampCoverage(policy);
-        string? startGenTime = null;
+        var timeline = new List<(int Seq, DateTimeOffset? EventTime, DateTimeOffset? SealedAt)>();
 
         foreach (var p in arts)
         {
@@ -650,13 +650,7 @@ public static class AgentRunVerifier
                 findings.Add($"{label}: timestamp invalid.");
             }
             if (sa.StepType == "run_end" && c.TimestampOk && c.SignatureValid) anchorValid = true;
-            if (c.TimestampOk && Time(c.GenTime) is { } sealedAt && sa.EventTime is { } claimed)
-            {
-                var ok = claimed <= sealedAt + SealTimeAllowance;
-                plausible = (plausible ?? true) && ok;
-                if (!ok) warnings.Add($"{label}: eventTime {AgentProfiles.FormatTime(claimed)} is later than its own seal time {c.GenTime}.");
-            }
-            if (ReferenceEquals(sa, reference) && sa.StepType == "run_start" && c.TimestampOk) startGenTime = c.GenTime;
+            timeline.Add((seq, sa.EventTime, c.TimestampOk ? Time(c.GenTime) : null));
             AddCertificate(c.Certificate);
 
             verdicts.Add(new AgentStepVerdict
@@ -758,13 +752,39 @@ public static class AgentRunVerifier
         }
         checks["control"] = controlOk ? "ok" : "bad";
 
+        // ── seal time, defence in depth (§8): warnings only
+        var ctlAt = ctlCheck is { TimestampOk: true } ? Time(ctlCheck.GenTime) : null;
         bool? sealedBeforeRun = null;
-        if (ctlCheck is { TimestampOk: true } && Time(ctlCheck.GenTime) is { } ctlAt && Time(startGenTime) is { } startAt)
+        if (ctlAt is { } controlTime && timeline.FirstOrDefault(t => t.SealedAt is not null) is { SealedAt: { } firstAt } first)
         {
-            sealedBeforeRun = ctlAt <= startAt + TimeSpan.FromSeconds(1); // TSAs state up to 1 s accuracy
+            sealedBeforeRun = controlTime <= firstAt + TimeSpan.FromSeconds(1); // TSAs state up to 1 s accuracy
             if (sealedBeforeRun == false)
-                warnings.Add("The Control Artifact's timestamp is later than run_start's: the control basis may not have been sealed before the run.");
+                warnings.Add($"The Control Artifact's timestamp is later than the run's first timestamp (seq {first.Seq}): the control basis may not have been sealed before the run.");
         }
+        // Every eventTime must lie between the Control Artifact's timestamp and the first timestamp at or after
+        // its own seq (its own, or the next one: the chain makes it exist before that), within the allowance.
+        bool? plausible = null;
+        var early = new List<int>();
+        var late = new List<int>();
+        for (var i = 0; i < timeline.Count; i++)
+        {
+            if (timeline[i].EventTime is not { } claimed) continue;
+            if (ctlAt is { } lower)
+            {
+                plausible ??= true;
+                if (claimed < lower - SealTimeAllowance) early.Add(timeline[i].Seq);
+            }
+            if (timeline.Skip(i).Select(t => t.SealedAt).FirstOrDefault(t => t is not null) is { } upper)
+            {
+                plausible ??= true;
+                if (claimed > upper + SealTimeAllowance) late.Add(timeline[i].Seq);
+            }
+        }
+        if (early.Count > 0 || late.Count > 0) plausible = false;
+        if (early.Count > 0)
+            warnings.Add($"eventTime earlier than the Control Artifact's timestamp {ctlCheck!.GenTime} (seq {string.Join(", ", early)}).");
+        if (late.Count > 0)
+            warnings.Add($"eventTime later than the timestamp that bounds it (seq {string.Join(", ", late)}).");
 
         // ── every payload must be a signed object of some artifact (§7)
         var evalParsed = bundle.Evaluations.Select(e => ParseSigned(e.Envelope, e.Signature, AgentProfiles.ControlEvaluationSchema)).ToList();
@@ -845,7 +865,8 @@ public static class AgentRunVerifier
             var ef = sa.Conformance.Select(e => $"{label}: {e}.").ToList();
             var c = await CheckArtifactAsync(sa, art, bundle.Payloads, verifier, label, cancellationToken).ConfigureAwait(false);
             ef.AddRange(c.Findings);
-            var signatureValid = c.SignatureValid;
+            // An evaluation's claim is its envelope: a valid signature over another envelope is no claim at all.
+            var signatureValid = c.SignatureValid && c.EnvelopeCovered;
             var (signer, signerProblem) = AgentProfiles.SignerOf(sa.Jws);
             if (signerProblem is not null) { signatureValid = false; ef.Add($"{label}: {signerProblem}."); }
             else if (expectedEvaluationSigners is not null && !expectedEvaluationSigners.Contains(signer!))

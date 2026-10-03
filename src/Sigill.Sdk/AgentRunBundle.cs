@@ -21,6 +21,12 @@ public sealed class AgentRunBundle
     /// <summary>Upper bound on events per bundle (§7).</summary>
     public const int MaxArtifacts = 2000;
 
+    /// <summary>Upper bound on Control Evaluations per bundle; each costs one signature check.</summary>
+    public const int MaxEvaluations = 64;
+
+    /// <summary>Upper bound on supplied payloads per bundle.</summary>
+    public const int MaxPayloads = 20000;
+
     private static readonly Regex Hex64 = new("^[0-9a-f]{64}$", RegexOptions.CultureInvariant);
 
     /// <summary>An index for humans; verifiers take the run identifier only from the signed envelopes.</summary>
@@ -157,6 +163,7 @@ public sealed class AgentRunBundle
         if (input["evaluations"] is { } evalNode)
         {
             if (evalNode is not JsonArray evals) errors.Add("evaluations is not an array");
+            else if (evals.Count > MaxEvaluations) errors.Add($"more than {MaxEvaluations} evaluations");
             else
                 for (var i = 0; i < evals.Count; i++)
                     if (ReadArtifact(evals[i], $"evaluations[{i}]", errors) is { } a) evaluations.Add(a);
@@ -166,6 +173,7 @@ public sealed class AgentRunBundle
         if (input["payloads"] is { } payloadNode)
         {
             if (payloadNode is not JsonObject p) errors.Add("payloads is not an object");
+            else if (p.Count > MaxPayloads) errors.Add($"more than {MaxPayloads} payloads");
             else
                 foreach (var kv in p)
                 {

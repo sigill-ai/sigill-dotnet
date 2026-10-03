@@ -150,11 +150,18 @@ public sealed class AgentRun
         run.ControlArtifact = new AgentRunArtifact(envelope, result.Signature, Digests(objects));
         if (options.RetainPayloads)
             foreach (var o in objects) run._payloads[o.Uri] = o.Bytes;
-        await run.NotifyAsync(run.ControlArtifact, -1, cancellationToken).ConfigureAwait(false);
 
+        // Seal run_start before any callback runs, so a failing callback cannot strand a sealed control basis.
         var start = await run.SealEventAsync("run_start", options.StartObjects ?? Array.Empty<AgentRunObject>(),
             new JsonObject(), consequential: false, cancellationToken).ConfigureAwait(false);
-        await run.NotifyAsync(start, 0, cancellationToken).ConfigureAwait(false);
+        // Both are delivered even when the first callback fails: later events wait for their turn in order.
+        Exception? failure = null;
+        foreach (var (artifact, seq) in new[] { (run.ControlArtifact, -1), (start, 0) })
+        {
+            try { await run.NotifyAsync(artifact, seq, cancellationToken).ConfigureAwait(false); }
+            catch (Exception ex) when (ex is not OperationCanceledException) { failure ??= ex; }
+        }
+        if (failure is not null) throw new AgentRunCallbackException(run, failure);
         return run;
     }
 
@@ -510,6 +517,19 @@ public sealed class AgentRun
 
     private static AgentRunObject Obj(string role, byte[] bytes, string contentType) =>
         new() { Role = role, Bytes = bytes ?? throw new ArgumentNullException(nameof(bytes)), ContentType = contentType };
+}
+
+/// <summary>
+/// An <see cref="AgentRunOptions.OnArtifactSealed"/> callback failed while the
+/// run was starting. The run itself started: the Control Artifact and
+/// <c>run_start</c> are sealed, and <see cref="Run"/> carries on from there.
+/// </summary>
+public sealed class AgentRunCallbackException : SigillException
+{
+    public AgentRun Run { get; }
+
+    public AgentRunCallbackException(AgentRun run, Exception inner)
+        : base("The run started, but an OnArtifactSealed callback failed: " + inner.Message, inner) => Run = run;
 }
 
 /// <summary>
