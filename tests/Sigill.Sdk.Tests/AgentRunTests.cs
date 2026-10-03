@@ -95,7 +95,8 @@ public class AgentRunTests
         var (objects, missing, unreferenced) = MatchDigests(Header(entry), digests);
         SignatureTimestampInfo? ts = null;
         if (entry["header"]?["stubTimestamp"] is JsonObject st)
-            ts = new SignatureTimestampInfo(st["genTime"]!.GetValue<string>(), "Stub TSA", st["valid"]!.GetValue<bool>());
+            ts = new SignatureTimestampInfo(st["genTime"]!.GetValue<string>(), "Stub TSA", st["valid"]!.GetValue<bool>(),
+                st["trust"]?.GetValue<string>() ?? "trusted_chain");
         return Task.FromResult(new BlindObjectsVerdict
         {
             SignatureValid = valid,
@@ -126,7 +127,7 @@ public class AgentRunTests
 
     [Fact]
     public void RunVectors_AreAllPresent() =>
-        RunVectors().Should().HaveCount(64);
+        RunVectors().Should().HaveCount(65);
 
     [Theory]
     [MemberData(nameof(RunVectors))]
@@ -408,6 +409,8 @@ public class AgentRunTests
         r.ControlSealedBeforeRun.Should().Be(expected["controlSealedBeforeRun"]!.GetValue<bool>());
         r.EventTimesPlausible.Should().Be(expected["eventTimesPlausible"]!.GetValue<bool>());
         r.Warnings.Should().Contain(w => w.Contains("signs no timestampPolicy"));
+        r.Warnings.Should().Contain(w => w.Contains("TSA trust not established") && w.Contains("not reported"),
+            "the offline verifier reports no TSA trust");
         var e = expected["evaluations"]![0]!;
         var ev = r.Evaluations.Single();
         ev.VerifierId.Should().Be(e["verifier"]!.GetValue<string>());

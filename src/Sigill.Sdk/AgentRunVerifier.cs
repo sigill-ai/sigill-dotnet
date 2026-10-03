@@ -47,7 +47,8 @@ public sealed record BlindObjectsVerdict
         SignatureTimestampInfo? ts = null;
         if (underlying?["timestamp"] is JsonObject t)
             ts = new SignatureTimestampInfo(
-                AgentProfiles.Str(t["genTime"]), AgentProfiles.Str(t["tsaName"]), AgentProfiles.IsTrue(t["signatureValid"]));
+                AgentProfiles.Str(t["genTime"]), AgentProfiles.Str(t["tsaName"]), AgentProfiles.IsTrue(t["signatureValid"]),
+                AgentProfiles.Str(t["trust"]));
         SignerCertificateInfo? cert = null;
         if (underlying?["certificate"] is JsonObject c)
             cert = new SignerCertificateInfo(
@@ -75,8 +76,11 @@ public sealed record BlindObjectsVerdict
         (node as JsonArray ?? new JsonArray()).Select(AgentProfiles.Str).OfType<string>().ToList();
 }
 
-/// <summary>The signature timestamp of one artifact.</summary>
-public sealed record SignatureTimestampInfo(string? GenTime, string? TsaName, bool SignatureValid);
+/// <summary>
+/// The signature timestamp of one artifact. <c>Trust</c> is the signature service's verdict on the TSA:
+/// trusted_chain | qualified (trusted) | untrusted | unknown, or null when the service does not report it.
+/// </summary>
+public sealed record SignatureTimestampInfo(string? GenTime, string? TsaName, bool SignatureValid, string? Trust = null);
 
 /// <summary>
 /// The signer certificate of one artifact. <c>Trust</c> is the signature
@@ -246,6 +250,7 @@ public static class AgentRunVerifier
     private const int MaxMissingListed = 64;
     private static readonly TimeSpan SealTimeAllowance = TimeSpan.FromSeconds(6); // 5 s skew + up to 1 s TSA accuracy
     private static readonly HashSet<string> TrustedChains = new(StringComparer.Ordinal) { "trusted_chain", "platform" };
+    private static readonly HashSet<string> TrustedTsa = new(StringComparer.Ordinal) { "trusted_chain", "qualified" };
     private static readonly HashSet<string> Dispositions = new(StringComparer.Ordinal) { "completed", "failed", "aborted" };
 
     /// <summary>
@@ -381,7 +386,7 @@ public static class AgentRunVerifier
     {
         public bool SignatureValid, ObjectsComplete, TimestampPresent, EnvelopeCovered;
         public bool? TimestampValid;
-        public string? GenTime, TsaName, Error;
+        public string? GenTime, TsaName, TsaTrust, Error;
         public SignerCertificateInfo? Certificate;
         public List<AgentObjectVerdict> Objects = new();
         public List<string> Findings = new();
@@ -482,6 +487,7 @@ public static class AgentRunVerifier
                 c.TimestampValid = ts.SignatureValid;
                 c.GenTime = ts.GenTime;
                 c.TsaName = ts.TsaName;
+                c.TsaTrust = ts.Trust;
             }
             c.Certificate = r.Certificate;
             if (!c.SignatureValid)
@@ -624,6 +630,7 @@ public static class AgentRunVerifier
         var coverage = new AgentProfiles.TimestampCoverage(policy);
         var timeline = new List<(int Seq, DateTimeOffset? EventTime, DateTimeOffset? SealedAt)>();
         var sealedObjects = new List<(string Label, ArtifactCheck Check)>();
+        var stamped = new List<(string Label, ArtifactCheck Check)>(); // events, in seq order
 
         foreach (var p in arts)
         {
@@ -691,6 +698,7 @@ public static class AgentRunVerifier
             findings.AddRange(c.Findings);
             if (!c.AllRetained) objWarn = true;
             sealedObjects.Add((label, c));
+            stamped.Add((label, c));
             if (!c.SignatureValid) sigOk = false;
             if (!c.ObjectsComplete) objOk = false;
             if (c.TimestampPresent) { tsPresent++; if (c.TimestampValid == true) tsValid++; }
@@ -914,6 +922,7 @@ public static class AgentRunVerifier
 
         // ── evaluations: reported on their own, never merged into the run verdict
         var evaluations = new List<AgentEvaluationVerdict>();
+        var evaluationChecks = new List<(string Label, ArtifactCheck Check)>();
         var runEndSig = end is not null ? AgentProfiles.SignatureSha256(end.Jws) : null;
         List<SignedObject> WithRole(Signed s, string role) => s.Objects.Where(o => o.Role == role).ToList();
         for (var i = 0; i < bundle.Evaluations.Count; i++)
@@ -928,6 +937,7 @@ public static class AgentRunVerifier
             }
             var ef = sa.Conformance.Select(e => $"{label}: {e}.").ToList();
             var c = await CheckArtifactAsync(sa, art, bundle.Payloads, verifier, label, cancellationToken).ConfigureAwait(false);
+            evaluationChecks.Add((label, c));
             ef.AddRange(c.Findings);
             // An evaluation's claim is its envelope: a valid signature over another envelope is no claim at all.
             var signatureValid = c.SignatureValid && c.EnvelopeCovered;
@@ -994,6 +1004,14 @@ public static class AgentRunVerifier
                 Findings = ef,
             });
         }
+
+        // A timestamp proves time only if its TSA is trusted (§8); the signature service reports that per timestamp.
+        var timestamped = (ctlCheck is not null ? new[] { ("control artifact", ctlCheck) } : Array.Empty<(string, ArtifactCheck)>())
+            .Concat(stamped).Concat(evaluationChecks)
+            .Where(x => x.Item2.TimestampOk && !TrustedTsa.Contains(x.Item2.TsaTrust ?? "")).ToList();
+        if (timestamped.Count > 0)
+            warnings.Add($"TSA trust not established for the timestamps of: {string.Join(", ", timestamped.Select(x => x.Item1))} " +
+                $"(trust: {string.Join(", ", timestamped.Select(x => x.Item2.TsaTrust ?? "not reported").Distinct())}).");
 
         // §3: consistency is not identity. Without pinned signers, say so unless the chain is trusted.
         if (expectedSigners is null)
