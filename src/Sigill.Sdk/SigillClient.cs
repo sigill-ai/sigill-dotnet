@@ -816,8 +816,8 @@ public sealed class SigillClient : ISigillAiEvidenceClient, IDisposable
     /// <c>POST /seal/verify-objects</c> endpoint — digests only, never content.
     /// </summary>
     public Task<AgentRunVerificationResult> VerifyAgentRunAsync(
-        AgentRunBundle bundle, CancellationToken cancellationToken = default) =>
-        AgentRunVerifier.VerifyAsync(bundle, AgentRunVerifier.Remote(this), cancellationToken);
+        AgentRunBundle bundle, IReadOnlyCollection<string>? expectedSigners = null, CancellationToken cancellationToken = default) =>
+        AgentRunVerifier.VerifyAsync(bundle, AgentRunVerifier.Remote(this), expectedSigners, cancellationToken);
 
     /// <summary>Mirror of the platform's per-seal object cap.</summary>
     internal const int MaxSignHashesObjects = 128;

@@ -83,9 +83,37 @@ public sealed class AgentRunBundle
     public static AgentRunBundle Parse(string json)
     {
         JsonNode? node;
-        try { node = JsonNode.Parse(json); }
+        try
+        {
+            // I-JSON forbids duplicate names, and parsers disagree on which value wins: refuse them (§7).
+            using (var doc = JsonDocument.Parse(json))
+                if (FindDuplicateName(doc.RootElement) is { } dup)
+                    throw new AgentRunBundleFormatException(new[] { $"bundle repeats a duplicate member name '{dup}'" });
+            node = JsonNode.Parse(json);
+        }
         catch (JsonException ex) { throw new AgentRunBundleFormatException(new[] { "bundle is not valid JSON: " + ex.Message }); }
         return Parse(node);
+    }
+
+    private static string? FindDuplicateName(JsonElement e)
+    {
+        switch (e.ValueKind)
+        {
+            case JsonValueKind.Object:
+                var seen = new HashSet<string>(StringComparer.Ordinal);
+                foreach (var p in e.EnumerateObject())
+                {
+                    if (!seen.Add(p.Name)) return p.Name;
+                    if (FindDuplicateName(p.Value) is { } inner) return inner;
+                }
+                return null;
+            case JsonValueKind.Array:
+                foreach (var x in e.EnumerateArray())
+                    if (FindDuplicateName(x) is { } inner) return inner;
+                return null;
+            default:
+                return null;
+        }
     }
 
     public static AgentRunBundle Parse(JsonNode? node)

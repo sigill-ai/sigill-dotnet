@@ -32,13 +32,21 @@ public class AgentRunTests
     private static string B64U(byte[] b) => Convert.ToBase64String(b).TrimEnd('=').Replace('+', '-').Replace('/', '_');
     private static string Sha256Hex(byte[] b) => EnvelopeHashing.HashHex(b);
 
-    private static JsonObject StubSign(string envelopeHashHex, IEnumerable<(string Uri, string Hex)> objects, bool timestamp, string genTime)
+    private static readonly byte[] CertA = Encoding.ASCII.GetBytes("test signing certificate A");
+    private static readonly byte[] CertB = Encoding.ASCII.GetBytes("test signing certificate B");
+
+    private static JsonObject StubSign(string envelopeHashHex, IEnumerable<(string Uri, string Hex)> objects, bool timestamp, string genTime,
+        byte[]? cert = null)
     {
+        cert ??= CertA;
         var pars = new JsonArray { "urn:sigill:envelope" };
         var hashV = new JsonArray { B64U(Convert.FromHexString(envelopeHashHex)) };
         foreach (var (uri, hex) in objects) { pars.Add(uri); hashV.Add(B64U(Convert.FromHexString(hex))); }
-        var prot = B64U(JsonCanonicalizer.Canonicalize(
-            new JsonObject { ["alg"] = "ES256", ["sigD"] = new JsonObject { ["pars"] = pars, ["hashV"] = hashV } }.ToJsonString()));
+        var prot = B64U(JsonCanonicalizer.Canonicalize(new JsonObject
+        {
+            ["alg"] = "ES256", ["sigD"] = new JsonObject { ["pars"] = pars, ["hashV"] = hashV },
+            ["x5c"] = new JsonArray { Convert.ToBase64String(cert) }, ["x5t#S256"] = B64U(SHA256.HashData(cert)),
+        }.ToJsonString()));
         var entry = new JsonObject { ["protected"] = prot, ["signature"] = B64U(SHA256.HashData(Encoding.ASCII.GetBytes(prot))) };
         if (timestamp) entry["header"] = new JsonObject { ["stubTimestamp"] = new JsonObject { ["genTime"] = genTime, ["valid"] = true } };
         return new JsonObject { ["signatures"] = new JsonArray { entry } };
@@ -76,10 +84,10 @@ public class AgentRunTests
     public void ChainDigest_MatchesVectors()
     {
         var cases = JsonNode.Parse(File.ReadAllText(Path.Combine(VectorsDir, "chain-digest.json")))!.AsArray();
-        cases.Should().HaveCount(3);
+        cases.Should().HaveCount(4);
         foreach (var c in cases)
             AgentExecutionProfile.ChainDigest(c!["signature"]!.AsObject())
-                .Should().Be(c["expected"]!.GetValue<string>(), c["name"]!.GetValue<string>());
+                .Should().Be(c["expected"]?.GetValue<string>(), c["name"]!.GetValue<string>());
     }
 
     [Fact]
@@ -107,8 +115,15 @@ public class AgentRunTests
     public async Task RunVector_ReproducesExpectedVerdict(string file)
     {
         var v = JsonNode.Parse(File.ReadAllText(Path.Combine(VectorsDir, "runs", file)))!;
-        var bundle = AgentRunBundle.Parse(v["bundle"]);
         var expected = v["expected"]!;
+        if (v["bundleText"] is { } text) // a container that must not parse at all
+        {
+            var act = () => AgentRunBundle.Parse(text.GetValue<string>());
+            act.Should().Throw<AgentRunBundleFormatException>()
+                .Which.Errors.Should().Contain(e => e.Contains(expected["parseError"]!.GetValue<string>()));
+            return;
+        }
+        var bundle = AgentRunBundle.Parse(v["bundle"]);
 
         var result = await AgentRunVerifier.VerifyAsync(bundle, StubVerify);
 
@@ -168,7 +183,7 @@ public class AgentRunTests
 
     [Fact]
     public void RunVectors_AreAllPresent() =>
-        RunVectors().Should().HaveCount(30);
+        RunVectors().Should().HaveCount(44);
 
     [Fact]
     public async Task MalformedEnvelope_IsAnInvalidVerdict_NeverAnException()
@@ -189,6 +204,7 @@ public class AgentRunTests
         public List<JsonObject> Requests { get; } = new();
         public int FailOnCall { get; set; } = -1;
         public bool DropTimestamps { get; set; }
+        public byte[] Cert { get; set; } = CertA;
 
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
         {
@@ -201,7 +217,7 @@ public class AgentRunTests
             stamp &= !DropTimestamps;
             var sig = StubSign(body["envelopeHashHex"]!.GetValue<string>(),
                 body["objects"]!.AsArray().Select(o => (o!["uri"]!.GetValue<string>(), o["hashHex"]!.GetValue<string>())),
-                stamp, "2026-10-01T09:00:00Z");
+                stamp, "2026-10-01T09:00:00Z", Cert);
             var res = new JsonObject
             {
                 ["signature"] = sig, ["operationId"] = Guid.NewGuid().ToString(), ["format"] = stamp ? "jades-b-t" : "jades-b-b",
@@ -350,6 +366,141 @@ public class AgentRunTests
         result.Checks["identity"].Should().Be("ok");
     }
 
+    private static AgentRunBundle VectorBundle(string name) =>
+        AgentRunBundle.Parse(JsonNode.Parse(File.ReadAllText(Path.Combine(VectorsDir, "runs", name)))!["bundle"]);
+
+    [Fact]
+    public async Task ExpectedSigners_PinTheRun()
+    {
+        var bundle = VectorBundle("01-finalized-digests-only.json");
+        var ok = await AgentRunVerifier.VerifyAsync(bundle, StubVerify);
+        ok.Signer.Should().NotBeNull();
+        (await AgentRunVerifier.VerifyAsync(bundle, StubVerify, new[] { ok.Signer! })).Verdict.Should().Be("run_finalized");
+        var pinned = await AgentRunVerifier.VerifyAsync(bundle, StubVerify, new[] { "someone-else" });
+        pinned.Verdict.Should().Be("run_invalid");
+        pinned.Checks["signatures"].Should().Be("bad");
+        pinned.Findings.Should().Contain(f => f.Contains("not among the expected signers"));
+    }
+
+    [Fact]
+    public async Task SelfSignedCertificate_IsAWarning()
+    {
+        BlindObjectsVerifier selfSigned = async (sig, d, ct) => (await StubVerify(sig, d, ct)) with
+        {
+            Certificate = new SignerCertificateInfo("CN=x", "CN=x", "2030-01-01T00:00:00Z", "self_signed"),
+        };
+        var r = await AgentRunVerifier.VerifyAsync(VectorBundle("01-finalized-digests-only.json"), selfSigned);
+        r.Verdict.Should().Be("run_finalized");
+        r.Warnings.Should().Contain(w => w.Contains("self-signed"));
+    }
+
+    [Fact]
+    public async Task HybridCommitmentNotVerified_FailsSignatures()
+    {
+        BlindObjectsVerifier pqc = async (sig, d, ct) => (await StubVerify(sig, d, ct)) with { Pqc = "not_checked" };
+        var r = await AgentRunVerifier.VerifyAsync(VectorBundle("01-finalized-digests-only.json"), pqc);
+        r.Verdict.Should().Be("run_invalid");
+        r.Checks["signatures"].Should().Be("bad");
+        r.Findings.Should().Contain(f => f.Contains("ML-DSA commitment is 'not_checked'"));
+    }
+
+    [Fact]
+    public async Task SubMillisecondTimes_CannotSplitRecorderAndVerifier()
+    {
+        var times = new Queue<DateTimeOffset>(new[]
+        {
+            new DateTimeOffset(2026, 10, 1, 9, 0, 0, TimeSpan.Zero).AddTicks(9_000),   // identity  :00.0009
+            new DateTimeOffset(2026, 10, 1, 9, 0, 0, TimeSpan.Zero).AddTicks(9_000),   // run_start :00.0009
+            new DateTimeOffset(2026, 10, 1, 9, 5, 0, TimeSpan.Zero).AddTicks(1_000),   // 300 s later, :00.0001
+            new DateTimeOffset(2026, 10, 1, 9, 6, 0, TimeSpan.Zero),
+        });
+        using var client = Client(new StubSealer());
+        var run = await AgentRun.StartCoreAsync(client, Agent(), new AgentRunOptions { CertificateId = Cert }, () => times.Dequeue(), CancellationToken.None);
+        var step = await run.RecordModelOutputAsync(Encoding.UTF8.GetBytes("x"));
+        step.Envelope["extensions"]![AgentExecutionProfile.ExtensionKey]!["timestamp"]!.GetValue<string>().Should().Be("required");
+        (await AgentRunVerifier.VerifyAsync(await run.FinishAsync(), StubVerify)).Verdict.Should().Be("run_finalized");
+    }
+
+    [Fact]
+    public async Task Callback_MayCallBackIntoTheRun()
+    {
+        using var client = Client(new StubSealer());
+        AgentRun? run = null;
+        var anchored = new List<AgentRunArtifact>();
+        run = await AgentRun.StartCoreAsync(client, Agent(), new AgentRunOptions
+        {
+            CertificateId = Cert,
+            OnArtifactSealed = async (a, ct) =>
+            {
+                if (a.StepType == "tool_call") anchored.Add(await run!.CheckpointAsync("after-write", ct));
+            },
+        }, Clock(), CancellationToken.None);
+        var call = run.RecordToolCallAsync("close_ticket", Encoding.UTF8.GetBytes("{}"), operation: "write");
+        (await Task.WhenAny(call, Task.Delay(TimeSpan.FromSeconds(10)))).Should().BeSameAs(call, "a callback must not deadlock the run");
+        anchored.Should().ContainSingle().Which.StepType.Should().Be("checkpoint");
+        (await AgentRunVerifier.VerifyAsync(await run.FinishAsync(), StubVerify)).Verdict.Should().Be("run_finalized");
+    }
+
+    public static IEnumerable<object[]> RejectedSteps() => new[]
+    {
+        new object[] { "approval with a non-UUID action" },
+        new object[] { "object with an unknown role" },
+        new object[] { "reserved extension name" },
+        new object[] { "reserved sub-run name" },
+        new object[] { "identity step type" },
+    };
+
+    [Theory]
+    [MemberData(nameof(RejectedSteps))]
+    public async Task Recorder_RefusesStepsTheVerifierWouldReject_WithoutBreakingTheRun(string which)
+    {
+        var sealer = new StubSealer();
+        using var client = Client(sealer);
+        var run = await AgentRun.StartCoreAsync(client, Agent(), new AgentRunOptions { CertificateId = Cert }, Clock(), CancellationToken.None);
+        var sealedBefore = sealer.Requests.Count;
+        Func<Task> act = which switch
+        {
+            "approval with a non-UUID action" => () => run.RecordHumanApprovalAsync("approved", actionEvidenceId: "step-3"),
+            "object with an unknown role" => () => run.RecordAsync("custom", new[] { new AgentRunObject { Kind = "x", Role = "weird", Bytes = new byte[] { 1 } } }),
+            "reserved extension name" => () => run.RecordAsync("custom", extension: new JsonObject { ["finalSeq"] = 3 }),
+            "reserved sub-run name" => () => run.RecordAsync("custom", extension: new JsonObject { ["parentRun"] = new JsonObject() }),
+            _ => () => run.RecordAsync("record:agent-identity"),
+        };
+        await act.Should().ThrowAsync<ArgumentException>();
+        sealer.Requests.Should().HaveCount(sealedBefore);
+        run.IsBroken.Should().BeFalse();
+        await run.RecordModelOutputAsync(Encoding.UTF8.GetBytes("still fine"));
+        (await AgentRunVerifier.VerifyAsync(await run.FinishAsync(), StubVerify)).Verdict.Should().Be("run_finalized");
+    }
+
+    [Fact]
+    public async Task IdentityRecordFromAnotherVersion_IsRejected()
+    {
+        using var client = Client(new StubSealer());
+        var identity = await AgentRun.RegisterIdentityAsync(client, Agent(), Cert);
+        var newer = Agent() with { AgentVersion = "1.1.0", Manifest = AgentExecutionProfile.DefaultManifest(Agent()) };
+        await FluentActions.Invoking(() => AgentRun.StartAsync(client, newer, new AgentRunOptions { CertificateId = Cert, Identity = identity }))
+            .Should().ThrowAsync<ArgumentException>().WithMessage("*different agent, version or configuration*");
+    }
+
+    [Fact]
+    public async Task IdentityRecordFromAnotherCertificate_IsRejected()
+    {
+        var sealer = new StubSealer();
+        using var client = Client(sealer);
+        var identity = await AgentRun.RegisterIdentityAsync(client, Agent(), Cert);
+        sealer.Cert = CertB; // the sealing certificate was rotated
+        await FluentActions.Invoking(() => AgentRun.StartAsync(client, Agent(), new AgentRunOptions { CertificateId = Cert, Identity = identity }))
+            .Should().ThrowAsync<SigillException>().WithMessage("*different certificate*");
+    }
+
+    [Fact]
+    public void Artifact_RejectsNullParts()
+    {
+        var act = () => new AgentRunArtifact(new JsonObject(), new JsonObject(), null!);
+        act.Should().Throw<ArgumentNullException>();
+    }
+
     [Fact]
     public async Task RetainedPayloads_UpgradeObjectsToOk()
     {
@@ -428,7 +579,7 @@ public class AgentRunTests
 
         var act = () => AgentRun.StartAsync(client, Agent("A different instruction set."),
             new AgentRunOptions { CertificateId = Cert, Identity = identity });
-        await act.Should().ThrowAsync<ArgumentException>().WithMessage("*different agent configuration*");
+        await act.Should().ThrowAsync<ArgumentException>().WithMessage("*different agent, version or configuration*");
     }
 
     [Fact]

@@ -37,6 +37,9 @@ public sealed record BlindObjectsVerdict
     public SignerCertificateInfo? Certificate { get; init; }
     public string? Error { get; init; }
 
+    /// <summary>The hybrid (ML-DSA) dimension: absent | verified | failed | not_checked.</summary>
+    public string Pqc { get; init; } = "absent";
+
     /// <summary>Maps the <c>objects</c> member of a <c>/seal/verify-objects</c> response.</summary>
     public static BlindObjectsVerdict FromVerifyObjectsResponse(JsonObject response)
     {
@@ -64,6 +67,7 @@ public sealed record BlindObjectsVerdict
             Timestamp = ts,
             Certificate = cert,
             Error = AgentExecutionProfile.Str(r["error"]),
+            Pqc = AgentExecutionProfile.Str(r["pqc"]) ?? "absent",
         };
     }
 
@@ -122,6 +126,7 @@ public sealed record AgentIdentityVerdict
     public bool ObjectsComplete { get; init; }
     public bool TimestampValid { get; init; }
     public bool WellFormed { get; init; }
+    public bool SameSigner { get; init; }
     public bool Linked { get; init; }
     public bool KindsComplete { get; init; }
     public bool ConfigMatches { get; init; }
@@ -158,6 +163,9 @@ public sealed record AgentRunVerificationResult
 
     /// <summary>Deterministic fingerprint of everything the verdict depends on (spec §8.1); null when the evidence is not valid I-JSON.</summary>
     public required string? Fingerprint { get; init; }
+
+    /// <summary>The run's signer: <c>x5t#S256</c> of its signing certificate (spec §4.1).</summary>
+    public string? Signer { get; init; }
 
     /// <summary>What a verdict does and does not establish. Show it next to the verdict.</summary>
     public string Scope => AgentRunVerifier.Scope;
@@ -243,8 +251,13 @@ public static class AgentRunVerifier
 
         errs.AddRange(CheckBlocks(ext, stepType));
 
+        if (ext.ContainsKey("usage") && ext["usage"] is not JsonObject) errs.Add("usage is not an object");
+        if (ext.ContainsKey("registeredBy") && S(ext["registeredBy"]) is null) errs.Add("registeredBy is not a string");
+
         if (isIdentity)
         {
+            if ((env["activity"] as JsonObject)?.ContainsKey("correlationId") == true)
+                errs.Add("the identity record must not carry activity.correlationId");
             if (env.ContainsKey("chain")) errs.Add("the identity record must not carry chain");
             if (S(ext["agentId"]) is not { } agentId || agentId != S(actor?["id"])) errs.Add("agentId must equal actor.id");
         }
@@ -362,8 +375,19 @@ public static class AgentRunVerifier
 
     private static bool IsIJson(JsonNode node)
     {
+        if (!AgentExecutionProfile.IsIJson(node)) return false;
         try { EnvelopeHashing.HashHex(AgentExecutionProfile.Canonical(node)); return true; }
         catch (Exception ex) when (ex is not OperationCanceledException) { return false; }
+    }
+
+    /// <summary>§6: never seal an envelope the verifier would reject. Throws ArgumentException.</summary>
+    internal static void Prevalidate(JsonObject envelope)
+    {
+        if (!IsIJson(envelope)) throw new ArgumentException("the envelope is not valid I-JSON");
+        var ext = (JsonObject)envelope["extensions"]![AgentExecutionProfile.ExtensionKey]!;
+        var isIdentity = AgentExecutionProfile.Str(ext["recordType"]) == "agent-identity";
+        var errs = CheckConformance(envelope, ext, AgentExecutionProfile.Str(ext["stepType"]) ?? "", isIdentity);
+        if (errs.Count > 0) throw new ArgumentException("the step would not verify: " + string.Join("; ", errs));
     }
 
     // ── One artifact ─────────────────────────────────────────────────────────
@@ -392,7 +416,10 @@ public static class AgentRunVerifier
             {
                 var hex = EnvelopeHashing.HashHex(payload);
                 if (supplied is not null && supplied != hex)
+                {
                     c.Findings.Add($"{label}: supplied payload for '{so.Kind}' does not match its supplied digest.");
+                    objOk = false;
+                }
                 digests[so.Uri] = hex;
                 c.Objects.Add(new AgentObjectVerdict(so.Uri, so.Kind, so.Role, so.ContentType, so.SizeBytes, hex, true, true, true));
             }
@@ -421,6 +448,11 @@ public static class AgentRunVerifier
             var r = await blind(sa.Jws, digests, ct).ConfigureAwait(false)
                 ?? throw new SigillException("blind verifier returned no result");
             c.SignatureValid = r.SignatureValid;
+            if (r.Pqc is not ("absent" or "verified"))
+            {
+                c.SignatureValid = false;
+                c.Findings.Add($"{label}: the hybrid seal's ML-DSA commitment is '{r.Pqc}'.");
+            }
             c.Error = r.Error;
             c.ObjectsComplete = r.Complete && r.Unreferenced.Count == 0 && r.Missing.Count == 0 && objOk;
             foreach (var m in r.Missing) c.Findings.Add($"{label}: the signature covers '{m}' but the envelope does not list it.");
@@ -463,9 +495,14 @@ public static class AgentRunVerifier
 
     // ── The run ──────────────────────────────────────────────────────────────
 
-    /// <summary>Verifies a run bundle (spec §8). Never throws for malformed evidence: that is an invalid verdict.</summary>
+    /// <summary>
+    /// Verifies a run bundle (spec §8). Never throws for malformed evidence: that is an invalid verdict.
+    /// <paramref name="expectedSigners"/>: <c>x5t#S256</c> thumbprints of the certificates the producer
+    /// seals with (§4.1); when given, a run signed by anyone else fails.
+    /// </summary>
     public static async Task<AgentRunVerificationResult> VerifyAsync(
-        AgentRunBundle bundle, BlindObjectsVerifier verifier, CancellationToken cancellationToken = default)
+        AgentRunBundle bundle, BlindObjectsVerifier verifier, IReadOnlyCollection<string>? expectedSigners = null,
+        CancellationToken cancellationToken = default)
     {
         if (bundle is null) throw new ArgumentNullException(nameof(bundle));
         if (verifier is null) throw new ArgumentNullException(nameof(verifier));
@@ -556,6 +593,16 @@ public static class AgentRunVerifier
         var actorId = start?.ActorId ?? arts.Select(p => p.Sa?.ActorId).FirstOrDefault(a => a is not null);
         var agentVersion = start?.AgentVersion;
 
+        // §4.1: one signer per run — run_start's, else the first artifact's that has one.
+        var candidates = (start is not null ? new[] { start } : Array.Empty<Signed>())
+            .Concat(arts.Where(p => p.Sa is not null).Select(p => p.Sa!));
+        var runSigner = candidates.Select(c => AgentExecutionProfile.SignerOf(c.Jws).Thumbprint).FirstOrDefault(t => t is not null);
+        if (runSigner is not null && expectedSigners is not null && !expectedSigners.Contains(runSigner))
+        {
+            sigOk = false;
+            findings.Add($"The run's signer (x5t#S256 {runSigner}) is not among the expected signers.");
+        }
+
         foreach (var p in arts)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -572,6 +619,17 @@ public static class AgentRunVerifier
             {
                 envOk = false;
                 foreach (var e in sa.Conformance) findings.Add($"seq {seq}: {e}.");
+            }
+            var (signer, signerProblem) = AgentExecutionProfile.SignerOf(sa.Jws);
+            if (signerProblem is not null)
+            {
+                sigOk = false;
+                findings.Add($"seq {seq}: {signerProblem}.");
+            }
+            else if (signer != runSigner)
+            {
+                sigOk = false;
+                findings.Add($"seq {seq}: signed by a different certificate than the run (x5t#S256 {signer}).");
             }
             if (sa.ActorId != actorId || (agentVersion is not null && sa.AgentVersion != agentVersion))
             {
@@ -591,7 +649,7 @@ public static class AgentRunVerifier
                 if (!linkOk) findings.Add($"seq {seq}: prevSignatureSha256 does not match the signature of seq {prevSeq}.");
             }
             if (!linkOk) chainOk = false;
-            if (seq > 0 && prevEvidenceId is not null && sa.Parent != prevEvidenceId)
+            if (seq > 0 && prevEvidenceId is not null && AgentExecutionProfile.NormId(sa.Parent) != AgentExecutionProfile.NormId(prevEvidenceId))
                 warnings.Add($"seq {seq}: parentEvidenceId is not the previous artifact (semantic link only; not an integrity failure).");
 
             var required = coverage.Next(seq, sa.StepType, sa.Consequential, sa.TimestampDeclared == "required", sa.EventTime);
@@ -692,7 +750,9 @@ public static class AgentRunVerifier
         checks["timestamps"] = !tsOk || !policyOk ? "bad" : anchorValid ? "ok" : "warn";
 
         var startArt = arts.FirstOrDefault(p => p.Sa is not null && ReferenceEquals(p.Sa, start)).Art;
-        var (identity, idFindings) = await VerifyIdentityAsync(bundle, start, startArt, verifier, cancellationToken).ConfigureAwait(false);
+        var (identity, idFindings) = await VerifyIdentityAsync(bundle, start, startArt, verifier, runSigner, cancellationToken).ConfigureAwait(false);
+        if (certificates.Any(c => c.Trust == "self_signed"))
+            warnings.Add("Signed with a self-signed certificate: the signatures are consistent, but they do not establish who the signer is.");
         findings.AddRange(idFindings);
         if (!identity.Declared && !identity.Present)
         {
@@ -700,7 +760,7 @@ public static class AgentRunVerifier
             warnings.Add("run_start declares no agent identity record.");
         }
         else if (!identity.Present) checks["identity"] = "bad";
-        else checks["identity"] = identity.WellFormed && identity.Linked && identity.KindsComplete
+        else checks["identity"] = identity.WellFormed && identity.SameSigner && identity.Linked && identity.KindsComplete
             && identity.ConfigMatches && identity.ConfigDigestValid && identity.ActorMatches
             && identity.SignatureValid && identity.ObjectsComplete && identity.TimestampValid ? "ok" : "bad";
 
@@ -722,6 +782,7 @@ public static class AgentRunVerifier
             Identity = identity,
             Artifacts = verdicts,
             Fingerprint = SafeFingerprint(bundle),
+            Signer = runSigner,
         };
     }
 
@@ -732,7 +793,8 @@ public static class AgentRunVerifier
     }
 
     private static async Task<(AgentIdentityVerdict, List<string>)> VerifyIdentityAsync(
-        AgentRunBundle bundle, Signed? start, AgentRunArtifact? startArt, BlindObjectsVerifier blind, CancellationToken ct)
+        AgentRunBundle bundle, Signed? start, AgentRunArtifact? startArt, BlindObjectsVerifier blind, string? runSigner,
+        CancellationToken ct)
     {
         var findings = new List<string>();
         var declared = start?.AgentIdentityEvidenceId;
@@ -750,7 +812,13 @@ public static class AgentRunVerifier
         var wellFormed = sa.IsIdentity && sa.Conformance.Count == 0;
         if (!sa.IsIdentity) findings.Add("Identity record: recordType is not 'agent-identity'.");
         foreach (var e in sa.Conformance) findings.Add($"Identity record: {e}.");
-        var linked = start is not null && start.Parent == sa.EvidenceId && declared == sa.EvidenceId;
+        var (idSigner, idSignerProblem) = AgentExecutionProfile.SignerOf(sa.Jws);
+        var sameSigner = idSignerProblem is null && idSigner == runSigner;
+        if (idSignerProblem is not null) findings.Add($"Identity record: {idSignerProblem}.");
+        else if (!sameSigner) findings.Add("Identity record: signed by a different certificate than the run.");
+        var linked = start is not null
+            && AgentExecutionProfile.NormId(start.Parent) == AgentExecutionProfile.NormId(sa.EvidenceId)
+            && AgentExecutionProfile.NormId(declared) == AgentExecutionProfile.NormId(sa.EvidenceId);
         if (!linked) findings.Add("run_start does not reference the identity record (parentEvidenceId / agentIdentityEvidenceId).");
         var actorMatches = start is not null && start.ActorId == sa.ActorId && start.AgentVersion == sa.AgentVersion;
         if (!actorMatches) findings.Add("Identity record's signed agent/version differ from run_start's.");
@@ -809,7 +877,7 @@ public static class AgentRunVerifier
         {
             Declared = declared is not null, Present = true, SignatureValid = c.SignatureValid,
             ObjectsComplete = c.ObjectsComplete, TimestampValid = timestampValid, WellFormed = wellFormed,
-            Linked = linked, KindsComplete = kindsComplete, ConfigMatches = configMatches,
+            SameSigner = sameSigner, Linked = linked, KindsComplete = kindsComplete, ConfigMatches = configMatches,
             ConfigDigestValid = configDigestValid, ActorMatches = actorMatches, EvidenceId = sa.EvidenceId,
             ActorId = sa.ActorId, AgentVersion = sa.AgentVersion, ConfigSha256 = sa.ConfigSha256,
             Certificate = c.Certificate, Objects = c.Objects,
@@ -820,6 +888,9 @@ public static class AgentRunVerifier
     public static string Fingerprint(AgentRunBundle bundle)
     {
         if (bundle is null) throw new ArgumentNullException(nameof(bundle));
+        foreach (var a in bundle.Artifacts.Concat(bundle.AgentIdentity is { } ia ? new[] { ia } : Array.Empty<AgentRunArtifact>()))
+            if (!AgentExecutionProfile.IsIJson(a.Envelope) || !AgentExecutionProfile.IsIJson(a.Signature))
+                throw new ArgumentException("The fingerprint is undefined for evidence that is not valid I-JSON (spec §8.1).");
         static JsonObject One(AgentRunArtifact a)
         {
             var d = new JsonObject();
@@ -834,7 +905,8 @@ public static class AgentRunVerifier
         var arts = bundle.Artifacts.Select(a =>
             {
                 var o = One(a);
-                var seq = ParseSigned(a.Envelope, a.Signature).Sa?.Seq ?? -1;
+                var seq = (a.Envelope["chain"] as JsonObject)?["seq"] is JsonNode raw && AgentExecutionProfile.Int(raw) is int sq
+                    && sq >= 0 && !(raw is JsonValue rv && rv.TryGetValue<bool>(out _)) ? sq : -1;
                 var withSeq = new JsonObject { ["seq"] = seq };
                 foreach (var kv in o.ToList()) { o.Remove(kv.Key); withSeq[kv.Key] = kv.Value; }
                 return (Seq: seq, E: AgentExecutionProfile.Str(withSeq["e"])!, Node: withSeq);

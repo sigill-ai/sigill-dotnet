@@ -418,6 +418,13 @@ What to know:
   (instructions, tools, execution policy and, optionally, model config). Store `run.Identity`
   and pass it as `AgentRunOptions.Identity` while the configuration is
   unchanged; a changed configuration needs a new one.
+- **One certificate per run.** Every step and the identity record must be
+  sealed with the same certificate; the verifier fails a run that mixes
+  signers, so steps forged by anyone else cannot be appended. Pass the
+  thumbprints of your sealing certificates to pin them:
+  `client.VerifyAgentRunAsync(bundle, expectedSigners: new[] { thumbprint })`
+  (`result.Signer` shows the run's). After rotating the certificate, register
+  a new identity record.
 - **Persist as you go.** `OnArtifactSealed` runs after each step is sealed. A
   sealing failure stops the chain; the partial bundle (`run.ToBundle()`)
   verifies as open or invalid, never as finalized.

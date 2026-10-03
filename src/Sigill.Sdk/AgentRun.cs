@@ -39,7 +39,7 @@ public sealed class AgentRun
     private readonly SemaphoreSlim _gate = new(1, 1);
     private readonly List<AgentRunArtifact> _artifacts = new();
     private readonly Dictionary<string, byte[]> _payloads = new(StringComparer.Ordinal);
-    private readonly AgentExecutionProfile.TimestampCoverage _coverage;
+    private AgentExecutionProfile.TimestampCoverage _coverage;
     private string? _prevChainDigest;
     private string? _prevEvidenceId;
     private bool _broken;
@@ -99,11 +99,12 @@ public sealed class AgentRun
         IReadOnlyList<AgentRunObject>? registeredObjects = null;
         if (identity is not null)
         {
-            var registered = AgentExecutionProfile.Str(
-                identity.Envelope["extensions"]?[AgentExecutionProfile.ExtensionKey]?["configSha256"]);
-            if (registered != configDigest)
+            var ext = identity.Envelope["extensions"]?[AgentExecutionProfile.ExtensionKey];
+            if (AgentExecutionProfile.Str(ext?["configSha256"]) != configDigest
+                || AgentExecutionProfile.Str(ext?["agentId"]) != agent.AgentId
+                || AgentExecutionProfile.Str(ext?["agentVersion"]) != agent.AgentVersion)
                 throw new ArgumentException(
-                    "The supplied identity record was registered for a different agent configuration; register a new one.",
+                    "The supplied identity record was registered for a different agent, version or configuration; register a new one.",
                     nameof(options));
         }
         else
@@ -131,7 +132,15 @@ public sealed class AgentRun
             ["assuranceProfile"] = options.TimestampPolicy.Profile,
             ["timestampPolicy"] = options.TimestampPolicy.ToJson(),
         };
-        await run.SealStepAsync("run_start", objects, block, consequential: false, cancellationToken).ConfigureAwait(false);
+        var start = await run.SealStepAsync("run_start", objects, block, consequential: false, cancellationToken).ConfigureAwait(false);
+        // §4.1: one certificate per run, identity record included.
+        if (AgentExecutionProfile.SignerOf(start.Signature).Thumbprint != AgentExecutionProfile.SignerOf(identity.Signature).Thumbprint)
+        {
+            run._broken = true;
+            throw new SigillException(
+                "The identity record was sealed with a different certificate than this run (certificate rotated?); register a new identity record.");
+        }
+        await run.NotifyAsync(start, cancellationToken).ConfigureAwait(false);
         return run;
     }
 
@@ -154,7 +163,7 @@ public sealed class AgentRun
         if (client is null) throw new ArgumentNullException(nameof(client));
         if (agent is null) throw new ArgumentNullException(nameof(agent));
 
-        var now = clock();
+        var now = AgentExecutionProfile.Truncate(clock());
         var manifest = agent.Manifest ?? AgentExecutionProfile.DefaultManifest(agent);
         var configDigest = AgentExecutionProfile.ConfigurationDigest(manifest, agent.Configuration);
         var registration = new JsonObject
@@ -191,8 +200,9 @@ public sealed class AgentRun
         var envelope = AgentExecutionProfile.BuildEnvelope(
             Guid.NewGuid().ToString(), now, "agent-identity", agent, "agent_identity",
             correlationId: null, parentEvidenceId: null, objects, chainSeq: null, prevChainDigest: null, block);
+        AgentRunVerifier.Prevalidate(envelope);
         var result = await SealAsync(client, envelope, objects, certificateId, timestamp: true, qualified,
-            "agent-identity", cancellationToken).ConfigureAwait(false);
+            cancellationToken).ConfigureAwait(false);
         if (result.TimestampedBy is null)
             throw new SigillException("The identity record must be timestamped, but the seal carries no timestamp.");
         return (new AgentRunArtifact(envelope, result.Signature, Digests(objects)), objects);
@@ -211,16 +221,23 @@ public sealed class AgentRun
         bool consequential = false, CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrEmpty(stepType)) throw new ArgumentException("stepType is required.", nameof(stepType));
-        if (stepType is "run_start" or "run_end")
-            throw new ArgumentException($"'{stepType}' is sealed by StartAsync/FinishAsync.", nameof(stepType));
+        if (stepType is "run_start" or "run_end" || stepType.StartsWith("record:", StringComparison.Ordinal))
+            throw new ArgumentException($"'{stepType}' is not a step type a producer may record.", nameof(stepType));
+        var reserved = extension?.Select(kv => kv.Key).Where(AgentExecutionProfile.ReservedExtensionKeys.Contains)
+            .OrderBy(k => k, StringComparer.Ordinal).ToList();
+        if (reserved is { Count: > 0 })
+            throw new ArgumentException("extension uses reserved profile name(s): " + string.Join(", ", reserved), nameof(extension));
+        AgentRunArtifact artifact;
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
             EnsureOpen();
-            return await SealStepAsync(stepType, objects ?? Array.Empty<AgentRunObject>(),
+            artifact = await SealStepAsync(stepType, objects ?? Array.Empty<AgentRunObject>(),
                 (JsonObject?)extension?.DeepClone() ?? new JsonObject(), consequential, cancellationToken).ConfigureAwait(false);
         }
         finally { _gate.Release(); }
+        await NotifyAsync(artifact, cancellationToken).ConfigureAwait(false);
+        return artifact;
     }
 
     /// <summary>Retrieved context (RAG) the agent read.</summary>
@@ -234,20 +251,20 @@ public sealed class AgentRun
     /// the policy decision taken before the call.
     /// </summary>
     public Task<AgentRunArtifact> RecordToolCallAsync(string tool, byte[] arguments, string? operation = null,
-        AgentAuthorization? authorization = null, bool consequential = false,
+        AgentAuthorization? authorization = null, bool consequential = false, string? useId = null,
         string contentType = "application/json", CancellationToken cancellationToken = default)
     {
-        var ext = new JsonObject { ["tool"] = ToolBlock(tool, operation) };
+        var ext = new JsonObject { ["tool"] = ToolBlock(tool, operation, useId) };
         if (authorization is not null) ext["authorization"] = authorization.ToJson();
         return RecordAsync("tool_call", new[] { Obj("tool-arguments", "input", arguments, contentType) },
             ext, consequential, cancellationToken);
     }
 
     /// <summary>The result a tool returned — context for the model's next turn.</summary>
-    public Task<AgentRunArtifact> RecordToolResultAsync(string tool, byte[] result,
+    public Task<AgentRunArtifact> RecordToolResultAsync(string tool, byte[] result, string? useId = null,
         string contentType = "application/json", CancellationToken cancellationToken = default) =>
         RecordAsync("tool_result", new[] { Obj("tool-result", "context", result, contentType) },
-            new JsonObject { ["tool"] = ToolBlock(tool, null) }, cancellationToken: cancellationToken);
+            new JsonObject { ["tool"] = ToolBlock(tool, null, useId) }, cancellationToken: cancellationToken);
 
     /// <summary>A standalone policy decision (spec §3.4), e.g. "this write needs approval".</summary>
     public Task<AgentRunArtifact> RecordAuthorizationAsync(AgentAuthorization authorization, string? tool = null,
@@ -255,7 +272,7 @@ public sealed class AgentRun
     {
         if (authorization is null) throw new ArgumentNullException(nameof(authorization));
         var ext = new JsonObject { ["authorization"] = authorization.ToJson() };
-        if (tool is not null) ext["tool"] = ToolBlock(tool, operation);
+        if (tool is not null) ext["tool"] = ToolBlock(tool, operation, null);
         return RecordAsync("authorization", extension: ext, cancellationToken: cancellationToken);
     }
 
@@ -304,6 +321,8 @@ public sealed class AgentRun
     {
         if (disposition is not ("completed" or "failed" or "aborted"))
             throw new ArgumentException("disposition must be completed, failed or aborted.", nameof(disposition));
+        AgentRunArtifact artifact;
+        AgentRunBundle bundle;
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
@@ -317,11 +336,12 @@ public sealed class AgentRun
                 ["runDisposition"] = disposition,
             };
             if (usage is not null) block["usage"] = usage.DeepClone();
-            await SealStepAsync("run_end", Array.Empty<AgentRunObject>(), block, consequential: true, cancellationToken).ConfigureAwait(false);
-            _finished = true;
-            return ToBundle();
+            artifact = await SealStepAsync("run_end", Array.Empty<AgentRunObject>(), block, consequential: true, cancellationToken).ConfigureAwait(false);
+            bundle = ToBundle();
         }
         finally { _gate.Release(); }
+        await NotifyAsync(artifact, cancellationToken).ConfigureAwait(false);
+        return bundle;
     }
 
     /// <summary>The run as a bundle — available at any point, including after a failure.</summary>
@@ -334,37 +354,44 @@ public sealed class AgentRun
 
     // ── Sealing ──────────────────────────────────────────────────────────────
 
+    /// <summary>
+    /// Builds, validates and seals one step. Call with the gate held; the
+    /// callback is the caller's job, after releasing it.
+    /// </summary>
     private async Task<AgentRunArtifact> SealStepAsync(
         string stepType, IReadOnlyList<AgentRunObject> objects, JsonObject block, bool consequential, CancellationToken ct)
     {
-        AgentRunArtifact artifact;
+        var now = AgentExecutionProfile.Truncate(_clock()); // the decision below must use the signed, truncated time
+        int seq;
+        lock (_artifacts) seq = _artifacts.Count;
+        var coverage = _coverage.Clone(); // committed only once the step is sealed
+        var declared = AgentExecutionProfile.Str(block["timestamp"]) == "required";
+        var stamp = coverage.Next(seq, stepType, consequential, declared, now);
+
+        block["stepType"] = stepType;
+        block["agentVersion"] = _agent.AgentVersion;
+        block["eventTime"] = AgentExecutionProfile.FormatTime(now);
+        block["consequential"] = consequential;
+        block["timestamp"] = stamp ? "required" : "none";
+
+        var envelope = AgentExecutionProfile.BuildEnvelope(
+            Guid.NewGuid().ToString(), now, "agent-execution", _agent, stepType, CorrelationId, _prevEvidenceId,
+            objects, seq, _prevChainDigest, block);
+        var digests = Digests(objects);
+        AgentRunVerifier.Prevalidate(envelope); // an ArgumentException here leaves the run usable
+
         try
         {
-            var now = _clock();
-            int seq;
-            lock (_artifacts) seq = _artifacts.Count;
-            var declared = AgentExecutionProfile.Str(block["timestamp"]) == "required";
-            var stamp = _coverage.Next(seq, stepType, consequential, declared, now);
-
-            block["stepType"] = stepType;
-            block["agentVersion"] = _agent.AgentVersion;
-            block["eventTime"] = AgentExecutionProfile.FormatTime(now);
-            block["consequential"] = consequential;
-            block["timestamp"] = stamp ? "required" : "none";
-
-            var envelope = AgentExecutionProfile.BuildEnvelope(
-                Guid.NewGuid().ToString(), now, "agent-execution", _agent, stepType, CorrelationId, _prevEvidenceId,
-                objects, seq, _prevChainDigest, block);
-            var digests = Digests(objects);
-            var result = await SealAsync(_client, envelope, objects, _options.CertificateId, stamp, _options.Qualified,
-                stepType, ct).ConfigureAwait(false);
+            var result = await SealAsync(_client, envelope, objects, _options.CertificateId, stamp, _options.Qualified, ct)
+                .ConfigureAwait(false);
             if (stamp && result.TimestampedBy is null)
                 throw new SigillException($"{stepType}: a timestamp is required by the run's policy, but the seal carries none.");
 
-            artifact = new AgentRunArtifact(envelope, result.Signature, digests);
+            var artifact = new AgentRunArtifact(envelope, result.Signature, digests);
             _prevChainDigest = artifact.ChainDigest
                 ?? throw new SigillException("The seal returned no classical signature to chain to.");
             _prevEvidenceId = artifact.EvidenceId;
+            _coverage = coverage;
             lock (_artifacts)
             {
                 _artifacts.Add(artifact);
@@ -372,23 +399,31 @@ public sealed class AgentRun
                 if (_options.RetainPayloads)
                     foreach (var o in objects) _payloads[o.Uri] = o.Bytes;
             }
+            return artifact;
         }
         catch (Exception)
         {
             _broken = true;
             throw;
         }
-
-        // The artifact is part of the chain now; a failing callback is the
-        // caller's error and does not break the run.
-        if (_options.OnArtifactSealed is { } callback)
-            await callback(artifact, ct).ConfigureAwait(false);
-        return artifact;
     }
 
+    /// <summary>
+    /// Runs the callback outside the gate, so it may call back into the run.
+    /// The artifact is already part of the chain; a failing callback is the
+    /// caller's error and does not break the run.
+    /// </summary>
+    private async Task NotifyAsync(AgentRunArtifact artifact, CancellationToken ct)
+    {
+        if (_options.OnArtifactSealed is { } callback)
+            await callback(artifact, ct).ConfigureAwait(false);
+    }
+
+    // No operation label: a step type can be producer-defined, and only digests,
+    // opaque URIs and content types reach the sealing service (spec §6).
     private static async Task<SignHashesResult> SealAsync(
         ISigillAiEvidenceClient client, JsonObject envelope, IReadOnlyList<AgentRunObject> objects, Guid certificateId,
-        bool timestamp, bool qualified, string label, CancellationToken ct)
+        bool timestamp, bool qualified, CancellationToken ct)
     {
         var digests = objects.Select(o => new SignedObjectDigest
         {
@@ -400,7 +435,7 @@ public sealed class AgentRun
             EnvelopeHashing.HashHex(EnvelopeHashing.Canonicalize(envelope)),
             digests,
             certificateId,
-            new ObjectSignOptions { Timestamp = timestamp, Qualified = qualified && timestamp, Label = "agent:" + label },
+            new ObjectSignOptions { Timestamp = timestamp, Qualified = qualified && timestamp },
             ct).ConfigureAwait(false);
     }
 
@@ -419,10 +454,11 @@ public sealed class AgentRun
             throw new ArgumentException("TimestampPolicy cadence values must be zero or positive.");
     }
 
-    private static JsonObject ToolBlock(string name, string? operation)
+    private static JsonObject ToolBlock(string name, string? operation, string? useId)
     {
         if (string.IsNullOrEmpty(name)) throw new ArgumentException("tool name is required.", nameof(name));
         var block = new JsonObject { ["name"] = name };
+        if (useId is not null) block["useId"] = useId;
         if (operation is not null) block["operation"] = operation;
         return block;
     }

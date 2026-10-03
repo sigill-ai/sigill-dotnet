@@ -4,7 +4,11 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Numerics;
+using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
+using System.Text.RegularExpressions;
 using System.Text.Json.Nodes;
 using Sigill.Sdk.Internal;
 
@@ -49,26 +53,70 @@ public static class AgentExecutionProfile
     public static string? ChainDigest(JsonObject signature)
     {
         if (signature is null) throw new ArgumentNullException(nameof(signature));
-        IEnumerable<JsonNode?> entries = signature["signatures"] is JsonArray arr
-            ? arr
-            : signature["signature"] is not null ? new JsonNode?[] { signature } : Array.Empty<JsonNode?>();
-        foreach (var e in entries)
+        foreach (var (entry, _) in ClassicalEntries(signature))
         {
-            if (e is not JsonObject entry) continue;
-            if (!TryString(entry["protected"], out var prot) || !TryString(entry["signature"], out var sig)) continue;
-            var alg = "";
-            try
-            {
-                var header = JsonNode.Parse(Encoding.UTF8.GetString(Base64UrlDecode(prot)));
-                if (header is JsonObject h && TryString(h["alg"], out var a)) alg = a;
-            }
-            catch (Exception) { /* unreadable header: not an ML-DSA entry */ }
-            if (alg.StartsWith("ML-DSA", StringComparison.OrdinalIgnoreCase)) continue;
+            if (!TryString(entry["signature"], out var sig)) continue;
             try { return EnvelopeHashing.HashHex(Base64UrlDecode(sig)); }
             catch (FormatException) { return null; }
         }
         return null;
     }
+
+    /// <summary>
+    /// The signer of an artifact (§4.1): the <c>x5t#S256</c> of its single
+    /// classical signature, or null and the reason it cannot be established.
+    /// Requires exactly one classical entry whose protected header carries
+    /// <c>x5c</c> and an <c>x5t#S256</c> equal to the SHA-256 of <c>x5c[0]</c>.
+    /// </summary>
+    public static (string? Thumbprint, string? Problem) SignerOf(JsonObject signature)
+    {
+        if (signature is null) throw new ArgumentNullException(nameof(signature));
+        var classical = ClassicalEntries(signature);
+        if (classical.Count != 1)
+            return (null, $"carries {classical.Count} classical signatures; exactly one classical signature is required");
+        var header = classical[0].Header;
+        if (header is null || Str(header["alg"]) is null)
+            return (null, "its classical signature has no readable protected header");
+        if (Str(header["x5t#S256"]) is not { } thumb || header["x5c"] is not JsonArray x5c || x5c.Count == 0 || Str(x5c[0]) is not { } leafB64)
+            return (null, "its protected header names no signing certificate (x5c, x5t#S256)");
+        byte[] leaf;
+        try { leaf = Convert.FromBase64String(leafB64); }
+        catch (FormatException) { return (null, "its x5c[0] is not valid base64"); }
+        using var sha = SHA256.Create();
+        var computed = Convert.ToBase64String(sha.ComputeHash(leaf)).TrimEnd('=').Replace('+', '-').Replace('/', '_');
+        return computed == thumb ? (thumb, null) : (null, "its x5t#S256 is not the SHA-256 of x5c[0]");
+    }
+
+    /// <summary>Every non-ML-DSA entry, with its protected header (null when unreadable — it still counts, §4).</summary>
+    internal static List<(JsonObject Entry, JsonObject? Header)> ClassicalEntries(JsonObject signature)
+    {
+        IEnumerable<JsonNode?> entries = signature["signatures"] is JsonArray arr
+            ? arr
+            : signature["signature"] is not null ? new JsonNode?[] { signature } : Array.Empty<JsonNode?>();
+        var result = new List<(JsonObject, JsonObject?)>();
+        foreach (var e in entries)
+        {
+            if (e is not JsonObject entry) continue;
+            JsonObject? header = null;
+            try
+            {
+                if (TryString(entry["protected"], out var prot))
+                    header = JsonNode.Parse(Encoding.UTF8.GetString(Base64UrlDecode(prot))) as JsonObject;
+            }
+            catch (Exception ex) when (ex is FormatException or JsonException or ArgumentException) { /* unreadable */ }
+            if (Str(header?["alg"]) is { } alg && alg.StartsWith("ML-DSA", StringComparison.OrdinalIgnoreCase)) continue;
+            result.Add((entry, header));
+        }
+        return result;
+    }
+
+    /// <summary>Profile-block names a producer extension must not use (§6).</summary>
+    public static IReadOnlyCollection<string> ReservedExtensionKeys { get; } = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "stepType", "agentVersion", "eventTime", "consequential", "timestamp", "objectKinds",
+        "agentIdentityEvidenceId", "assuranceProfile", "timestampPolicy", "finalSeq", "finalPrevSignatureSha256",
+        "runDisposition", "recordType", "agentId", "configSha256", "registeredBy", "delegation", "parentRun",
+    };
 
     /// <summary>
     /// The configuration digest (§3.6): SHA-256 over the JCS of the
@@ -139,11 +187,83 @@ public static class AgentExecutionProfile
 
     internal static bool IsTrue(JsonNode? node) => node is JsonValue v && v.TryGetValue<bool>(out var b) && b;
 
+    private static readonly Regex Base64UrlAlphabet = new("^[A-Za-z0-9_-]*$", RegexOptions.CultureInvariant);
+    private static readonly BigInteger IJsonMaxInt = BigInteger.Pow(2, 53);
+
+    /// <summary>Strict base64url: no padding, nothing outside the alphabet (§4).</summary>
     internal static byte[] Base64UrlDecode(string s)
     {
+        if (!Base64UrlAlphabet.IsMatch(s) || s.Length % 4 == 1) throw new FormatException("not base64url");
         var t = s.Replace('-', '+').Replace('_', '/');
         switch (t.Length % 4) { case 2: t += "=="; break; case 3: t += "="; break; }
         return Convert.FromBase64String(t);
+    }
+
+    /// <summary>The millisecond precision <c>eventTime</c> is signed with (§6.7).</summary>
+    internal static DateTimeOffset Truncate(DateTimeOffset t) =>
+        new(t.Ticks - t.Ticks % TimeSpan.TicksPerMillisecond, t.Offset);
+
+    /// <summary>§8: <c>urn:uuid:</c> and bare forms of the same UUID compare equal.</summary>
+    internal static string? NormId(string? v)
+    {
+        if (v is null) return null;
+        if (v.StartsWith("urn:uuid:", StringComparison.OrdinalIgnoreCase)) v = v.Substring(9);
+        return v.ToLowerInvariant();
+    }
+
+    /// <summary>No integers beyond ±2^53 and no lone surrogates (§7). Never throws: unreadable is not I-JSON.</summary>
+    internal static bool IsIJson(JsonNode? node)
+    {
+        try { return IsIJsonCore(node); }
+        catch (InvalidOperationException) { return false; } // e.g. a lone surrogate the reader refuses to decode
+    }
+
+    private static bool IsIJsonCore(JsonNode? node)
+    {
+        switch (node)
+        {
+            case null: return true;
+            case JsonObject o:
+                foreach (var kv in o) if (!IsIJsonString(kv.Key) || !IsIJsonCore(kv.Value)) return false;
+                return true;
+            case JsonArray a:
+                foreach (var x in a) if (!IsIJsonCore(x)) return false;
+                return true;
+        }
+        var v = (JsonValue)node;
+        if (v.TryGetValue<JsonElement>(out var el))
+            return el.ValueKind switch
+            {
+                JsonValueKind.String => IsIJsonString(el.GetString()!),
+                JsonValueKind.Number => IsIJsonNumber(el.GetRawText()),
+                _ => true,
+            };
+        if (v.TryGetValue<string>(out var s)) return IsIJsonString(s);
+        if (v.TryGetValue<long>(out var l)) return BigInteger.Abs(l) <= IJsonMaxInt;
+        if (v.TryGetValue<ulong>(out var ul)) return ul <= (ulong)IJsonMaxInt;
+        if (v.TryGetValue<decimal>(out var m)) return m != decimal.Floor(m) || BigInteger.Abs(new BigInteger(m)) <= IJsonMaxInt;
+        return true;
+    }
+
+    private static bool IsIJsonNumber(string raw)
+    {
+        if (raw.IndexOfAny(new[] { '.', 'e', 'E' }) >= 0) return true; // a fraction or exponent: not an integer literal
+        return BigInteger.TryParse(raw, NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture, out var n)
+            && BigInteger.Abs(n) <= IJsonMaxInt;
+    }
+
+    private static bool IsIJsonString(string s)
+    {
+        for (var i = 0; i < s.Length; i++)
+        {
+            if (char.IsHighSurrogate(s[i]))
+            {
+                if (i + 1 >= s.Length || !char.IsLowSurrogate(s[i + 1])) return false;
+                i++;
+            }
+            else if (char.IsLowSurrogate(s[i])) return false;
+        }
+        return true;
     }
 
     internal static string FormatTime(DateTimeOffset t) =>
@@ -165,6 +285,9 @@ public static class AgentExecutionProfile
         private readonly bool _runStart;
         private int _sinceStamp;
         private DateTimeOffset? _lastStampTime;
+
+        /// <summary>A copy, so a decision can be committed only once the step is sealed.</summary>
+        public TimestampCoverage Clone() => (TimestampCoverage)MemberwiseClone();
 
         public TimestampCoverage(string profile, int everyEvents, int everySeconds, bool runStart)
         {

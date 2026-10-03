@@ -195,6 +195,11 @@ public sealed record AgentRunArtifact(
     JsonObject Signature,
     IReadOnlyDictionary<string, string> ObjectDigests)
 {
+    public JsonObject Envelope { get; init; } = Envelope ?? throw new ArgumentNullException(nameof(Envelope));
+    public JsonObject Signature { get; init; } = Signature ?? throw new ArgumentNullException(nameof(Signature));
+    public IReadOnlyDictionary<string, string> ObjectDigests { get; init; } =
+        ObjectDigests ?? throw new ArgumentNullException(nameof(ObjectDigests));
+
     /// <summary><c>chain.seq</c>, or null for the identity record.</summary>
     public int? Seq => AgentExecutionProfile.Int(Envelope["chain"]?["seq"]);
 
