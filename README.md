@@ -340,6 +340,135 @@ Expiry-reminder policy can be set per evidence at creation on every seal
 method: `reminders: "on"` (with `reminderDays: 30/60/90/180`), `"off"` (muted),
 or the default `"inherit"`.
 
+## Agent runs: verifiable multi-step execution
+
+For agents that call tools, retrieve context and act over several steps, a
+single envelope is not enough: you need to show which controls applied before
+the run, which security-relevant events were captured and in what order, and
+that nothing captured was changed or removed afterwards. Three sibling
+profiles of the v2 envelope ([common rules](spec/agent-profiles-common-v1.md))
+cover one controlled run:
+
+| Phase | Profile | What it seals |
+|---|---|---|
+| Before | [Control Artifact](spec/agent-control-artifact-v1.md) | configuration, control set, baseline, timestamp policy |
+| During | [Execution Evidence](spec/agent-execution-evidence-v1.md) | one artifact per event, chained by signature |
+| After | [Control Evaluation](spec/control-evaluation-v1.md) | what an independent verifier observed, and each control's result |
+
+```csharp
+var agent = new AgentDefinition
+{
+    AgentId = "urn:example:agent:support-triage",   // opaque — no personal data
+    AgentVersion = "2.4.0",
+    Configuration = new AgentConfiguration
+    {
+        InstructionSet  = systemPromptBytes,
+        ToolManifest    = toolSchemasJson,
+        ExecutionPolicy = allowlistAndLimitsJson,
+        ModelConfig     = modelAndSamplingJson,
+    },
+};
+
+// Seals the Control Artifact (timestamped), then run_start, which binds it.
+var run = await client.StartAgentRunAsync(agent, new AgentRunOptions
+{
+    CertificateId = certId,
+    Activity = "support-ticket-close",
+    ControlSet = new AgentControlSet { Id = "ticket-close-v2", Version = "2", Content = controlSetJson },
+    BaselineState = ticketBeforeJson,      // what "unchanged" controls are checked against
+});
+
+await run.RecordToolCallAsync("lookup_ticket", argsJson, operation: "read", useId: "call-1");
+await run.RecordToolResultAsync("lookup_ticket", resultJson, useId: "call-1");
+
+// A write that needs a human: the policy decision, the approval, then the call.
+await run.RecordAuthorizationAsync(new AgentAuthorization
+    { Decision = "allow_with_human_approval", PolicyId = "support-tools-v1" });
+await run.RecordHumanApprovalAsync("approved",
+    receipt: approvalReceiptJson,          // bound by digest; bytes stay with you
+    identityAssertion: approverIdToken,    // e.g. the IdP token of the approver
+    approver: "urn:example:approver:42");  // opaque — never a name or e-mail
+await run.RecordToolCallAsync("close_ticket", argsJson, operation: "write", consequential: true);
+
+await run.RecordModelOutputAsync(answerBytes);
+AgentRunBundle bundle = await run.FinishAsync("completed");   // run_end, timestamped
+```
+
+An independent verifier then reads the target's state and seals its
+evaluation, with its own certificate:
+
+```csharp
+var evaluation = await verifierClient.SealControlEvaluationAsync(new ControlEvaluationRequest
+{
+    CertificateId = verifierCertId,
+    VerifierId = "urn:example:verifier:ticket-state", VerifierVersion = "1.3.0",
+    ControlArtifact = run.ControlArtifact, RunEnd = bundle.Artifacts[^1],
+    ObservedState = new[] { AgentRunObject.Json("observed-state", ticketAfter) },
+    Controls = new[] { new ControlResult("ticket-closed", "PASS"), new ControlResult("owner-unchanged", "PASS") },
+    Overall = "PASS",
+});
+File.WriteAllText("run.json", bundle.WithEvaluations(evaluation).ToJsonString());
+```
+
+Later, anyone holding the bundle can verify it:
+
+```csharp
+var result = await client.VerifyAgentRunAsync(AgentRunBundle.Parse(File.ReadAllText("run.json")));
+// result.Verdict     -> "run_finalized" | "run_open" | "run_invalid"
+// result.Checks      -> correlation, sequence, chain, envelope, signatures,
+//                       timestamps, objects, finalization, control: ok | warn | bad
+// result.Binding     -> "bound" | "run_only" | "control_only" | "unbound"
+// result.Findings    -> exactly what failed, e.g. "Sequence gap: no artifact for seq 2 (deleted or withheld)."
+// result.Evaluations -> per evaluation: Valid (read this one), the parts it is made of — SubjectBound,
+//                       ControlSetDigestMatches, BaselineDigestMatches, SignatureValid, TimestampValid,
+//                       ObjectsComplete — and Overall exactly as the verifier claimed it
+Console.WriteLine(result.Scope); // what a verdict does — and does not — establish
+```
+
+What to know:
+
+- **Content never leaves your machine.** Sealing and verification send digests
+  and opaque URNs only. A bundle carries digests by default; set
+  `RetainPayloads` (or use `bundle.WithPayloads(...)`) only when the recipient
+  may read the content — supplying payloads upgrades the `objects` check from
+  "digests match" to "content matches".
+- **Seal every event, timestamp to wrap up.** Every event is signed and
+  chained; by default RFC 3161 timestamps go only on the Control Artifact,
+  `run_end` and each Control Evaluation — three for a whole run. The policy is
+  signed into the Control Artifact, so the verifier knows which events had to
+  carry one. Opt into more with `AgentTimestampPolicy { Consequential = true }`
+  (every consequential event), `EveryEvents` / `EverySeconds` (a cadence),
+  `AgentTimestampPolicy.PerEvent`, `requireTimestamp: true` on one event, or
+  `run.CheckpointAsync()` from a timer while a long run is idle.
+- **One certificate per run.** The Control Artifact and every event must be
+  sealed with the same certificate; the verifier fails a run that mixes
+  signers, so events forged by anyone else cannot be appended. Pin your
+  certificates' thumbprints with
+  `client.VerifyAgentRunAsync(bundle, expectedSigners: new[] { thumbprint })`
+  (`result.Signer` shows the run's), and the verifier's with
+  `expectedEvaluationSigners`.
+- **Keep the Control Artifact with the run.** `run_start` binds it, so a
+  bundle without it fails the `control` check: leaving it out must not hide a
+  stricter policy or a broken control basis.
+- **What the default does not prove.** Events without a timestamp could be
+  rewritten by anyone able to seal with the run's certificate until `run_end`
+  is timestamped; `result.Scope` says so. Timestamp consequential events to
+  narrow that window.
+- **Timestamps count only from a trusted TSA.** The signature service reports
+  each timestamp's TSA trust; until it reports `trusted_chain` or `qualified`,
+  the result carries a "TSA trust not established" warning.
+- **Evaluations never change the run verdict.** They are reported on their
+  own, and the SDK never evaluates controls: `Overall` is the named
+  verifier's claim. Read it only when `Valid` is true — the evaluation is then
+  signed over its own envelope, timestamped, intact, and bound to this run's
+  `run_end`, Control Artifact and pre-sealed control set.
+- **Persist as you go.** `OnArtifactSealed` runs after each artifact is sealed,
+  in order. A sealing failure stops the chain; the partial bundle
+  (`run.ToBundle()`) verifies as open or invalid, never as finalized.
+- **Bring your own verifier.** `AgentRunVerifier.VerifyAsync(bundle, verifier)`
+  accepts any `BlindObjectsVerifier`; `AgentRunVerifier.Remote(client)` is the
+  blind endpoint used above.
+
 ## Error handling
 
 Producer-time errors throw; verification errors are collected. This split is

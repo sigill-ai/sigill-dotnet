@@ -768,6 +768,7 @@ public sealed class SigillClient : ISigillAiEvidenceClient, IDisposable
             ["qualified"] = options.Qualified,
         };
         if (options.EnvelopeContentType is not null) requestBody["envelopeContentType"] = options.EnvelopeContentType;
+        if (!options.Timestamp) requestBody["timestamp"] = false;
         if (options.Pqc)
         {
             requestBody["pqc"] = true;
@@ -798,6 +799,33 @@ public sealed class SigillClient : ISigillAiEvidenceClient, IDisposable
             Pqc           = body["pqc"]?.GetValue<bool>() ?? false,
         };
     }
+
+    // ================================================== agent runs (Agent Evidence Profiles v1)
+
+    /// <summary>
+    /// Opens a controlled agent run (<c>spec/agent-profiles-common-v1.md</c>):
+    /// seals the Control Artifact, then <c>run_start</c>. See <see cref="AgentRun"/>.
+    /// </summary>
+    public Task<AgentRun> StartAgentRunAsync(
+        AgentDefinition agent, AgentRunOptions options, CancellationToken cancellationToken = default) =>
+        AgentRun.StartAsync(this, agent, options, cancellationToken);
+
+    /// <summary>
+    /// Seals a Control Evaluation of a finished run. See <see cref="ControlEvaluation"/>.
+    /// </summary>
+    public Task<AgentRunArtifact> SealControlEvaluationAsync(
+        ControlEvaluationRequest request, CancellationToken cancellationToken = default) =>
+        ControlEvaluation.SealAsync(this, request, cancellationToken);
+
+    /// <summary>
+    /// Verifies an agent run bundle (common rules §8). The envelopes are read
+    /// locally; each artifact's signature is checked through the blind
+    /// <c>POST /seal/verify-objects</c> endpoint — digests only, never content.
+    /// </summary>
+    public Task<AgentRunVerificationResult> VerifyAgentRunAsync(
+        AgentRunBundle bundle, IReadOnlyCollection<string>? expectedSigners = null,
+        IReadOnlyCollection<string>? expectedEvaluationSigners = null, CancellationToken cancellationToken = default) =>
+        AgentRunVerifier.VerifyAsync(bundle, AgentRunVerifier.Remote(this), expectedSigners, expectedEvaluationSigners, cancellationToken);
 
     /// <summary>Mirror of the platform's per-seal object cap.</summary>
     internal const int MaxSignHashesObjects = 128;
