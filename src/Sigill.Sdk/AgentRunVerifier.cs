@@ -229,10 +229,12 @@ public static class AgentRunVerifier
 {
     public const string Scope =
         "run_finalized means: the control basis was sealed before the first event, all recorded events are unchanged " +
-        "and in the recorded order, and the run was closed under one signer; a Control Evaluation's result is the named " +
-        "verifier's claim against the pre-sealed control set. It does not establish that every event was captured, that " +
-        "producer-claimed event times are true, that no other run took place, that the verifier measured correctly, or — " +
-        "unless expected signers were given — who produced the run.";
+        "since run_end was timestamped and are in the recorded order, and the run was closed under one signer; a Control " +
+        "Evaluation's result is the named verifier's claim against the pre-sealed control set. It does not establish " +
+        "that every event was captured, that producer-claimed event times are true, that no other run took place, that " +
+        "the verifier measured correctly, or — unless expected signers were given — who produced the run. Events without " +
+        "a timestamp could have been rewritten by anyone able to seal with the run's certificate until run_end was " +
+        "timestamped.";
 
     private const int MaxMissingListed = 64;
     private static readonly TimeSpan SealTimeAllowance = TimeSpan.FromSeconds(6); // 5 s skew + up to 1 s TSA accuracy
@@ -680,8 +682,13 @@ public static class AgentRunVerifier
         var ctlSig = bundle.ControlArtifact is { } cart ? AgentProfiles.SignatureSha256(cart.Signature) : null;
         if (bundle.ControlArtifact is null)
         {
+            // run_start must bind a Control Artifact, so a bundle without one is incomplete. Leaving it out must
+            // not turn an invalid run into a finalized one (it may hide a stricter policy or a broken basis).
             binding = good.Count > 0 ? "run_only" : "unbound";
-            warnings.Add("No Control Artifact supplied: the configuration and control set in force are not shown, and the timestamp policy is unknown.");
+            controlOk = false;
+            findings.Add(reference?.Binds is { } bound
+                ? $"{referenceLabel} binds Control Artifact {bound}, which was not supplied."
+                : $"No Control Artifact supplied, and {(reference is null ? "no event" : referenceLabel)} binds none.");
             control = new AgentControlVerdict();
         }
         else if (ctl is null)
@@ -749,7 +756,7 @@ public static class AgentRunVerifier
                 AgentId = agentId, AgentVersion = agentVersion, Certificate = ctlCheck.Certificate, Objects = ctlCheck.Objects,
             };
         }
-        checks["control"] = !controlOk ? "bad" : bundle.ControlArtifact is null ? "warn" : "ok";
+        checks["control"] = controlOk ? "ok" : "bad";
 
         bool? sealedBeforeRun = null;
         if (ctlCheck is { TimestampOk: true } && Time(ctlCheck.GenTime) is { } ctlAt && Time(startGenTime) is { } startAt)

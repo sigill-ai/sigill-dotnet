@@ -178,14 +178,6 @@ public static class AgentProfiles
     internal static string FormatTime(DateTimeOffset t) =>
         t.UtcDateTime.ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'", CultureInfo.InvariantCulture);
 
-    /// <summary>§1: <c>urn:uuid:</c> and bare forms of the same UUID compare equal.</summary>
-    internal static string? NormId(string? v)
-    {
-        if (v is null) return null;
-        if (v.StartsWith("urn:uuid:", StringComparison.OrdinalIgnoreCase)) v = v.Substring(9);
-        return v.ToLowerInvariant();
-    }
-
     internal static byte[] Canonical(JsonNode node) => JsonCanonicalizer.Canonicalize(node.ToJsonString());
 
     /// <summary>No integers beyond ±2^53 and no lone surrogates (§1). Never throws: unreadable is not I-JSON.</summary>

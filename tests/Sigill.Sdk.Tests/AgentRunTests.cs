@@ -120,7 +120,7 @@ public class AgentRunTests
 
     [Fact]
     public void RunVectors_AreAllPresent() =>
-        RunVectors().Should().HaveCount(39);
+        RunVectors().Should().HaveCount(54);
 
     [Theory]
     [MemberData(nameof(RunVectors))]
@@ -150,6 +150,12 @@ public class AgentRunTests
         foreach (var f in expected["findingsContain"]!.AsArray())
             result.Findings.Should().Contain(x => x.Contains(f!.GetValue<string>()), all);
         if (result.Verdict != "run_invalid") result.Findings.Should().BeEmpty();
+        var warnings = string.Join(" | ", result.Warnings);
+        foreach (var w in expected["warningsContain"]!.AsArray())
+            result.Warnings.Should().Contain(x => x.Contains(w!.GetValue<string>()), warnings);
+        result.Warnings.Should().HaveCount(expected["warningCount"]!.GetValue<int>(), warnings);
+        result.ControlSealedBeforeRun.Should().Be(expected["controlSealedBeforeRun"]?.GetValue<bool>());
+        result.EventTimesPlausible.Should().Be(expected["eventTimesPlausible"]?.GetValue<bool>());
 
         var evals = expected["evaluations"]!.AsArray();
         result.Evaluations.Should().HaveCount(evals.Count);
@@ -343,9 +349,10 @@ public class AgentRunTests
     }
 
     /// <summary>
-    /// Offline: checks every hashV against the supplied digests and reads the
-    /// timestamp's genTime, but cannot check the signature value itself — that
-    /// needs the platform or a TS 119 182-1 validator.
+    /// Offline and NOT cryptographic: checks every hashV against the supplied
+    /// digests and reads the timestamp's genTime, but treats signature values and
+    /// timestamp tokens as valid without checking them — that needs the blind
+    /// endpoint (<see cref="AgentRunVerifier.Remote"/>) or a TS 119 182-1 validator.
     /// </summary>
     private static Task<BlindObjectsVerdict> DigestsOnlyVerify(JsonObject signature, IReadOnlyDictionary<string, string> digests, CancellationToken _)
     {
@@ -367,7 +374,7 @@ public class AgentRunTests
     }
 
     [Fact]
-    public async Task Vector10_RealSealedRun_VerifiesOffline()
+    public async Task Vector10_RealSealedRun_ProfileLayerHoldsOffline_SignaturesAssumed()
     {
         AgentRunArtifact Load(string file)
         {

@@ -200,8 +200,11 @@ public sealed record AgentRunOptions
     /// Called after each artifact is sealed — the Control Artifact first, then
     /// every event strictly in chain order (concurrent events wait their turn).
     /// Persist it here so a crash leaves a shorter prefix, never a hole. It runs
-    /// outside the run's lock and may call back into the run. An exception
-    /// propagates to the caller of that event; the run itself stays usable.
+    /// outside the run's lock and may call back into the run; an event recorded
+    /// from inside the callback is delivered at once (waiting would deadlock),
+    /// so it can arrive ahead of an event another thread sealed meanwhile. An
+    /// exception propagates to the caller of that event; the run itself stays
+    /// usable.
     /// </summary>
     public Func<AgentRunArtifact, CancellationToken, Task>? OnArtifactSealed { get; init; }
 }
