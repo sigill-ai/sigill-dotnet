@@ -51,6 +51,7 @@ public sealed class AgentRun
     private readonly SemaphoreSlim _gate = new(1, 1);
     private readonly List<AgentRunArtifact> _artifacts = new();
     private readonly Dictionary<string, byte[]> _payloads = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, string> _sealedDigests = new(StringComparer.Ordinal);
     private AgentProfiles.TimestampCoverage _coverage;
     private string? _prevSignatureSha256;
     private string? _signer;
@@ -148,6 +149,7 @@ public sealed class AgentRun
             throw new SigillException($"The sealing service returned a signature whose signer cannot be established: {problem}.");
         run._signer = signer;
         run.ControlArtifact = new AgentRunArtifact(envelope, result.Signature, Digests(objects));
+        foreach (var kv in run.ControlArtifact.ObjectDigests) run._sealedDigests[kv.Key] = kv.Value;
         if (options.RetainPayloads)
             foreach (var o in objects) run._payloads[o.Uri] = o.Bytes;
 
@@ -158,8 +160,9 @@ public sealed class AgentRun
         Exception? failure = null;
         foreach (var (artifact, seq) in new[] { (run.ControlArtifact, -1), (start, 0) })
         {
+            // Every failure — a cancellation included — surfaces with the started run attached.
             try { await run.NotifyAsync(artifact, seq, cancellationToken).ConfigureAwait(false); }
-            catch (Exception ex) when (ex is not OperationCanceledException) { failure ??= ex; }
+            catch (Exception ex) { failure ??= ex; }
         }
         if (failure is not null) throw new AgentRunCallbackException(run, failure);
         return run;
@@ -193,6 +196,11 @@ public sealed class AgentRun
         try
         {
             EnsureOpen();
+            // Keep the last slot for run_end, so a bundle always fits AgentRunBundle.MaxArtifacts and can finish.
+            lock (_artifacts)
+                if (_artifacts.Count >= AgentRunBundle.MaxArtifacts - 1)
+                    throw new InvalidOperationException(
+                        $"The run has {_artifacts.Count} events; only run_end fits within the bundle limit of {AgentRunBundle.MaxArtifacts}. Finish the run.");
             var step = (JsonObject?)fields?.DeepClone() ?? new JsonObject();
             if (requireTimestamp) step["timestamp"] = "required";
             artifact = await SealEventAsync(stepType, objects ?? Array.Empty<AgentRunObject>(), step, consequential, cancellationToken).ConfigureAwait(false);
@@ -360,6 +368,7 @@ public sealed class AgentRun
             envelope["binds"] = new JsonObject { ["controlArtifactSignatureSha256"] = ControlArtifact.SignatureSha256 };
         envelope["objects"] = ObjectsBlock(objects);
         var digests = Digests(objects);
+        CheckUriReuse(digests);
         AgentRunVerifier.Prevalidate(envelope, AgentProfiles.ExecutionEvidenceSchema); // throws before anything is sealed
 
         try
@@ -375,6 +384,7 @@ public sealed class AgentRun
                 throw new SigillException("The event was sealed with a different certificate than the run's Control Artifact (certificate rotated?); a run has one signer.");
 
             var artifact = new AgentRunArtifact(envelope, result.Signature, digests);
+            lock (_artifacts) foreach (var kv in digests) _sealedDigests[kv.Key] = kv.Value;
             _prevSignatureSha256 = artifact.SignatureSha256
                 ?? throw new SigillException("The seal returned no classical signature to chain to.");
             _coverage = coverage;
@@ -483,6 +493,15 @@ public sealed class AgentRun
             d[o.Uri] = EnvelopeHashing.HashHex(o.Bytes);
         }
         return d;
+    }
+
+    /// <summary>§5: a URI used again in this run must name the same content (the verifier fails it otherwise).</summary>
+    private void CheckUriReuse(IReadOnlyDictionary<string, string> digests)
+    {
+        lock (_artifacts)
+            foreach (var kv in digests)
+                if (_sealedDigests.TryGetValue(kv.Key, out var earlier) && earlier != kv.Value)
+                    throw new ArgumentException($"Object URI '{kv.Key}' was already sealed in this run with different content.");
     }
 
     private void EnsureOpen()

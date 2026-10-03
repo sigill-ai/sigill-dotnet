@@ -164,6 +164,13 @@ public sealed record AgentEvaluationVerdict
     /// <summary>Same baseline (URI and digest) as the Control Artifact; null unless the evaluation carries one.</summary>
     public bool? BaselineDigestMatches { get; init; }
 
+    /// <summary>
+    /// The one field to read: a valid, timestamped, well-formed evaluation of this run, every object of it
+    /// intact, against the pre-sealed control set (and baseline, when carried). Only then is
+    /// <see cref="Overall"/> the named verifier's claim about this run.
+    /// </summary>
+    public bool Valid { get; init; }
+
     /// <summary>Valid signature over this very envelope, with an established signer (and an expected one, when given).</summary>
     public bool SignatureValid { get; init; }
     public bool TimestampValid { get; init; }
@@ -331,9 +338,41 @@ public static class AgentRunVerifier
     {
         var classical = AgentProfiles.ClassicalEntries(jws);
         if (classical.Count != 1 || classical[0].Header is not { } header) return null; // the signer check reports it
-        var cty = (header["sigD"]?["ctys"] as JsonArray)?.FirstOrDefault();
+        var cty = ((header["sigD"] as JsonObject)?["ctys"] as JsonArray)?.FirstOrDefault();
         var actual = AgentProfiles.Str(cty);
         return actual == expected ? null : $"its signed content type (sigD.ctys[0]) is '{actual ?? "absent"}', not '{expected}'";
+    }
+
+    /// <summary>
+    /// §1 / v2 §5.2: the signed <c>sigD</c> must list the envelope's objects in order — <c>pars[0]</c> the
+    /// envelope, <c>pars[i+1]</c> = <c>objects[i].uri</c>, one <c>hashV</c> and one <c>ctys</c> entry each, and
+    /// <c>ctys[i+1]</c> = <c>objects[i].contentType</c> ("" when absent). A blind verifier matches digests by URI
+    /// and never sees the envelope, so only the profile layer can check this. Null when it holds or the header is
+    /// unreadable (the signer check reports that).
+    /// </summary>
+    private static string? LayoutProblem(JsonObject envelope, JsonObject jws)
+    {
+        var classical = AgentProfiles.ClassicalEntries(jws);
+        if (classical.Count != 1 || classical[0].Header is not { } header) return null;
+        if (header["sigD"] is not JsonObject sigD) return "the signature carries no sigD object";
+        var objects = (envelope["objects"] as JsonArray ?? new JsonArray()).Select(o => o as JsonObject).ToList();
+        var expected = new List<string?> { AgentProfiles.EnvelopeUri };
+        expected.AddRange(objects.Select(o => AgentProfiles.Str(o?["uri"])));
+        var pars = (sigD["pars"] as JsonArray)?.Select(AgentProfiles.Str).ToList();
+        if (pars is null || !pars.SequenceEqual(expected))
+            return "sigD.pars is not the envelope followed by objects[] in order";
+        if (sigD["hashV"] is not JsonArray hashV || hashV.Count != pars.Count)
+            return "sigD.hashV does not have one entry per signed object";
+        if (sigD["ctys"] is not JsonArray ctys || ctys.Count != pars.Count)
+            return "sigD.ctys does not have one entry per signed object";
+        for (var i = 0; i < objects.Count; i++)
+        {
+            var signedType = AgentProfiles.Str(ctys[i + 1]);
+            var envelopeType = AgentProfiles.Str(objects[i]?["contentType"]) ?? "";
+            if (signedType != envelopeType)
+                return $"sigD.ctys[{i + 1}] is '{signedType}', but objects[{i}].contentType is '{envelopeType}'";
+        }
+        return null;
     }
 
     // ── One artifact ─────────────────────────────────────────────────────────
@@ -346,6 +385,14 @@ public static class AgentRunVerifier
         public SignerCertificateInfo? Certificate;
         public List<AgentObjectVerdict> Objects = new();
         public List<string> Findings = new();
+
+        /// <summary>URIs whose supplied digest the signature service confirmed against the signed hashV.</summary>
+        public HashSet<string> Confirmed = new(StringComparer.Ordinal);
+
+        /// <summary>The digest of a signed object, only when the signature confirmed it.</summary>
+        public string? SignedDigest(string uri) =>
+            Confirmed.Contains(uri) ? Objects.FirstOrDefault(o => o.Signed && o.Uri == uri)?.HashHex : null;
+
         public bool AllRetained => Objects.Where(o => o.Signed).All(o => o.Retained);
         public bool TimestampOk => TimestampPresent && TimestampValid == true;
     }
@@ -410,6 +457,7 @@ public static class AgentRunVerifier
                 var o = c.Objects[i];
                 if (!o.Signed) continue;
                 var hit = r.Objects.Where(x => x.Uri == o.Uri).Select(x => (bool?)x.HashMatch).FirstOrDefault();
+                if (hit == true) c.Confirmed.Add(o.Uri);
                 if (hit == false)
                 {
                     c.Objects[i] = o with { HashMatch = false };
@@ -422,6 +470,11 @@ public static class AgentRunVerifier
             {
                 c.ObjectsComplete = false;
                 c.Findings.Add($"{label}: the signature does not cover this envelope.");
+            }
+            if (LayoutProblem(sa.Env, sa.Jws) is { } layout)
+            {
+                c.ObjectsComplete = false;
+                c.Findings.Add($"{label}: the signature and envelope disagree on the object list: {layout}.");
             }
             if (r.Timestamp is { } ts)
             {
@@ -570,6 +623,7 @@ public static class AgentRunVerifier
         var prevSeq = -1;
         var coverage = new AgentProfiles.TimestampCoverage(policy);
         var timeline = new List<(int Seq, DateTimeOffset? EventTime, DateTimeOffset? SealedAt)>();
+        var sealedObjects = new List<(string Label, ArtifactCheck Check)>();
 
         foreach (var p in arts)
         {
@@ -636,6 +690,7 @@ public static class AgentRunVerifier
             var c = await CheckArtifactAsync(sa, p.Art, bundle.Payloads, verifier, label, cancellationToken).ConfigureAwait(false);
             findings.AddRange(c.Findings);
             if (!c.AllRetained) objWarn = true;
+            sealedObjects.Add((label, c));
             if (!c.SignatureValid) sigOk = false;
             if (!c.ObjectsComplete) objOk = false;
             if (c.TimestampPresent) { tsPresent++; if (c.TimestampValid == true) tsValid++; }
@@ -711,6 +766,7 @@ public static class AgentRunVerifier
             ctlCheck = await CheckArtifactAsync(ctl, bundle.ControlArtifact, bundle.Payloads, verifier, label, cancellationToken).ConfigureAwait(false);
             findings.AddRange(ctlCheck.Findings);
             if (!ctlCheck.AllRetained) objWarn = true;
+            sealedObjects.Insert(0, (label, ctlCheck));
             if (!ctlCheck.ObjectsComplete) { objOk = false; controlOk = false; }
             if (!ctlCheck.SignatureValid) { sigOk = false; controlOk = false; }
             if (!ctlCheck.TimestampOk)
@@ -786,6 +842,17 @@ public static class AgentRunVerifier
         if (late.Count > 0)
             warnings.Add($"eventTime later than the timestamp that bounds it (seq {string.Join(", ", late)}).");
 
+        // ── §5: one URI names one content throughout the run (Control Artifact and events)
+        var firstSeen = new Dictionary<string, (string Label, string Digest)>(StringComparer.Ordinal);
+        foreach (var (label, check) in sealedObjects)
+            foreach (var o in check.Objects.Where(o => o.Signed && o.HashHex.Length > 0))
+            {
+                if (!firstSeen.TryGetValue(o.Uri, out var seen)) { firstSeen[o.Uri] = (label, o.HashHex); continue; }
+                if (seen.Digest == o.HashHex) continue;
+                objOk = false;
+                findings.Add($"Object '{o.Uri}' is signed with different content in {seen.Label} and {label}.");
+            }
+
         // ── every payload must be a signed object of some artifact (§7)
         var evalParsed = bundle.Evaluations.Select(e => ParseSigned(e.Envelope, e.Signature, AgentProfiles.ControlEvaluationSchema)).ToList();
         var signedUris = new HashSet<string>(
@@ -848,9 +915,6 @@ public static class AgentRunVerifier
         // ── evaluations: reported on their own, never merged into the run verdict
         var evaluations = new List<AgentEvaluationVerdict>();
         var runEndSig = end is not null ? AgentProfiles.SignatureSha256(end.Jws) : null;
-        string? Effective(string uri, AgentRunArtifact art) =>
-            bundle.Payloads.TryGetValue(uri, out var payload) ? EnvelopeHashing.HashHex(payload)
-            : art.ObjectDigests.TryGetValue(uri, out var hex) ? hex : null;
         List<SignedObject> WithRole(Signed s, string role) => s.Objects.Where(o => o.Role == role).ToList();
         for (var i = 0; i < bundle.Evaluations.Count; i++)
         {
@@ -898,16 +962,21 @@ public static class AgentRunVerifier
             {
                 var eSet = WithRole(sa, "control-set");
                 var cSet = WithRole(ctl, "control-set");
+                // Only digests both signatures confirmed count: the bundle's objectDigests are unsigned.
                 controlSetMatches = eSet.Count == 1 && cSet.Count == 1 && eSet[0].Uri == cSet[0].Uri
-                    && Effective(eSet[0].Uri, art) is { } eh && eh == Effective(cSet[0].Uri, ctlArt)
+                    && c.SignedDigest(eSet[0].Uri) is { } eh && eh == ctlCheck!.SignedDigest(cSet[0].Uri)
                     && JsonNode.DeepEquals(sa.Env["controlSet"], ctl.Env["controlSet"]);
                 var eBase = WithRole(sa, "baseline-state");
                 var cBase = WithRole(ctl, "baseline-state");
                 if (eBase.Count > 0)
                     baselineMatches = eBase.Count == 1 && cBase.Count == 1 && eBase[0].Uri == cBase[0].Uri
-                        && Effective(eBase[0].Uri, art) is { } bh && bh == Effective(cBase[0].Uri, ctlArt);
+                        && c.SignedDigest(eBase[0].Uri) is { } bh && bh == ctlCheck!.SignedDigest(cBase[0].Uri);
             }
             if (!controlSetMatches) ef.Add($"{label}: its control set is not the one sealed in the Control Artifact.");
+            var subjectRunEnd = AgentProfiles.Str(subject?["runEndSignatureSha256"]);
+            if (ctlSig is not null && AgentProfiles.Str(subject?["controlArtifactSignatureSha256"]) == ctlSig
+                && subjectRunEnd is not null && subjectRunEnd != runEndSig)
+                warnings.Add($"{label} names run_end {subjectRunEnd} of this control basis, which is not in the bundle: events may have been withheld.");
             if (baselineMatches == false) ef.Add($"{label}: its baseline is not the one sealed in the Control Artifact.");
 
             evaluations.Add(new AgentEvaluationVerdict
@@ -915,6 +984,8 @@ public static class AgentRunVerifier
                 EvidenceId = sa.EvidenceId, VerifierId = sa.ActorId, VerifierVersion = sa.ActorVersion,
                 SubjectBound = subjectBound, ControlSetDigestMatches = controlSetMatches, BaselineDigestMatches = baselineMatches,
                 SignatureValid = signatureValid, TimestampValid = c.TimestampOk, TimestampGenTime = c.GenTime,
+                Valid = signatureValid && c.TimestampOk && c.ObjectsComplete && sa.Conformance.Count == 0
+                    && subjectBound && controlSetMatches && baselineMatches != false,
                 ObjectsComplete = c.ObjectsComplete, WellFormed = sa.Conformance.Count == 0, Signer = signer,
                 Certificate = c.Certificate, Overall = AgentProfiles.Str(sa.Env["overall"]),
                 Controls = (sa.Env["controls"] as JsonArray ?? new JsonArray()).OfType<JsonObject>()

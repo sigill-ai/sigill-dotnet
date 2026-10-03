@@ -419,8 +419,9 @@ var result = await client.VerifyAgentRunAsync(AgentRunBundle.Parse(File.ReadAllT
 //                       timestamps, objects, finalization, control: ok | warn | bad
 // result.Binding     -> "bound" | "run_only" | "control_only" | "unbound"
 // result.Findings    -> exactly what failed, e.g. "Sequence gap: no artifact for seq 2 (deleted or withheld)."
-// result.Evaluations -> per evaluation: SubjectBound, ControlSetDigestMatches, BaselineDigestMatches,
-//                       SignatureValid, TimestampValid, and Overall exactly as the verifier claimed it
+// result.Evaluations -> per evaluation: Valid (read this one), the parts it is made of — SubjectBound,
+//                       ControlSetDigestMatches, BaselineDigestMatches, SignatureValid, TimestampValid,
+//                       ObjectsComplete — and Overall exactly as the verifier claimed it
 Console.WriteLine(result.Scope); // what a verdict does — and does not — establish
 ```
 
@@ -455,8 +456,9 @@ What to know:
   narrow that window.
 - **Evaluations never change the run verdict.** They are reported on their
   own, and the SDK never evaluates controls: `Overall` is the named
-  verifier's claim, bound to this run's `run_end`, Control Artifact and
-  pre-sealed control set.
+  verifier's claim. Read it only when `Valid` is true — the evaluation is then
+  signed over its own envelope, timestamped, intact, and bound to this run's
+  `run_end`, Control Artifact and pre-sealed control set.
 - **Persist as you go.** `OnArtifactSealed` runs after each artifact is sealed,
   in order. A sealing failure stops the chain; the partial bundle
   (`run.ToBundle()`) verifies as open or invalid, never as finalized.

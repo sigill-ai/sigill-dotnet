@@ -38,14 +38,20 @@ public class AgentRunTests
 
     private static string Thumbprint(byte[] cert) => B64U(SHA256.HashData(cert));
 
-    private static JsonObject StubSign(string envelopeHashHex, IEnumerable<(string Uri, string Hex)> objects, string? cty,
+    private static JsonObject StubSign(string envelopeHashHex, IEnumerable<(string Uri, string Hex, string? Type)> objects, string? cty,
         bool timestamp, string genTime, byte[] cert, bool withSigner = true)
     {
         var pars = new JsonArray { "urn:sigill:envelope" };
         var hashV = new JsonArray { B64U(Convert.FromHexString(envelopeHashHex)) };
-        foreach (var (uri, hex) in objects) { pars.Add(uri); hashV.Add(B64U(Convert.FromHexString(hex))); }
+        var ctys = new JsonArray { cty };
+        foreach (var (uri, hex, type) in objects)
+        {
+            pars.Add(uri);
+            hashV.Add(B64U(Convert.FromHexString(hex)));
+            ctys.Add(type ?? ""); // index-aligned, "" when absent — as the platform signs it
+        }
         var sigD = new JsonObject { ["pars"] = pars, ["hashV"] = hashV };
-        if (cty is not null) sigD["ctys"] = new JsonArray { cty };
+        if (cty is not null) sigD["ctys"] = ctys;
         var header = new JsonObject { ["alg"] = "ES256", ["sigD"] = sigD };
         if (withSigner)
         {
@@ -120,7 +126,7 @@ public class AgentRunTests
 
     [Fact]
     public void RunVectors_AreAllPresent() =>
-        RunVectors().Should().HaveCount(56);
+        RunVectors().Should().HaveCount(64);
 
     [Theory]
     [MemberData(nameof(RunVectors))]
@@ -169,6 +175,8 @@ public class AgentRunTests
             r.BaselineDigestMatches.Should().Be(e["baselineDigestMatches"]!.GetValue<bool>(), because);
             r.SignatureValid.Should().Be(e["signatureValid"]!.GetValue<bool>(), because);
             r.TimestampValid.Should().Be(e["timestampValid"]!.GetValue<bool>(), because);
+            r.ObjectsComplete.Should().Be(e["objectsComplete"]!.GetValue<bool>(), because);
+            r.Valid.Should().Be(e["valid"]!.GetValue<bool>(), because);
             r.Overall.Should().Be(e["overall"]!.GetValue<string>());
         }
     }
@@ -422,6 +430,9 @@ public class AgentRunTests
         public byte[] Cert { get; set; } = CertA;
         public bool OmitSignerHeader { get; set; }
 
+        /// <summary>The TSA's genTime; by default a fixed instant, or the test clock's latest reading.</summary>
+        public Func<string> GenTime { get; set; } = () => "2026-10-01T09:00:00Z";
+
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
         {
             request.RequestUri!.AbsolutePath.Should().Be("/seal/sign-hashes");
@@ -431,8 +442,9 @@ public class AgentRunTests
                 return new HttpResponseMessage(HttpStatusCode.ServiceUnavailable) { Content = new StringContent("busy") };
             var stamp = (body["timestamp"]?.GetValue<bool>() ?? true) && !DropTimestamps;
             var sig = StubSign(body["envelopeHashHex"]!.GetValue<string>(),
-                body["objects"]!.AsArray().Select(o => (o!["uri"]!.GetValue<string>(), o["hashHex"]!.GetValue<string>())),
-                body["envelopeContentType"]?.GetValue<string>(), stamp, "2026-10-01T09:00:00Z", Cert, !OmitSignerHeader);
+                body["objects"]!.AsArray().Select(o => (o!["uri"]!.GetValue<string>(), o["hashHex"]!.GetValue<string>(),
+                    o["contentType"]?.GetValue<string>())),
+                body["envelopeContentType"]?.GetValue<string>(), stamp, GenTime(), Cert, !OmitSignerHeader);
             var res = new JsonObject
             {
                 ["signature"] = sig, ["operationId"] = Guid.NewGuid().ToString(), ["format"] = stamp ? "jades-b-t" : "jades-b-b",
@@ -492,7 +504,10 @@ public class AgentRunTests
     [Fact]
     public async Task RecordedRun_WithEvaluation_VerifiesAsFinalized_WithThreeTimestamps_AndNoContentTravels()
     {
-        var sealer = new StubSealer();
+        // The stub TSA reads the same clock the recorder does, so the seal-time checks see plausible times.
+        var now = new DateTimeOffset(2026, 10, 1, 9, 0, 0, TimeSpan.Zero);
+        DateTimeOffset Tick() => now = now.AddMinutes(1);
+        var sealer = new StubSealer { GenTime = () => now.UtcDateTime.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", CultureInfo.InvariantCulture) };
         using var client = Client(sealer);
         var sealedOrder = new List<string?>();
         var options = Options() with
@@ -500,7 +515,7 @@ public class AgentRunTests
             StartObjects = new[] { new AgentRunObject { Role = "model-input", Bytes = Secret, ContentType = "text/plain" } },
             OnArtifactSealed = (a, _) => { sealedOrder.Add(a.StepType ?? a.SchemaName); return Task.CompletedTask; },
         };
-        var run = await Start(client, options);
+        var run = await AgentRun.StartCoreAsync(client, Agent(), options, Tick, CancellationToken.None);
         await run.RecordToolCallAsync("lookup_ticket", Encoding.UTF8.GetBytes("""{"ticket":"4411"}"""), operation: "read", useId: "call-1");
         await run.RecordToolResultAsync("lookup_ticket", Encoding.UTF8.GetBytes("""{"status":"open"}"""), useId: "call-1");
         await run.RecordToolCallAsync("close_ticket", Encoding.UTF8.GetBytes("""{"ticket":"4411"}"""), operation: "write", consequential: true);
@@ -515,7 +530,7 @@ public class AgentRunTests
             ObservedState = new[] { AgentRunObject.Json("observed-state", JsonNode.Parse("""{"ticket":"4411","status":"closed"}""")!) },
             Controls = new[] { new ControlResult("ticket-closed", "PASS"), new ControlResult("owner-unchanged", "PASS") },
             Overall = "PASS",
-        }, Clock(), CancellationToken.None);
+        }, Tick, CancellationToken.None);
         bundle = bundle.WithEvaluations(evaluation);
 
         var result = await AgentRunVerifier.VerifyAsync(AgentRunBundle.Parse(bundle.ToJsonString()), StubVerify);
@@ -533,6 +548,10 @@ public class AgentRunTests
         ev.SignatureValid.Should().BeTrue();
         ev.TimestampValid.Should().BeTrue();
         ev.Signer.Should().Be(Thumbprint(CertV)).And.NotBe(result.Signer);
+        ev.Valid.Should().BeTrue(string.Join(" | ", ev.Findings));
+        result.Warnings.Should().BeEmpty();
+        result.EventTimesPlausible.Should().BeTrue();
+        result.ControlSealedBeforeRun.Should().BeTrue();
         sealedOrder.Should().Equal("AgentControlArtifact", "run_start", "tool_call", "tool_result", "tool_call", "model_output", "run_end");
 
         // Seal every event, timestamp to wrap up: control, run_end and the evaluation — three for the whole run.
@@ -903,6 +922,87 @@ public class AgentRunTests
         run.IsBroken.Should().BeFalse();
         await run.RecordModelOutputAsync(Encoding.UTF8.GetBytes("carries on"));
         (await AgentRunVerifier.VerifyAsync(await run.FinishAsync(), StubVerify)).Verdict.Should().Be("run_finalized");
+    }
+
+    [Fact]
+    public async Task StartCallbackCancellation_StillHandsBackTheStartedRun()
+    {
+        using var client = Client(new StubSealer());
+        var ex = await FluentActions.Invoking(() => Start(client, Options() with
+        {
+            OnArtifactSealed = (a, _) => a.StepType == "run_start" ? throw new TaskCanceledException("http timeout") : Task.CompletedTask,
+        })).Should().ThrowAsync<AgentRunCallbackException>();
+        ex.Which.InnerException.Should().BeOfType<TaskCanceledException>();
+        ex.Which.Run.Artifacts.Should().ContainSingle();
+    }
+
+    [Fact]
+    public async Task Recorder_RefusesConflictingUriReuse_AndAcceptsIdenticalReuse()
+    {
+        var sealer = new StubSealer();
+        using var client = Client(sealer);
+        var run = await Start(client, Options() with { RetainPayloads = true });
+        const string uri = "urn:example:obj:shared";
+        await run.RecordAsync("model_output", new[] { new AgentRunObject { Role = "model-output", Uri = uri, Bytes = Encoding.UTF8.GetBytes("first") } });
+        await run.RecordAsync("model_output", new[] { new AgentRunObject { Role = "model-output", Uri = uri, Bytes = Encoding.UTF8.GetBytes("first") } });
+        var sealedBefore = sealer.Requests.Count;
+        await run.Invoking(r => r.RecordAsync("model_output", new[] { new AgentRunObject { Role = "model-output", Uri = uri, Bytes = Encoding.UTF8.GetBytes("second") } }))
+            .Should().ThrowAsync<ArgumentException>().WithMessage("*already sealed in this run with different content*");
+        sealer.Requests.Should().HaveCount(sealedBefore);
+        run.IsBroken.Should().BeFalse();
+        var result = await AgentRunVerifier.VerifyAsync(await run.FinishAsync(), StubVerify);
+        result.Verdict.Should().Be("run_finalized", string.Join("\n", result.Findings));
+        result.Checks["objects"].Should().Be("ok");
+    }
+
+    [Fact]
+    public async Task Recorder_KeepsTheLastSlotForRunEnd()
+    {
+        using var client = Client(new StubSealer());
+        var run = await Start(client);
+        for (var i = 1; i < AgentRunBundle.MaxArtifacts - 1; i++)
+            await run.RecordAsync("checkpoint", requireTimestamp: false);
+        await run.Invoking(r => r.RecordModelOutputAsync(Encoding.UTF8.GetBytes("one too many")))
+            .Should().ThrowAsync<InvalidOperationException>().WithMessage("*only run_end fits*");
+        run.IsBroken.Should().BeFalse();
+        var bundle = await run.FinishAsync();
+        bundle.Artifacts.Should().HaveCount(AgentRunBundle.MaxArtifacts);
+        AgentRunBundle.Parse(bundle.ToJsonString()).Artifacts.Should().HaveCount(AgentRunBundle.MaxArtifacts);
+    }
+
+    [Fact]
+    public void Bundle_LimitsHoldForBundlesBuiltInCode()
+    {
+        var b = VectorBundle("01-finalized-digests-only.json");
+        var evaluations = Enumerable.Repeat(b.Evaluations[0], AgentRunBundle.MaxEvaluations + 1).ToArray();
+        FluentActions.Invoking(() => b.WithEvaluations(evaluations)).Should().Throw<ArgumentException>().WithMessage("*evaluations*");
+        var payloads = Enumerable.Range(0, AgentRunBundle.MaxPayloads + 1).ToDictionary(i => "urn:x:" + i, _ => new byte[] { 1 });
+        FluentActions.Invoking(() => b.WithPayloads(payloads)).Should().Throw<ArgumentException>().WithMessage("*payloads*");
+        var json = b.ToJson();
+        json["payloads"] = new JsonObject(payloads.Select(kv => KeyValuePair.Create(kv.Key, (JsonNode?)"AQ==")));
+        FluentActions.Invoking(() => AgentRunBundle.Parse(json)).Should().Throw<AgentRunBundleFormatException>()
+            .Which.Errors.Should().Contain(e => e.Contains($"more than {AgentRunBundle.MaxPayloads} payloads"));
+    }
+
+    [Fact]
+    public async Task ProtectedHeaderWithALoneSurrogate_HasNoReadableSigner()
+    {
+        var v = JsonNode.Parse(File.ReadAllText(Path.Combine(VectorsDir, "runs", "01-finalized-digests-only.json")))!["bundle"]!;
+        var entry = v["artifacts"]![1]!["signature"]!["signatures"]![0]!;
+        var header = Encoding.ASCII.GetString(AgentProfiles.Base64UrlDecode(entry["protected"]!.GetValue<string>()));
+        var prot = B64U(Encoding.ASCII.GetBytes(header.Replace("{\"alg\":\"ES256\"", "{\"alg\":\"ES256\",\"private\":\"\\ud800\"")));
+        entry["protected"] = prot;
+        entry["signature"] = B64U(SHA256.HashData(Encoding.ASCII.GetBytes(prot)));
+        AgentProfiles.SignerOf(entry.Parent!.Parent!.AsObject()).Problem.Should().Contain("no readable protected header");
+        var r = await AgentRunVerifier.VerifyAsync(AgentRunBundle.Parse(v), DigestsLenient);
+        r.Checks["signatures"].Should().Be("bad");
+    }
+
+    /// <summary>The stub verifier, minus header parsing: the lone-surrogate header is unreadable to System.Text.Json.</summary>
+    private static Task<BlindObjectsVerdict> DigestsLenient(JsonObject signature, IReadOnlyDictionary<string, string> digests, CancellationToken ct)
+    {
+        try { return StubVerify(signature, digests, ct); }
+        catch (Exception) { return Task.FromResult(new BlindObjectsVerdict { SignatureValid = true, Complete = true, Objects = digests.Select(d => (d.Key, true)).ToList() }); }
     }
 
     [Fact]

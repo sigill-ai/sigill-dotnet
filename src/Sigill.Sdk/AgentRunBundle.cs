@@ -27,6 +27,9 @@ public sealed class AgentRunBundle
     /// <summary>Upper bound on supplied payloads per bundle.</summary>
     public const int MaxPayloads = 20000;
 
+    /// <summary>Upper bound on JSON nesting depth.</summary>
+    public const int MaxDepth = 64;
+
     private static readonly Regex Hex64 = new("^[0-9a-f]{64}$", RegexOptions.CultureInvariant);
 
     /// <summary>An index for humans; verifiers take the run identifier only from the signed envelopes.</summary>
@@ -55,6 +58,10 @@ public sealed class AgentRunBundle
         Artifacts = artifacts ?? throw new ArgumentNullException(nameof(artifacts));
         Evaluations = evaluations ?? Array.Empty<AgentRunArtifact>();
         Payloads = payloads ?? new Dictionary<string, byte[]>(StringComparer.Ordinal);
+        // The limits are properties of a bundle (§7), not only of its parser: a bundle built here must parse again.
+        if (Artifacts.Count > MaxArtifacts) throw new ArgumentException($"more than {MaxArtifacts} artifacts", nameof(artifacts));
+        if (Evaluations.Count > MaxEvaluations) throw new ArgumentException($"more than {MaxEvaluations} evaluations", nameof(evaluations));
+        if (Payloads.Count > MaxPayloads) throw new ArgumentException($"more than {MaxPayloads} payloads", nameof(payloads));
     }
 
     /// <summary>The same bundle with (other) payload bytes, e.g. to share content with an auditor.</summary>
@@ -101,14 +108,26 @@ public sealed class AgentRunBundle
         try
         {
             // I-JSON forbids duplicate names, and parsers disagree on which value wins: refuse them (§7).
-            using (var doc = JsonDocument.Parse(json))
+            using (var doc = JsonDocument.Parse(json, new JsonDocumentOptions { MaxDepth = 1024 }))
+            {
+                if (Depth(doc.RootElement) > MaxDepth)
+                    throw new AgentRunBundleFormatException(new[] { $"bundle nests deeper than {MaxDepth} levels" });
                 if (AgentProfiles.FindDuplicateName(doc.RootElement) is { } dup)
                     throw new AgentRunBundleFormatException(new[] { $"bundle repeats a duplicate member name '{dup}'" });
+            }
             node = JsonNode.Parse(json);
         }
         catch (JsonException ex) { throw new AgentRunBundleFormatException(new[] { "bundle is not valid JSON: " + ex.Message }); }
         return Parse(node);
     }
+
+    /// <summary>Nesting depth: a scalar is 0, an object or array one more than its deepest member.</summary>
+    private static int Depth(JsonElement e) => e.ValueKind switch
+    {
+        JsonValueKind.Object => 1 + e.EnumerateObject().Select(p => Depth(p.Value)).DefaultIfEmpty(0).Max(),
+        JsonValueKind.Array => 1 + e.EnumerateArray().Select(Depth).DefaultIfEmpty(0).Max(),
+        _ => 0,
+    };
 
     public static AgentRunBundle Parse(JsonNode? node)
     {

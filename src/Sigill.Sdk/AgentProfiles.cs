@@ -98,12 +98,13 @@ public static class AgentProfiles
             {
                 // A repeated member name makes the header unreadable (§1): parsers disagree on which value wins.
                 // JsonNode builds its dictionary lazily, so check with JsonDocument before materializing anything.
+                // §1 applies to the header too: strict UTF-8, no repeated names, I-JSON throughout.
                 if (TryString(entry["protected"], out var prot))
                 {
-                    var text = Encoding.UTF8.GetString(Base64UrlDecode(prot));
+                    var text = StrictUtf8.GetString(Base64UrlDecode(prot));
                     using (var doc = JsonDocument.Parse(text))
-                        if (FindDuplicateName(doc.RootElement) is null)
-                            header = JsonNode.Parse(text) as JsonObject;
+                        if (FindDuplicateName(doc.RootElement) is null && JsonNode.Parse(text) is JsonObject parsed && IsIJson(parsed))
+                            header = parsed;
                 }
             }
             catch (Exception ex) when (ex is FormatException or JsonException or ArgumentException) { /* unreadable */ }
@@ -138,6 +139,8 @@ public static class AgentProfiles
     // ── internals shared by the recorder and the verifier ────────────────────
 
     internal const string EnvelopeUri = AiEvidenceV2Artifact.EnvelopeUri;
+
+    private static readonly UTF8Encoding StrictUtf8 = new(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
 
     internal static bool TryString(JsonNode? node, out string value)
     {
