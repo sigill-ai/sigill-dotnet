@@ -10,70 +10,67 @@ using System.Threading.Tasks;
 
 namespace Sigill.Sdk;
 
-/// <summary>The model an agent runs on, bound into every step's envelope.</summary>
-public sealed record AgentModelRef(string Provider, string Name, string? DeploymentId = null);
-
 /// <summary>
-/// The agent's configuration (spec §3.2): the objects every <c>run_start</c>
-/// and identity record bind (the model configuration is optional). The bytes stay local; only their
-/// digests are sealed. They are usually confidential — share them only with
-/// parties entitled to read them.
+/// The agent's configuration, bound into the Control Artifact
+/// (<c>spec/agent-control-artifact-v1.md</c> §3). Every part is optional.
+/// The bytes stay local; only their digests are sealed. They are usually
+/// confidential — share them only with parties entitled to read them.
 /// </summary>
 public sealed record AgentConfiguration
 {
-    /// <summary>The stable instruction set (system prompt), without per-run context.</summary>
-    public required byte[] InstructionSet { get; init; }
+    /// <summary>The stable instruction set (system prompt), without per-run context. Role <c>instruction-set</c>.</summary>
+    public byte[]? InstructionSet { get; init; }
 
-    /// <summary>The tool manifest: which tools exist and their schemas.</summary>
-    public required byte[] ToolManifest { get; init; }
+    /// <summary>The tool manifest: which tools exist and their schemas. Role <c>tool-manifest</c>.</summary>
+    public byte[]? ToolManifest { get; init; }
 
-    /// <summary>Optional model configuration (sampling parameters, limits).</summary>
+    /// <summary>What the agent is allowed to do: scope, allowlists, approval rules, limits. Role <c>execution-policy</c>.</summary>
+    public byte[]? ExecutionPolicy { get; init; }
+
+    /// <summary>Model configuration (model, sampling parameters, limits). Role <c>model-config</c>.</summary>
     public byte[]? ModelConfig { get; init; }
-
-    /// <summary>What the agent is allowed to do: scope, allowlists, approval rules, limits.</summary>
-    public required byte[] ExecutionPolicy { get; init; }
 }
 
 /// <summary>The agent whose runs are recorded.</summary>
 public sealed record AgentDefinition
 {
-    /// <summary>Stable, opaque agent identifier bound as <c>actor.id</c> (e.g. <c>urn:example:agent:triage</c>). No personal data.</summary>
+    /// <summary>Stable, opaque agent identifier (<c>actor.id</c> of every event). Not a display name, no personal data.</summary>
     public required string AgentId { get; init; }
 
-    /// <summary>The agent build (release tag or commit).</summary>
+    /// <summary>The agent configuration version that runs (<c>actor.version</c>, <c>agent.version</c>).</summary>
     public required string AgentVersion { get; init; }
 
-    public required AgentModelRef Model { get; init; }
+    public AgentConfiguration Configuration { get; init; } = new();
 
-    public required AgentConfiguration Configuration { get; init; }
+    /// <summary>Optional reference to an identity assertion the producer holds (<c>agent.identityRef</c>).</summary>
+    public string? IdentityRef { get; init; }
 
-    /// <summary>Optional human-readable name, recorded in the agent manifest.</summary>
-    public string? DisplayName { get; init; }
-
-    /// <summary>Optional <c>actor.tenantId</c>.</summary>
+    /// <summary>Optional <c>actor.tenantId</c> on every event.</summary>
     public string? TenantId { get; init; }
-
-    /// <summary>Optional <c>purpose.businessContext</c>.</summary>
-    public string? BusinessContext { get; init; }
-
-    /// <summary>
-    /// Agent manifest bytes. When null the SDK derives a canonical manifest
-    /// from <see cref="AgentId"/>, <see cref="AgentVersion"/>,
-    /// <see cref="DisplayName"/> and <see cref="Model"/>.
-    /// </summary>
-    public byte[]? Manifest { get; init; }
 }
 
 /// <summary>
-/// One detached object of a step: what the agent read, called or produced.
+/// The control set the run will be evaluated against (role <c>control-set</c>).
+/// A Control Evaluation later refers to this same object by URI and digest.
+/// </summary>
+public sealed record AgentControlSet
+{
+    public required string Id { get; init; }
+    public required string Version { get; init; }
+    public required byte[] Content { get; init; }
+    public string ContentType { get; init; } = "application/json";
+}
+
+/// <summary>Who seals the Control Artifact (its <c>actor</c>), e.g. the harness that starts the agent.</summary>
+public sealed record AgentRunActor(string Type, string Id, string? Version = null);
+
+/// <summary>
+/// One detached object of an event: what the agent read, called or produced.
 /// The bytes are hashed locally and never transmitted.
 /// </summary>
 public sealed record AgentRunObject
 {
-    /// <summary>Profile kind (spec §3.5), e.g. <c>tool-arguments</c>, <c>assistant-reply</c>.</summary>
-    public required string Kind { get; init; }
-
-    /// <summary>v2 role: prompt | input | context | output | artifact | log.</summary>
+    /// <summary>The profile role, e.g. <c>model-input</c>, <c>tool-arguments</c>, <c>model-output</c>.</summary>
     public required string Role { get; init; }
 
     public required byte[] Bytes { get; init; }
@@ -84,54 +81,46 @@ public sealed record AgentRunObject
     public string Uri { get; init; } = "urn:uuid:" + Guid.NewGuid();
 
     /// <summary>A UTF-8 text object.</summary>
-    public static AgentRunObject Text(string kind, string role, string text, string contentType = "text/plain") =>
-        new() { Kind = kind, Role = role, Bytes = Encoding.UTF8.GetBytes(text), ContentType = contentType };
+    public static AgentRunObject Text(string role, string text, string contentType = "text/plain") =>
+        new() { Role = role, Bytes = Encoding.UTF8.GetBytes(text), ContentType = contentType };
 
     /// <summary>A JSON object, serialized in canonical (JCS) form so equal values hash equally.</summary>
-    public static AgentRunObject Json(string kind, string role, JsonNode value) =>
-        new() { Kind = kind, Role = role, Bytes = AgentExecutionProfile.Canonical(value), ContentType = "application/json" };
+    public static AgentRunObject Json(string role, JsonNode value) =>
+        new() { Role = role, Bytes = AgentProfiles.Canonical(value), ContentType = "application/json" };
 }
 
-/// <summary>A policy decision taken before an action (spec §3.4).</summary>
+/// <summary>A policy decision taken before an action (an <c>authorization</c> event).</summary>
 public sealed record AgentAuthorization
 {
-    /// <summary><c>allowed</c> or <c>denied</c>.</summary>
+    /// <summary>The decision, in the producer's vocabulary: e.g. <c>allowed</c>, <c>allow_with_human_approval</c>, <c>denied</c>.</summary>
     public required string Decision { get; init; }
 
     public string? PolicyId { get; init; }
-    public string? Reason { get; init; }
 
-    internal JsonObject ToJson()
-    {
-        if (Decision is not ("allowed" or "denied"))
-            throw new ArgumentException("Authorization decision must be 'allowed' or 'denied'.");
-        var json = new JsonObject { ["decision"] = Decision };
-        if (PolicyId is not null) json["policyId"] = PolicyId;
-        if (Reason is not null) json["reason"] = Reason;
-        return json;
-    }
+    /// <summary>Optional free text (<c>step.detail</c>). No personal data.</summary>
+    public string? Detail { get; init; }
 }
 
 /// <summary>
-/// The signed timestamp policy (spec §5). <c>throughput</c> signs and chains
-/// every step and timestamps <c>run_end</c>, checkpoints, consequential steps
-/// and the cadence; <c>per-event</c> timestamps every step.
+/// The signed timestamp policy (common rules §4), locked in the Control
+/// Artifact. The default seals every event B-B and timestamps only to wrap
+/// up: the Control Artifact, <c>run_end</c> and each Control Evaluation.
 /// </summary>
 public sealed record AgentTimestampPolicy
 {
     /// <summary>"throughput" (default) or "per-event".</summary>
     public string Profile { get; init; } = "throughput";
 
-    /// <summary>Require a timestamp on the N-th step since the last one. 0 = off.</summary>
-    public int EveryEvents { get; init; } = 10;
+    /// <summary>Require a timestamp on the N-th event since the last one. 0 = off.</summary>
+    public int EveryEvents { get; init; }
 
-    /// <summary>Require a timestamp on the first step this many seconds after the last one. 0 = off.</summary>
-    public int EverySeconds { get; init; } = 300;
+    /// <summary>Require a timestamp on the first event this many seconds after the last one. 0 = off.</summary>
+    public int EverySeconds { get; init; }
 
-    /// <summary>Also timestamp <c>run_start</c>.</summary>
-    public bool RunStart { get; init; }
+    /// <summary>Timestamp every event marked consequential.</summary>
+    public bool Consequential { get; init; }
 
-    /// <summary>Every step timestamped: for low-volume, high-consequence agents.</summary>
+    /// <summary>Every event timestamped: for low-volume, high-consequence agents.</summary>
     public static AgentTimestampPolicy PerEvent { get; } = new() { Profile = "per-event" };
 
     internal JsonObject ToJson() => new()
@@ -139,34 +128,63 @@ public sealed record AgentTimestampPolicy
         ["profile"] = Profile,
         ["everyEvents"] = EveryEvents,
         ["everySeconds"] = EverySeconds,
-        ["runStart"] = RunStart,
-        ["runEnd"] = true,
-        ["consequential"] = true,
+        ["consequential"] = Consequential,
     };
+
+    /// <summary>The policy a signed <c>timestampPolicy</c> member states, or null when it is malformed.</summary>
+    internal static AgentTimestampPolicy? FromJson(JsonNode? node)
+    {
+        if (node is not JsonObject o || o.Count != 4) return null;
+        if (AgentProfiles.Str(o["profile"]) is not ("throughput" or "per-event") ||
+            AgentProfiles.Int(o["everyEvents"]) is not >= 0 || AgentProfiles.Int(o["everySeconds"]) is not >= 0 ||
+            !(o["consequential"] is JsonValue c && c.TryGetValue<bool>(out _)) ||
+            o["everyEvents"] is JsonValue ee && ee.TryGetValue<bool>(out _) ||
+            o["everySeconds"] is JsonValue es && es.TryGetValue<bool>(out _))
+            return null;
+        return new AgentTimestampPolicy
+        {
+            Profile = AgentProfiles.Str(o["profile"])!,
+            EveryEvents = AgentProfiles.Int(o["everyEvents"])!.Value,
+            EverySeconds = AgentProfiles.Int(o["everySeconds"])!.Value,
+            Consequential = AgentProfiles.IsTrue(o["consequential"]),
+        };
+    }
 }
 
 /// <summary>Options for <see cref="AgentRun.StartAsync"/>.</summary>
 public sealed record AgentRunOptions
 {
-    /// <summary>The Sigill seal certificate that signs every step.</summary>
+    /// <summary>The Sigill seal certificate that signs the Control Artifact and every event (one signer per run).</summary>
     public required Guid CertificateId { get; init; }
 
-    /// <summary>
-    /// A previously registered identity record for this exact configuration.
-    /// When null, a new one is registered at start. Reuse it across runs
-    /// while the configuration is unchanged.
-    /// </summary>
-    public AgentRunArtifact? Identity { get; init; }
+    /// <summary>The activity the run performs (<c>activity.name</c>), e.g. <c>customer-address-change</c>.</summary>
+    public required string Activity { get; init; }
 
-    /// <summary>Opaque identifier of who registers a new identity record. No personal data.</summary>
-    public string? RegisteredBy { get; init; }
+    /// <summary>The control set the run will be evaluated against.</summary>
+    public required AgentControlSet ControlSet { get; init; }
+
+    /// <summary>
+    /// The target's state as read before the run (role <c>baseline-state</c>):
+    /// what every "unchanged" control rests on. Optional.
+    /// </summary>
+    public byte[]? BaselineState { get; init; }
+
+    public string BaselineStateContentType { get; init; } = "application/json";
+
+    /// <summary>The authority the agent acts under, e.g. a delegation token (role <c>authority</c>). Optional.</summary>
+    public byte[]? Authority { get; init; }
+
+    public string AuthorityContentType { get; init; } = "application/jwt";
+
+    /// <summary>Who seals the Control Artifact. Default: the agent itself (<c>type: agent</c>).</summary>
+    public AgentRunActor? ControlActor { get; init; }
 
     public AgentTimestampPolicy TimestampPolicy { get; init; } = new();
 
     /// <summary>The run identifier (<c>activity.correlationId</c>). Default: a new <c>urn:uuid:</c>.</summary>
     public string? CorrelationId { get; init; }
 
-    /// <summary>Objects bound into <c>run_start</c> after the configuration (e.g. the user's request).</summary>
+    /// <summary>Objects bound into <c>run_start</c>, e.g. the request (role <c>model-input</c>).</summary>
     public IReadOnlyList<AgentRunObject>? StartObjects { get; init; }
 
     /// <summary>
@@ -175,19 +193,21 @@ public sealed record AgentRunOptions
     /// </summary>
     public bool RetainPayloads { get; init; }
 
-    /// <summary>Request eIDAS-qualified timestamps where a timestamp is required.</summary>
+    /// <summary>Request eIDAS-qualified timestamps where a timestamp is taken.</summary>
     public bool Qualified { get; init; }
 
     /// <summary>
-    /// Called after each artifact is sealed, in chain order, before the next
-    /// step can be sealed — persist it here so a crash loses nothing. An
-    /// exception propagates to the caller; the run itself stays usable.
+    /// Called after each artifact is sealed — the Control Artifact first, then
+    /// every event strictly in chain order (concurrent events wait their turn).
+    /// Persist it here so a crash leaves a shorter prefix, never a hole. It runs
+    /// outside the run's lock and may call back into the run. An exception
+    /// propagates to the caller of that event; the run itself stays usable.
     /// </summary>
     public Func<AgentRunArtifact, CancellationToken, Task>? OnArtifactSealed { get; init; }
 }
 
 /// <summary>
-/// One sealed artifact of a run (or the identity record): the v2
+/// One sealed artifact of any of the three profiles: the v2
 /// <c>{envelope, signature}</c> pair plus each object's SHA-256, keyed by URI.
 /// </summary>
 public sealed record AgentRunArtifact(
@@ -200,17 +220,20 @@ public sealed record AgentRunArtifact(
     public IReadOnlyDictionary<string, string> ObjectDigests { get; init; } =
         ObjectDigests ?? throw new ArgumentNullException(nameof(ObjectDigests));
 
-    /// <summary><c>chain.seq</c>, or null for the identity record.</summary>
-    public int? Seq => AgentExecutionProfile.Int(Envelope["chain"]?["seq"]);
+    /// <summary><c>AgentControlArtifact</c>, <c>AgentExecutionEvidence</c> or <c>ControlEvaluation</c>.</summary>
+    public string? SchemaName => AgentProfiles.Str(Envelope["schemaName"]);
 
-    /// <summary>The signed step type.</summary>
-    public string? StepType => AgentExecutionProfile.Str(Envelope["extensions"]?[AgentExecutionProfile.ExtensionKey]?["stepType"]);
+    /// <summary><c>chain.seq</c> of an event; null for the other profiles.</summary>
+    public int? Seq => AgentProfiles.Int(Envelope["chain"]?["seq"]);
+
+    /// <summary><c>step.type</c> of an event; null for the other profiles.</summary>
+    public string? StepType => AgentProfiles.Str(Envelope["step"]?["type"]);
 
     /// <summary>The artifact's <c>evidenceId</c>.</summary>
-    public string? EvidenceId => AgentExecutionProfile.Str(Envelope["evidenceId"]);
+    public string? EvidenceId => AgentProfiles.Str(Envelope["evidenceId"]);
 
-    /// <summary>The chain digest the next step links to (spec §4).</summary>
-    public string? ChainDigest => AgentExecutionProfile.ChainDigest(Signature);
+    /// <summary>The binding digest other artifacts refer to this one by (common rules §2).</summary>
+    public string? SignatureSha256 => AgentProfiles.SignatureSha256(Signature);
 
     internal JsonObject ToJson()
     {
@@ -223,4 +246,44 @@ public sealed record AgentRunArtifact(
             ["objectDigests"] = digests,
         };
     }
+}
+
+/// <summary>One control's result in a Control Evaluation.</summary>
+public sealed record ControlResult(string Id, string Result, string? Detail = null);
+
+/// <summary>
+/// What an independent verifier observed after a run, and how each control came
+/// out (<c>spec/control-evaluation-v1.md</c>). See <see cref="ControlEvaluation.SealAsync"/>.
+/// </summary>
+public sealed record ControlEvaluationRequest
+{
+    /// <summary>The verifier's own seal certificate — SHOULD differ from the run's.</summary>
+    public required Guid CertificateId { get; init; }
+
+    /// <summary>Stable identifier of the verifier component (<c>actor.id</c>).</summary>
+    public required string VerifierId { get; init; }
+
+    public required string VerifierVersion { get; init; }
+
+    /// <summary>The run's Control Artifact; its control set (and baseline) are referred to by URI and digest.</summary>
+    public required AgentRunArtifact ControlArtifact { get; init; }
+
+    /// <summary>The run's <c>run_end</c> artifact.</summary>
+    public required AgentRunArtifact RunEnd { get; init; }
+
+    /// <summary>The state read after the run (role <c>observed-state</c>); at least one.</summary>
+    public required IReadOnlyList<AgentRunObject> ObservedState { get; init; }
+
+    public required IReadOnlyList<ControlResult> Controls { get; init; }
+
+    /// <summary>PASS, FAIL or INDETERMINATE — asserted by the verifier, never derived.</summary>
+    public required string Overall { get; init; }
+
+    /// <summary>When the state was read. Default: now.</summary>
+    public DateTimeOffset? EvaluatedAt { get; init; }
+
+    /// <summary>Also bind the Control Artifact's <c>baseline-state</c>, when it has one (default on).</summary>
+    public bool IncludeBaseline { get; init; } = true;
+
+    public bool Qualified { get; init; }
 }

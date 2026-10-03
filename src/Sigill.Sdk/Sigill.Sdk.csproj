@@ -28,7 +28,9 @@
 
   <ItemGroup>
     <!-- The v2 envelope schema, validated against at run verification (agent profile §2). -->
-    <EmbeddedResource Include="../../spec/ai-evidence-envelope-v2.schema.json" LogicalName="Sigill.Sdk.ai-evidence-envelope-v2.schema.json" />
+    <EmbeddedResource Include="../../spec/agent-control-artifact-v1.schema.json" LogicalName="Sigill.Sdk.agent-control-artifact-v1.schema.json" />
+    <EmbeddedResource Include="../../spec/agent-execution-evidence-v1.schema.json" LogicalName="Sigill.Sdk.agent-execution-evidence-v1.schema.json" />
+    <EmbeddedResource Include="../../spec/control-evaluation-v1.schema.json" LogicalName="Sigill.Sdk.control-evaluation-v1.schema.json" />
   </ItemGroup>
 
   <ItemGroup>

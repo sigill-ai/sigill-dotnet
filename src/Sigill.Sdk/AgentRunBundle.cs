@@ -11,57 +11,66 @@ using System.Text.RegularExpressions;
 namespace Sigill.Sdk;
 
 /// <summary>
-/// The portable form of an agent run (spec §7): every artifact, the identity
-/// record, each object's digest, and optionally the payload bytes. Hand it to
-/// anyone who should verify the run; without payloads it reveals no content.
+/// The portable form of a controlled agent run (common rules §7): the Control
+/// Artifact, every event, any Control Evaluations, each object's digest, and
+/// optionally the payload bytes. Hand it to anyone who should verify the run;
+/// without payloads it reveals no content.
 /// </summary>
 public sealed class AgentRunBundle
 {
-    /// <summary>Upper bound on artifacts per bundle (spec §7).</summary>
+    /// <summary>Upper bound on events per bundle (§7).</summary>
     public const int MaxArtifacts = 2000;
 
     private static readonly Regex Hex64 = new("^[0-9a-f]{64}$", RegexOptions.CultureInvariant);
 
-    public string Profile { get; }
+    /// <summary>An index for humans; verifiers take the run identifier only from the signed envelopes.</summary>
     public string? CorrelationId { get; }
-    public AgentRunArtifact? AgentIdentity { get; }
+
+    /// <summary>The run's Control Artifact; null for a run-only bundle.</summary>
+    public AgentRunArtifact? ControlArtifact { get; }
+
+    /// <summary>The Execution Evidence events.</summary>
     public IReadOnlyList<AgentRunArtifact> Artifacts { get; }
+
+    public IReadOnlyList<AgentRunArtifact> Evaluations { get; }
 
     /// <summary>Payload bytes keyed by object URI. Empty for a digests-only bundle.</summary>
     public IReadOnlyDictionary<string, byte[]> Payloads { get; }
 
     public AgentRunBundle(
         string? correlationId,
-        AgentRunArtifact? agentIdentity,
+        AgentRunArtifact? controlArtifact,
         IReadOnlyList<AgentRunArtifact> artifacts,
+        IReadOnlyList<AgentRunArtifact>? evaluations = null,
         IReadOnlyDictionary<string, byte[]>? payloads = null)
-        : this(AgentExecutionProfile.Name, correlationId, agentIdentity, artifacts, payloads) { }
-
-    private AgentRunBundle(
-        string profile, string? correlationId, AgentRunArtifact? agentIdentity,
-        IReadOnlyList<AgentRunArtifact> artifacts, IReadOnlyDictionary<string, byte[]>? payloads)
     {
-        Profile = profile;
         CorrelationId = correlationId;
-        AgentIdentity = agentIdentity;
+        ControlArtifact = controlArtifact;
         Artifacts = artifacts ?? throw new ArgumentNullException(nameof(artifacts));
+        Evaluations = evaluations ?? Array.Empty<AgentRunArtifact>();
         Payloads = payloads ?? new Dictionary<string, byte[]>(StringComparer.Ordinal);
     }
 
     /// <summary>The same bundle with (other) payload bytes, e.g. to share content with an auditor.</summary>
     public AgentRunBundle WithPayloads(IReadOnlyDictionary<string, byte[]>? payloads) =>
-        new(Profile, CorrelationId, AgentIdentity, Artifacts, payloads);
+        new(CorrelationId, ControlArtifact, Artifacts, Evaluations, payloads);
+
+    /// <summary>The same bundle with Control Evaluations added.</summary>
+    public AgentRunBundle WithEvaluations(params AgentRunArtifact[] evaluations) =>
+        new(CorrelationId, ControlArtifact, Artifacts, Evaluations.Concat(evaluations).ToList(), Payloads);
 
     public JsonObject ToJson()
     {
         var json = new JsonObject
         {
-            ["profile"] = Profile,
-            ["bundleVersion"] = AgentExecutionProfile.BundleVersion,
+            ["format"] = AgentProfiles.BundleFormat,
+            ["bundleVersion"] = AgentProfiles.BundleVersion,
             ["correlationId"] = CorrelationId,
-            ["agentIdentity"] = AgentIdentity?.ToJson(),
+            ["controlArtifact"] = ControlArtifact?.ToJson(),
             ["artifacts"] = new JsonArray(Artifacts.Select(a => (JsonNode)a.ToJson()).ToArray()),
         };
+        if (Evaluations.Count > 0)
+            json["evaluations"] = new JsonArray(Evaluations.Select(a => (JsonNode)a.ToJson()).ToArray());
         if (Payloads.Count > 0)
         {
             var p = new JsonObject();
@@ -76,7 +85,7 @@ public sealed class AgentRunBundle
         ToJson().ToJsonString(new JsonSerializerOptions { WriteIndented = indented });
 
     /// <summary>
-    /// Strict parse (spec §7): every entry must be well-formed. A malformed
+    /// Strict parse (§7): every entry must be well-formed. A malformed
     /// container throws <see cref="AgentRunBundleFormatException"/> listing every
     /// problem; nothing is skipped.
     /// </summary>
@@ -87,7 +96,7 @@ public sealed class AgentRunBundle
         {
             // I-JSON forbids duplicate names, and parsers disagree on which value wins: refuse them (§7).
             using (var doc = JsonDocument.Parse(json))
-                if (FindDuplicateName(doc.RootElement) is { } dup)
+                if (AgentProfiles.FindDuplicateName(doc.RootElement) is { } dup)
                     throw new AgentRunBundleFormatException(new[] { $"bundle repeats a duplicate member name '{dup}'" });
             node = JsonNode.Parse(json);
         }
@@ -95,65 +104,78 @@ public sealed class AgentRunBundle
         return Parse(node);
     }
 
-    private static string? FindDuplicateName(JsonElement e)
+    public static AgentRunBundle Parse(JsonNode? node)
     {
-        switch (e.ValueKind)
+        // A node parsed from text with a repeated member name throws when first read (JsonObject is lazy).
+        try
         {
-            case JsonValueKind.Object:
-                var seen = new HashSet<string>(StringComparer.Ordinal);
-                foreach (var p in e.EnumerateObject())
-                {
-                    if (!seen.Add(p.Name)) return p.Name;
-                    if (FindDuplicateName(p.Value) is { } inner) return inner;
-                }
-                return null;
-            case JsonValueKind.Array:
-                foreach (var x in e.EnumerateArray())
-                    if (FindDuplicateName(x) is { } inner) return inner;
-                return null;
-            default:
-                return null;
+            Materialize(node); // surfaces a repeated name here, the same way Parse(string) refuses it
+            return ParseNode(node);
+        }
+        catch (ArgumentException ex) when (ex is not ArgumentNullException)
+        {
+            throw new AgentRunBundleFormatException(new[] { "bundle repeats a duplicate member name: " + ex.Message });
         }
     }
 
-    public static AgentRunBundle Parse(JsonNode? node)
+    private static void Materialize(JsonNode? node)
+    {
+        switch (node)
+        {
+            case JsonObject o: foreach (var kv in o) Materialize(kv.Value); break;
+            case JsonArray a: foreach (var x in a) Materialize(x); break;
+        }
+    }
+
+    private static AgentRunBundle ParseNode(JsonNode? node)
     {
         var errors = new List<string>();
         if (node is not JsonObject input)
             throw new AgentRunBundleFormatException(new[] { "bundle must be a JSON object" });
 
-        var profile = AgentExecutionProfile.Str(input["profile"]);
-        if (profile != AgentExecutionProfile.Name)
-            errors.Add($"unsupported profile '{profile ?? input["profile"]?.ToJsonString() ?? "None"}' (expected {AgentExecutionProfile.Name})");
-        var bundleVersion = AgentExecutionProfile.Str(input["bundleVersion"]);
-        if (bundleVersion != AgentExecutionProfile.BundleVersion)
-            errors.Add($"unsupported bundleVersion '{bundleVersion ?? input["bundleVersion"]?.ToJsonString() ?? "None"}' (expected {AgentExecutionProfile.BundleVersion})");
+        string Shown(string key) => AgentProfiles.Str(input[key]) ?? input[key]?.ToJsonString() ?? "None";
+        if (AgentProfiles.Str(input["format"]) != AgentProfiles.BundleFormat)
+            errors.Add($"unsupported format '{Shown("format")}' (expected {AgentProfiles.BundleFormat})");
+        if (AgentProfiles.Str(input["bundleVersion"]) != AgentProfiles.BundleVersion)
+            errors.Add($"unsupported bundleVersion '{Shown("bundleVersion")}' (expected {AgentProfiles.BundleVersion})");
+
+        AgentRunArtifact? control = null;
+        if (input["controlArtifact"] is { } controlNode)
+            control = ReadArtifact(controlNode, "controlArtifact", errors);
 
         var artifacts = new List<AgentRunArtifact>();
-        if (input["artifacts"] is not JsonArray arr || arr.Count == 0) errors.Add("artifacts[] missing or empty");
+        if (input["artifacts"] is not JsonArray arr) errors.Add("artifacts[] missing or not an array");
         else if (arr.Count > MaxArtifacts) errors.Add($"more than {MaxArtifacts} artifacts");
         else
+        {
+            if (arr.Count == 0 && input["controlArtifact"] is null) errors.Add("bundle carries neither a Control Artifact nor any event");
             for (var i = 0; i < arr.Count; i++)
                 if (ReadArtifact(arr[i], $"artifacts[{i}]", errors) is { } a) artifacts.Add(a);
+        }
 
-        AgentRunArtifact? identity = null;
-        if (input["agentIdentity"] is { } idNode)
-            identity = ReadArtifact(idNode, "agentIdentity", errors);
+        var evaluations = new List<AgentRunArtifact>();
+        if (input["evaluations"] is { } evalNode)
+        {
+            if (evalNode is not JsonArray evals) errors.Add("evaluations is not an array");
+            else
+                for (var i = 0; i < evals.Count; i++)
+                    if (ReadArtifact(evals[i], $"evaluations[{i}]", errors) is { } a) evaluations.Add(a);
+        }
 
         var payloads = new Dictionary<string, byte[]>(StringComparer.Ordinal);
-        if (input.ContainsKey("payloads") && input["payloads"] is not null)
+        if (input["payloads"] is { } payloadNode)
         {
-            if (input["payloads"] is not JsonObject p) errors.Add("payloads is not an object");
+            if (payloadNode is not JsonObject p) errors.Add("payloads is not an object");
             else
                 foreach (var kv in p)
                 {
-                    if (AgentExecutionProfile.Str(kv.Value) is { } b64 && TryBase64(b64, out var bytes)) payloads[kv.Key] = bytes;
+                    if (AgentProfiles.Str(kv.Value) is { } b64 && TryBase64(b64, out var bytes)) payloads[kv.Key] = bytes;
                     else errors.Add($"payloads['{kv.Key}'] is not valid base64");
                 }
         }
 
         if (errors.Count > 0) throw new AgentRunBundleFormatException(errors);
-        return new AgentRunBundle(profile!, AgentExecutionProfile.Str(input["correlationId"]), identity, artifacts, payloads);
+        return new AgentRunBundle(AgentProfiles.Str(input["correlationId"]), control, artifacts, evaluations, payloads);
     }
 
     private static AgentRunArtifact? ReadArtifact(JsonNode? node, string label, List<string> errors)
@@ -171,7 +193,7 @@ public sealed class AgentRunBundle
             if (a["objectDigests"] is not JsonObject d) { errors.Add($"{label}: objectDigests is not an object"); return null; }
             foreach (var kv in d)
             {
-                var hex = AgentExecutionProfile.Str(kv.Value);
+                var hex = AgentProfiles.Str(kv.Value);
                 if (hex is null || !Hex64.IsMatch(hex))
                 {
                     errors.Add($"{label}: objectDigests['{kv.Key}'] is not a 64-char hex digest");
