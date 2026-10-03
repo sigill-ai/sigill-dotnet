@@ -561,6 +561,10 @@ is a vendored copy of the canonical source; both repos hold byte-identical
 copies, and the CI in each repo will fail if its copy drifts from what the
 canonicalizer produces.
 
+The same holds for agent runs: both verifiers reproduce every shared
+agent-run vector — verdict, checks, binding, findings and warnings — so a run
+recorded with either SDK verifies identically with the other.
+
 ## Pinning a specific TSA
 
 By default, `SealAsync()` uses Sigill's `auto` mode — round-robin across the TSAs
