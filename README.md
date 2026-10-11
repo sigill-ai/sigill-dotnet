@@ -469,6 +469,47 @@ What to know:
   accepts any `BlindObjectsVerifier`; `AgentRunVerifier.Remote(client)` is the
   blind endpoint used above.
 
+### Sub-agents: run trees
+
+An agent that starts sub-agents records each one as its own run, bound to the
+parent in both directions ([Agent Delegation v1](spec/agent-delegation-v1.md)).
+Children may run concurrently and under their own certificate and controls.
+
+```csharp
+var parent = await client.StartAgentRunAsync(agent, options with { Delegating = true });
+
+// The parent declares the child before it starts; only the instruction's digest is sealed.
+AgentDelegation delegation = await parent.DelegateAsync("urn:example:agent:security-reviewer",
+    instruction: taskBytes, useId: "call-7");
+
+// The child's run_start binds the parent's delegation event.
+var child = await client.StartChildAgentRunAsync(reviewerAgent, reviewerOptions, delegation);
+await child.RecordToolCallAsync("repo.read_file", argsJson, operation: "read");
+await child.FinishAsync("completed");
+
+await parent.CompleteDelegationAsync(child);   // binds the child's run_end
+await parent.FinishAsync("completed");
+
+var tree = new AgentRunTreeBundle(parent.CorrelationId, new[] { parent.ToBundle(), child.ToBundle() });
+var result = await client.VerifyAgentRunTreeAsync(tree);
+// result.Verdict -> "tree_finalized" | "tree_open" | "tree_invalid"
+// result.Edges   -> per delegation: mutually_bound | child_missing | parent_missing | unbound,
+//                   and result_bound | result_mismatch | result_unresolved | no_result
+// result.Runs    -> every run with its own verdict, which the tree never changes
+```
+
+- **A withheld child is detected.** The parent's `delegation_result` names the
+  child's `run_end`; a tree that leaves the child out, swaps it, or edits it is
+  `tree_invalid`.
+- **Close what you open.** A parent cannot close `completed` while a delegation
+  has no result; close it `aborted` or `failed` instead, and the tree reports
+  "parent terminated; evidence incomplete". The recorder keeps one event slot
+  per open delegation, plus `run_end`, inside the 2,000-event bundle limit.
+- **Attribution needs a policy.** Pass `AgentRunTreeOptions.ExpectedSigners`
+  (`agent.id` → certificate thumbprints) and `ExpectedRoot…` to bind the tree to
+  what you expected; without them a shared certificate proves consistency, not
+  who ran each sub-agent.
+
 ## Error handling
 
 Producer-time errors throw; verification errors are collected. This split is
@@ -563,7 +604,10 @@ canonicalizer produces.
 
 The same holds for agent runs: both verifiers reproduce every shared
 agent-run vector — verdict, checks, binding, findings and warnings — so a run
-recorded with either SDK verifies identically with the other.
+recorded with either SDK verifies identically with the other. The run-tree vectors
+([`agent-run-tree/`](spec/test-vectors/agent-run-tree/README.md)) pin the
+delegation rules the same way; this SDK reproduces all of them, and the Python
+SDK follows.
 
 ## Pinning a specific TSA
 

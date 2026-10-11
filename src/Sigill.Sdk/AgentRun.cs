@@ -42,6 +42,7 @@ public sealed class AgentRun
     private static readonly HashSet<string> ReservedStepFields = new(StringComparer.Ordinal)
     {
         "type", "eventTime", "consequential", "timestamp", "finalSeq", "finalPrevSignatureSha256", "runDisposition",
+        "delegation",
     };
 
     private readonly ISigillAiEvidenceClient _client;
@@ -57,6 +58,11 @@ public sealed class AgentRun
     private string? _signer;
     private bool _broken;
     private bool _finished;
+    private readonly string _schemaVersion;
+    private readonly AgentDelegation? _parent;
+    // delegation §4: open delegations (child correlationId → delegation seq) and those already resolved.
+    private readonly Dictionary<string, int> _outstanding = new(StringComparer.Ordinal);
+    private readonly HashSet<string> _resolved = new(StringComparer.Ordinal);
 
     /// <summary>The run identifier (<c>activity.correlationId</c>).</summary>
     public string CorrelationId { get; }
@@ -76,13 +82,22 @@ public sealed class AgentRun
     /// <summary><c>run_end</c> has been sealed.</summary>
     public bool IsFinished => _finished;
 
-    private AgentRun(ISigillAiEvidenceClient client, AgentDefinition agent, AgentRunOptions options, Func<DateTimeOffset> clock)
+    /// <summary>Delegations sealed but not yet resolved by a <c>delegation_result</c>.</summary>
+    public IReadOnlyCollection<string> OutstandingDelegations
+    {
+        get { lock (_artifacts) return _outstanding.Keys.ToArray(); }
+    }
+
+    private AgentRun(ISigillAiEvidenceClient client, AgentDefinition agent, AgentRunOptions options, Func<DateTimeOffset> clock,
+        AgentDelegation? parent = null)
     {
         _client = client;
         _agent = agent;
         _options = options;
         _clock = clock;
-        CorrelationId = options.CorrelationId ?? "urn:uuid:" + Guid.NewGuid();
+        _parent = parent;
+        _schemaVersion = options.Delegating || parent is not null ? "2" : "1";
+        CorrelationId = parent?.ChildCorrelationId ?? options.CorrelationId ?? "urn:uuid:" + Guid.NewGuid();
         _coverage = new AgentProfiles.TimestampCoverage(options.TimestampPolicy);
     }
 
@@ -94,17 +109,39 @@ public sealed class AgentRun
         ISigillAiEvidenceClient client, AgentDefinition agent, AgentRunOptions options, CancellationToken cancellationToken = default) =>
         StartCoreAsync(client, agent, options, () => DateTimeOffset.UtcNow, cancellationToken);
 
+    /// <summary>
+    /// Opens a child run for a delegation the parent sealed (<c>spec/agent-delegation-v1.md</c> §4 rule 2):
+    /// the child's Control Artifact, then its <c>run_start</c> binding both the Control Artifact and the
+    /// parent's <c>delegation</c>. The child's correlationId is the one the parent declared, and its
+    /// <see cref="AgentDefinition.AgentId"/> must be the declared <c>childAgentId</c>. Call it before the
+    /// child acts: the child must do nothing before its <c>run_start</c> is sealed.
+    /// </summary>
+    public static Task<AgentRun> StartChildAsync(
+        ISigillAiEvidenceClient client, AgentDefinition agent, AgentRunOptions options, AgentDelegation delegation,
+        CancellationToken cancellationToken = default) =>
+        StartCoreAsync(client, agent, options, () => DateTimeOffset.UtcNow, cancellationToken, delegation);
+
     internal static async Task<AgentRun> StartCoreAsync(
         ISigillAiEvidenceClient client, AgentDefinition agent, AgentRunOptions options,
-        Func<DateTimeOffset> clock, CancellationToken cancellationToken)
+        Func<DateTimeOffset> clock, CancellationToken cancellationToken, AgentDelegation? parent = null)
     {
         if (client is null) throw new ArgumentNullException(nameof(client));
         if (agent is null) throw new ArgumentNullException(nameof(agent));
         if (options is null) throw new ArgumentNullException(nameof(options));
         if (options.ControlSet is null) throw new ArgumentException("ControlSet is required.", nameof(options));
         ValidatePolicy(options.TimestampPolicy);
+        if (parent is not null)
+        {
+            if (string.IsNullOrEmpty(parent.ChildCorrelationId) || string.IsNullOrEmpty(parent.ParentCorrelationId)
+                || string.IsNullOrEmpty(parent.DelegationSignatureSha256))
+                throw new ArgumentException("The delegation is incomplete.", nameof(parent));
+            if (options.CorrelationId is not null && options.CorrelationId != parent.ChildCorrelationId)
+                throw new ArgumentException("A child run's correlationId is the one its parent declared.", nameof(options));
+            if (parent.ChildAgentId != agent.AgentId)
+                throw new ArgumentException($"The parent delegated to '{parent.ChildAgentId}', not '{agent.AgentId}'.", nameof(agent));
+        }
 
-        var run = new AgentRun(client, agent, options, clock);
+        var run = new AgentRun(client, agent, options, clock, parent);
         var now = AgentProfiles.Truncate(clock());
         var objects = new List<AgentRunObject>();
         var config = agent.Configuration ?? new AgentConfiguration();
@@ -188,6 +225,8 @@ public sealed class AgentRun
         if (string.IsNullOrEmpty(stepType)) throw new ArgumentException("stepType is required.", nameof(stepType));
         if (stepType is "run_start" or "run_end")
             throw new ArgumentException($"'{stepType}' is sealed by StartAsync / FinishAsync.", nameof(stepType));
+        if (stepType is "delegation" or "delegation_result")
+            throw new ArgumentException($"'{stepType}' is sealed by DelegateAsync / CompleteDelegationAsync.", nameof(stepType));
         var reserved = fields?.Select(kv => kv.Key).Where(ReservedStepFields.Contains).OrderBy(k => k, StringComparer.Ordinal).ToList();
         if (reserved is { Count: > 0 })
             throw new ArgumentException("fields uses reserved step member(s): " + string.Join(", ", reserved), nameof(fields));
@@ -196,11 +235,13 @@ public sealed class AgentRun
         try
         {
             EnsureOpen();
-            // Keep the last slot for run_end, so a bundle always fits AgentRunBundle.MaxArtifacts and can finish.
+            // Keep the last slot for run_end, and one per open delegation for its result (delegation §4 rule 6),
+            // so a bundle always fits AgentRunBundle.MaxArtifacts and can finish.
             lock (_artifacts)
-                if (_artifacts.Count >= AgentRunBundle.MaxArtifacts - 1)
-                    throw new InvalidOperationException(
-                        $"The run has {_artifacts.Count} events; only run_end fits within the bundle limit of {AgentRunBundle.MaxArtifacts}. Finish the run.");
+                if (_artifacts.Count >= AgentRunBundle.MaxArtifacts - 1 - _outstanding.Count)
+                    throw new InvalidOperationException(_outstanding.Count == 0
+                        ? $"The run has {_artifacts.Count} events; only run_end fits within the bundle limit of {AgentRunBundle.MaxArtifacts}. Finish the run."
+                        : $"The run has {_artifacts.Count} events; the rest of the bundle limit of {AgentRunBundle.MaxArtifacts} is reserved for run_end and {_outstanding.Count} delegation result(s).");
             var step = (JsonObject?)fields?.DeepClone() ?? new JsonObject();
             if (requireTimestamp) step["timestamp"] = "required";
             artifact = await SealEventAsync(stepType, objects ?? Array.Empty<AgentRunObject>(), step, consequential, cancellationToken).ConfigureAwait(false);
@@ -294,6 +335,10 @@ public sealed class AgentRun
         try
         {
             EnsureOpen();
+            lock (_artifacts)
+                if (disposition == "completed" && _outstanding.Count > 0)
+                    throw new InvalidOperationException(
+                        $"{_outstanding.Count} delegation(s) have no result: record them first, or close the run as aborted or failed (delegation §4 rule 5).");
             int seq;
             lock (_artifacts) seq = _artifacts.Count;
             // finalSeq is run_end's own seq, finalPrev its own chain link (§11): closure is checkable on its own.
@@ -318,6 +363,106 @@ public sealed class AgentRun
         Dictionary<string, byte[]> payloads;
         lock (_artifacts) payloads = new Dictionary<string, byte[]>(_payloads, StringComparer.Ordinal);
         return new AgentRunBundle(CorrelationId, ControlArtifact, Artifacts, null, payloads);
+    }
+
+    // ── Delegation (spec/agent-delegation-v1.md) ─────────────────────────────
+
+    /// <summary>
+    /// Seals a <c>delegation</c> event declaring a child run (§3.2, §4 rule 1): call it before the child
+    /// starts, then open the child with <see cref="StartChildAsync"/> and the returned
+    /// <see cref="AgentDelegation"/>. <paramref name="instruction"/> is what the child is asked to do; only
+    /// its digest is sealed (role <c>delegation-input</c>). Mark <paramref name="consequential"/> when the
+    /// child is granted write authority. Requires <see cref="AgentRunOptions.Delegating"/> (or a child run).
+    /// </summary>
+    /// <exception cref="InvalidOperationException">The run does not delegate, or the event budget is reserved (§4 rule 6).</exception>
+    public async Task<AgentDelegation> DelegateAsync(
+        string childAgentId, byte[]? instruction = null, string instructionContentType = "text/plain", string? useId = null,
+        bool consequential = false, string? childCorrelationId = null, CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrEmpty(childAgentId)) throw new ArgumentException("childAgentId is required.", nameof(childAgentId));
+        if (_schemaVersion != "2")
+            throw new InvalidOperationException("This run was not started with Delegating = true; a run that delegates uses schemaVersion 2 throughout.");
+        var child = childCorrelationId ?? "urn:uuid:" + Guid.NewGuid();
+        if (child.Length == 0 || child == CorrelationId)
+            throw new ArgumentException("A run cannot delegate to itself.", nameof(childCorrelationId));
+        AgentRunArtifact artifact;
+        await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            EnsureOpen();
+            lock (_artifacts)
+            {
+                if (_outstanding.ContainsKey(child) || _resolved.Contains(child))
+                    throw new ArgumentException($"'{child}' is already delegated by this run (§4 rule 10).", nameof(childCorrelationId));
+                // This event, a result for every open delegation including this one, and run_end must fit.
+                if (_artifacts.Count + 1 + _outstanding.Count + 1 + 1 > AgentRunBundle.MaxArtifacts)
+                    throw new InvalidOperationException(
+                        $"No room for another delegation: the bundle limit of {AgentRunBundle.MaxArtifacts} is reserved for run_end and the results of {_outstanding.Count} open delegation(s).");
+            }
+            var block = new JsonObject { ["childCorrelationId"] = child, ["childAgentId"] = childAgentId };
+            if (useId is not null) block["useId"] = useId;
+            var objects = instruction is null
+                ? Array.Empty<AgentRunObject>()
+                : new[] { Obj("delegation-input", instruction, instructionContentType) };
+            artifact = await SealEventAsync("delegation", objects, new JsonObject { ["delegation"] = block }, consequential,
+                cancellationToken).ConfigureAwait(false);
+            lock (_artifacts) _outstanding[child] = artifact.Seq!.Value;
+        }
+        finally { _gate.Release(); }
+        await NotifyAsync(artifact, artifact.Seq!.Value, cancellationToken).ConfigureAwait(false);
+        return new AgentDelegation(CorrelationId, artifact.SignatureSha256!, child, childAgentId) { Artifact = artifact };
+    }
+
+    /// <summary>
+    /// Seals the <c>delegation_result</c> for a finished child run in this process (§4 rule 3).
+    /// </summary>
+    public Task<AgentRunArtifact> CompleteDelegationAsync(AgentRun child, CancellationToken cancellationToken = default)
+    {
+        if (child is null) throw new ArgumentNullException(nameof(child));
+        if (!child.IsFinished) throw new InvalidOperationException("The child run is not finished: seal its run_end first (§4 rule 3).");
+        var end = child.Artifacts[^1];
+        var disposition = AgentProfiles.Str(end.Envelope["step"]?["runDisposition"])!;
+        return CompleteDelegationAsync(child.CorrelationId, end.SignatureSha256!, disposition, cancellationToken);
+    }
+
+    /// <summary>
+    /// Seals the <c>delegation_result</c> for a child that ran elsewhere: its correlationId, the
+    /// <c>signatureSha256</c> of its sealed <c>run_end</c> and that <c>run_end</c>'s disposition (§3.2).
+    /// One result per delegation, whatever the child's disposition.
+    /// </summary>
+    public async Task<AgentRunArtifact> CompleteDelegationAsync(
+        string childCorrelationId, string childRunEndSignatureSha256, string childDisposition,
+        CancellationToken cancellationToken = default)
+    {
+        if (childDisposition is not ("completed" or "failed" or "aborted"))
+            throw new ArgumentException("childDisposition must be completed, failed or aborted.", nameof(childDisposition));
+        AgentRunArtifact artifact;
+        await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            EnsureOpen();
+            lock (_artifacts)
+                if (!_outstanding.ContainsKey(childCorrelationId))
+                    throw new InvalidOperationException(_resolved.Contains(childCorrelationId)
+                        ? $"'{childCorrelationId}' already has its result (§4 rule 4)."
+                        : $"This run never delegated to '{childCorrelationId}'.");
+            var block = new JsonObject
+            {
+                ["childCorrelationId"] = childCorrelationId,
+                ["childRunEndSignatureSha256"] = childRunEndSignatureSha256,
+                ["childDisposition"] = childDisposition,
+            };
+            artifact = await SealEventAsync("delegation_result", Array.Empty<AgentRunObject>(),
+                new JsonObject { ["delegation"] = block }, consequential: false, cancellationToken).ConfigureAwait(false);
+            lock (_artifacts)
+            {
+                _outstanding.Remove(childCorrelationId);
+                _resolved.Add(childCorrelationId);
+            }
+        }
+        finally { _gate.Release(); }
+        await NotifyAsync(artifact, artifact.Seq!.Value, cancellationToken).ConfigureAwait(false);
+        return artifact;
     }
 
     // ── Sealing ──────────────────────────────────────────────────────────────
@@ -356,7 +501,7 @@ public sealed class AgentRun
         var envelope = new JsonObject
         {
             ["schemaName"] = AgentProfiles.ExecutionEvidenceSchema,
-            ["schemaVersion"] = "1",
+            ["schemaVersion"] = _schemaVersion,
             ["evidenceId"] = Guid.NewGuid().ToString(),
             ["createdAt"] = AgentProfiles.FormatTime(now),
             ["actor"] = actor,
@@ -365,11 +510,19 @@ public sealed class AgentRun
             ["step"] = step,
         };
         if (seq == 0)
-            envelope["binds"] = new JsonObject { ["controlArtifactSignatureSha256"] = ControlArtifact.SignatureSha256 };
+        {
+            var binds = new JsonObject { ["controlArtifactSignatureSha256"] = ControlArtifact.SignatureSha256 };
+            if (_parent is not null)
+            {
+                binds["parentDelegationSignatureSha256"] = _parent.DelegationSignatureSha256;
+                binds["parentCorrelationId"] = _parent.ParentCorrelationId;
+            }
+            envelope["binds"] = binds;
+        }
         envelope["objects"] = ObjectsBlock(objects);
         var digests = Digests(objects);
         CheckUriReuse(digests);
-        AgentRunVerifier.Prevalidate(envelope, AgentProfiles.ExecutionEvidenceSchema); // throws before anything is sealed
+        AgentRunVerifier.Prevalidate(envelope, AgentProfiles.ExecutionSchemaFor(envelope)); // throws before anything is sealed
 
         try
         {
