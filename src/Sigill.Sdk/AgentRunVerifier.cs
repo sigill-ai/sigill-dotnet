@@ -529,7 +529,7 @@ public static class AgentRunVerifier
 
         var parsed = bundle.Artifacts.Select((a, i) =>
         {
-            var (sa, error) = ParseSigned(a.Envelope, a.Signature, AgentProfiles.ExecutionEvidenceSchema);
+            var (sa, error) = ParseSigned(a.Envelope, a.Signature, AgentProfiles.ExecutionSchemaFor(a.Envelope));
             return (Art: a, Index: i, Sa: sa, Error: error);
         }).ToList();
         var arts = parsed.OrderBy(p => p.Sa?.Seq ?? int.MaxValue).ThenBy(p => p.Index).ToList();
@@ -729,6 +729,14 @@ public static class AgentRunVerifier
             });
             prevSigHash = AgentProfiles.SignatureSha256(sa.Jws);
             prevSeq = seq;
+        }
+
+        // ── delegation §3.1: the execution artifacts of one run are all v1 or all v2, never mixed
+        var versions = good.Select(g => AgentProfiles.Str(g.Env["schemaVersion"])).Distinct(StringComparer.Ordinal).ToList();
+        if (versions.Count > 1)
+        {
+            envOk = false;
+            findings.Add($"The run's execution artifacts mix schemaVersion {string.Join(" and ", versions.OrderBy(v => v, StringComparer.Ordinal))}; one run uses one version.");
         }
 
         // ── the Control Artifact

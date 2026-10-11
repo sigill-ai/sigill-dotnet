@@ -197,6 +197,13 @@ public sealed record AgentRunOptions
     public bool Qualified { get; init; }
 
     /// <summary>
+    /// The run may start sub-agent runs (<c>spec/agent-delegation-v1.md</c>). Its events are sealed as
+    /// <c>AgentExecutionEvidence</c> <c>schemaVersion "2"</c>, which a run must use throughout once it
+    /// delegates. Child runs started with <see cref="AgentRun.StartChildAsync"/> always use version 2.
+    /// </summary>
+    public bool Delegating { get; init; }
+
+    /// <summary>
     /// Called after each artifact is sealed — the Control Artifact first, then
     /// every event strictly in chain order (concurrent events wait their turn).
     /// Persist it here so a crash leaves a shorter prefix, never a hole. It runs
@@ -207,6 +214,18 @@ public sealed record AgentRunOptions
     /// usable.
     /// </summary>
     public Func<AgentRunArtifact, CancellationToken, Task>? OnArtifactSealed { get; init; }
+}
+
+/// <summary>
+/// One delegation edge as the parent sealed it (<c>spec/agent-delegation-v1.md</c> §2): what a child run
+/// needs to bind its <c>run_start</c> to the parent. Returned by <see cref="AgentRun.DelegateAsync"/>; a
+/// child in another process can rebuild it from the four values.
+/// </summary>
+public sealed record AgentDelegation(
+    string ParentCorrelationId, string DelegationSignatureSha256, string ChildCorrelationId, string ChildAgentId)
+{
+    /// <summary>The parent's sealed <c>delegation</c> event, when sealed in this process.</summary>
+    public AgentRunArtifact? Artifact { get; init; }
 }
 
 /// <summary>

@@ -827,6 +827,22 @@ public sealed class SigillClient : ISigillAiEvidenceClient, IDisposable
         IReadOnlyCollection<string>? expectedEvaluationSigners = null, CancellationToken cancellationToken = default) =>
         AgentRunVerifier.VerifyAsync(bundle, AgentRunVerifier.Remote(this), expectedSigners, expectedEvaluationSigners, cancellationToken);
 
+    /// <summary>
+    /// Opens a sub-agent run for a delegation its parent sealed (<c>spec/agent-delegation-v1.md</c>).
+    /// See <see cref="AgentRun.StartChildAsync"/>.
+    /// </summary>
+    public Task<AgentRun> StartChildAgentRunAsync(
+        AgentDefinition agent, AgentRunOptions options, AgentDelegation delegation, CancellationToken cancellationToken = default) =>
+        AgentRun.StartChildAsync(this, agent, options, delegation, cancellationToken);
+
+    /// <summary>
+    /// Verifies a run tree — a root run and its sub-agent runs (<c>spec/agent-delegation-v1.md</c> §6) —
+    /// through the blind <c>POST /seal/verify-objects</c> endpoint: digests only, never content.
+    /// </summary>
+    public Task<AgentRunTreeVerificationResult> VerifyAgentRunTreeAsync(
+        AgentRunTreeBundle tree, AgentRunTreeOptions? options = null, CancellationToken cancellationToken = default) =>
+        AgentRunTreeVerifier.VerifyAsync(tree, AgentRunVerifier.Remote(this), options, cancellationToken);
+
     /// <summary>Mirror of the platform's per-seal object cap.</summary>
     internal const int MaxSignHashesObjects = 128;
 

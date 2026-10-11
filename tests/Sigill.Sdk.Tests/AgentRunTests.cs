@@ -24,7 +24,7 @@ using Xunit;
 
 namespace Sigill.Sdk.Tests;
 
-public class AgentRunTests
+public partial class AgentRunTests
 {
     private static string VectorsDir => Path.Combine(SpecRoot.TestVectorsDir, "agent-run");
 
