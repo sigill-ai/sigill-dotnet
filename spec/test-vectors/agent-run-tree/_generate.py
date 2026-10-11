@@ -190,7 +190,7 @@ def tree_fingerprint(t: dict, root: str | None) -> str | None:
             return None
         start = next(a for a in b["artifacts"] if a["envelope"]["step"]["type"] == "run_start")
         runs.append({"c": start["envelope"]["activity"]["correlationId"], "f": f})
-    runs.sort(key=lambda r: r["c"])
+    runs.sort(key=lambda r: (r["c"], r["f"]))
     return ar.sha256hex(jcs.canonicalize({"format": "AgentRunTreeBundle", "bundleVersion": "1", "root": root, "runs": runs}))
 
 

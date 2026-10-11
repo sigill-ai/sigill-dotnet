@@ -256,7 +256,9 @@ hex.
 
 - Each run also keeps the common-rules per-run limits.
 - A limit exceeded makes the tree `tree_invalid` (finding `limit_exceeded`), and
-  verification stops there. Resource exhaustion never yields `tree_finalized`.
+  verification stops there: no run verdicts, no edges, no fingerprint. The depth limit is
+  found after the root is derived, so that result still names the root. Resource exhaustion
+  never yields `tree_finalized`.
 - `rootCorrelationId` and the order of `runs[]` are indexes for humans. The verifier
   derives everything from signed envelopes.
 
@@ -362,7 +364,7 @@ For caching, a deterministic fingerprint over everything the tree verdict depend
 
 ```
 runs  = [ { "c": signed correlationId, "f": runFingerprint (common rules §8.2) } ]
-        sorted by c (exact string order)
+        sorted by c, then f (exact string order)
 tree  = sha256hex(JCS({ "format": "AgentRunTreeBundle", "bundleVersion": "1",
                          "root": derived root correlationId, "runs": runs }))
 ```

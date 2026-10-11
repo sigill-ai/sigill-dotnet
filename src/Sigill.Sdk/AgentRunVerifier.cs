@@ -796,8 +796,8 @@ public static class AgentRunVerifier
                 controlOk = false;
                 findings.Add($"{label}: its signed correlationId is not the run's.");
             }
-            var agentId = AgentProfiles.Str(ctl.Env["agent"]?["id"]);
-            var agentVersion = AgentProfiles.Str(ctl.Env["agent"]?["version"]);
+            var agentId = AgentProfiles.Str((ctl.Env["agent"] as JsonObject)?["id"]);
+            var agentVersion = AgentProfiles.Str((ctl.Env["agent"] as JsonObject)?["version"]);
             if (reference is not null && (agentId != reference.ActorId || (reference.ActorVersion is not null && agentVersion != reference.ActorVersion)))
             {
                 controlOk = false;
@@ -817,8 +817,8 @@ public static class AgentRunVerifier
                 Present = true, EvidenceId = ctl.EvidenceId, SignatureSha256 = ctlSig, SignatureValid = ctlCheck.SignatureValid,
                 ObjectsComplete = ctlCheck.ObjectsComplete, TimestampValid = ctlCheck.TimestampOk, TimestampGenTime = ctlCheck.GenTime,
                 Signer = signer, WellFormed = ctl.Conformance.Count == 0, Bound = bound,
-                ControlSetId = AgentProfiles.Str(ctl.Env["controlSet"]?["id"]),
-                ControlSetVersion = AgentProfiles.Str(ctl.Env["controlSet"]?["version"]),
+                ControlSetId = AgentProfiles.Str((ctl.Env["controlSet"] as JsonObject)?["id"]),
+                ControlSetVersion = AgentProfiles.Str((ctl.Env["controlSet"] as JsonObject)?["version"]),
                 AgentId = agentId, AgentVersion = agentVersion, Certificate = ctlCheck.Certificate, Objects = ctlCheck.Objects,
             };
         }

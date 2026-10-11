@@ -313,7 +313,7 @@ public static class AgentRunTreeVerifier
             if (sums.Max(s => s.Depth ?? 0) is var depth && depth > AgentRunTreeBundle.MaxDepth)
             {
                 Find("limit_exceeded", $"The tree is {depth} levels deep (at most {AgentRunTreeBundle.MaxDepth}).");
-                return Stopped(findings, sums);
+                return Stopped(findings, sums, root.Correlation);
             }
         }
 
@@ -421,9 +421,10 @@ public static class AgentRunTreeVerifier
         return r.Signer is not null && expected!.Contains(r.Signer) ? "confirmed" : "mismatch";
     }
 
-    private static AgentRunTreeVerificationResult Stopped(List<AgentRunTreeFinding> findings, List<Summary> sums) => new()
+    private static AgentRunTreeVerificationResult Stopped(List<AgentRunTreeFinding> findings, List<Summary> sums, string? root = null) => new()
     {
         Verdict = "tree_invalid",
+        RootCorrelationId = root,
         Runs = sums.Select(s => new AgentRunTreeRun { CorrelationId = s.Correlation, AgentId = s.AgentId,
             ParentCorrelationId = s.IsChild ? s.ParentCorrelation : null, Depth = s.Depth }).ToList(),
         Edges = Array.Empty<AgentRunTreeEdge>(),
@@ -435,7 +436,7 @@ public static class AgentRunTreeVerifier
     private static string? Fingerprint(string? root, IReadOnlyList<AgentRunTreeRun> runs)
     {
         if (root is null || runs.Any(r => r.CorrelationId is null || r.Result?.Fingerprint is null)) return null;
-        var list = runs.OrderBy(r => r.CorrelationId, StringComparer.Ordinal)
+        var list = runs.OrderBy(r => r.CorrelationId, StringComparer.Ordinal).ThenBy(r => r.Result!.Fingerprint, StringComparer.Ordinal)
             .Select(r => (JsonNode)new JsonObject { ["c"] = r.CorrelationId, ["f"] = r.Result!.Fingerprint }).ToArray();
         var node = new JsonObject
         {
@@ -448,37 +449,42 @@ public static class AgentRunTreeVerifier
     /// <summary>What one run says about the tree, read from its envelopes without any cryptography.</summary>
     private static Summary Summarize(AgentRunBundle bundle, int index)
     {
-        static string? S(JsonNode? n) => AgentProfiles.Str(n);
+        // Malformed evidence never throws here: a member of the wrong JSON type reads as absent.
+        static string? S(JsonNode? root, params string[] path)
+        {
+            var n = root;
+            foreach (var key in path) n = (n as JsonObject)?[key];
+            return AgentProfiles.Str(n);
+        }
         var s = new Summary { Index = index, Bundle = bundle };
         var events = bundle.Artifacts
             .Select(a => (Art: a, Seq: AgentProfiles.Int((a.Envelope["chain"] as JsonObject)?["seq"])))
             .OrderBy(x => x.Seq ?? int.MaxValue).ToList();
-        var start = events.FirstOrDefault(x => S(x.Art.Envelope["step"]?["type"]) == "run_start").Art;
-        s.Correlation = S(start?.Envelope["activity"]?["correlationId"])
-            ?? events.Select(x => S(x.Art.Envelope["activity"]?["correlationId"])).FirstOrDefault(c => !string.IsNullOrEmpty(c))
-            ?? S(bundle.ControlArtifact?.Envelope["activity"]?["correlationId"]);
+        var start = events.FirstOrDefault(x => S(x.Art.Envelope, "step", "type") == "run_start").Art;
+        s.Correlation = S(start?.Envelope, "activity", "correlationId")
+            ?? events.Select(x => S(x.Art.Envelope, "activity", "correlationId")).FirstOrDefault(c => !string.IsNullOrEmpty(c))
+            ?? S(bundle.ControlArtifact?.Envelope, "activity", "correlationId");
         if (start is not null)
         {
             s.HasStart = true;
-            var binds = start.Envelope["binds"] as JsonObject;
-            s.ParentCorrelation = S(binds?["parentCorrelationId"]);
-            s.ParentDelegationSig = S(binds?["parentDelegationSignatureSha256"]);
+            s.ParentCorrelation = S(start.Envelope, "binds", "parentCorrelationId");
+            s.ParentDelegationSig = S(start.Envelope, "binds", "parentDelegationSignatureSha256");
             s.IsChild = s.ParentCorrelation is not null || s.ParentDelegationSig is not null;
         }
-        s.AgentId = S(bundle.ControlArtifact?.Envelope["agent"]?["id"]) ?? S(start?.Envelope["actor"]?["id"]);
+        s.AgentId = S(bundle.ControlArtifact?.Envelope, "agent", "id") ?? S(start?.Envelope, "actor", "id");
         foreach (var (art, seq) in events)
         {
             if (seq is not int q || art.Envelope["step"] is not JsonObject step) continue;
-            var type = S(step["type"]);
-            var d = step["delegation"] as JsonObject;
-            if (type == "delegation" && S(d?["childCorrelationId"]) is { } child && AgentProfiles.SignatureSha256(art.Signature) is { } sig)
-                s.Delegations.Add((q, sig, child, S(d?["childAgentId"])));
-            else if (type == "delegation_result" && S(d?["childCorrelationId"]) is { } rc)
-                s.Results.Add((q, rc, S(d?["childRunEndSignatureSha256"]), S(d?["childDisposition"])));
+            var type = S(step, "type");
+            if (type == "delegation" && S(step, "delegation", "childCorrelationId") is { } child
+                && AgentProfiles.SignatureSha256(art.Signature) is { } sig)
+                s.Delegations.Add((q, sig, child, S(step, "delegation", "childAgentId")));
+            else if (type == "delegation_result" && S(step, "delegation", "childCorrelationId") is { } rc)
+                s.Results.Add((q, rc, S(step, "delegation", "childRunEndSignatureSha256"), S(step, "delegation", "childDisposition")));
             else if (type == "run_end")
             {
                 s.RunEndSig = AgentProfiles.SignatureSha256(art.Signature);
-                s.RunEndDisposition = S(step["runDisposition"]);
+                s.RunEndDisposition = S(step, "runDisposition");
             }
         }
         return s;

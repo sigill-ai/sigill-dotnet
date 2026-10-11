@@ -54,8 +54,7 @@ public partial class AgentRunTests
         r.OpenReasons.Select(f => f.Code).Distinct().OrderBy(c => c, StringComparer.Ordinal)
             .Should().Equal(expected["openReasons"]!.AsArray().Select(x => x!.GetValue<string>()));
         r.Fingerprint.Should().Be(expected["fingerprint"]?.GetValue<string>());
-        if (expected["root"] is { } root && !r.Findings.Any(f => f.Code == "limit_exceeded"))
-            r.RootCorrelationId.Should().Be(root.GetValue<string>());
+        r.RootCorrelationId.Should().Be(expected["root"]?.GetValue<string>());
 
         var runs = expected["runs"]!.AsObject();
         if (runs.Count > 0)
@@ -78,6 +77,18 @@ public partial class AgentRunTests
         var evaluated = await VerifyTreeVector("60-later-evaluation.json");
         evaluated.Verdict.Should().Be(finalized.Verdict);
         evaluated.Fingerprint.Should().NotBe(finalized.Fingerprint);
+    }
+
+    [Fact]
+    public async Task MalformedMembers_NeverThrow_TheyMakeTheTreeInvalid()
+    {
+        var json = JsonNode.Parse(File.ReadAllText(Path.Combine(TreeVectorsDir, "01-finalized.json")))!["tree"]!;
+        var child = json["runs"]![1]!;
+        child["controlArtifact"]!["envelope"]!["agent"] = "not an object";
+        child["artifacts"]![0]!["envelope"]!["activity"] = 42;
+        child["artifacts"]![1]!["envelope"]!["step"] = "flat";
+        var r = await AgentRunTreeVerifier.VerifyAsync(AgentRunTreeBundle.Parse(json.ToJsonString()), StubVerify);
+        r.Verdict.Should().Be("tree_invalid");
     }
 
     [Fact]
