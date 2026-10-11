@@ -16,7 +16,7 @@ namespace Sigill.Sdk.Internal;
 /// Validation against the Agent Evidence Profiles v1 JSON Schemas, embedded
 /// from <c>spec/*.schema.json</c>. Implements exactly the keywords those
 /// schemas use (type, required, properties, additionalProperties, const,
-/// enum, items, minItems, minLength, minimum, pattern, format, allOf, anyOf,
+/// enum, items, minItems, minLength, minimum, maximum, pattern, format, allOf, anyOf,
 /// not, if/then/else, contains/minContains/maxContains, local $ref); a schema
 /// using anything else is rejected at load time rather than silently
 /// half-checked. Messages match the Python SDK byte for byte; the agent-run
@@ -35,7 +35,7 @@ internal static class EnvelopeSchema
     private static readonly HashSet<string> Supported = new(StringComparer.Ordinal)
     {
         "$schema", "$id", "$defs", "$ref", "title", "description", "type", "required", "properties",
-        "additionalProperties", "const", "enum", "items", "minItems", "minLength", "minimum", "pattern", "format",
+        "additionalProperties", "const", "enum", "items", "minItems", "minLength", "minimum", "maximum", "pattern", "format",
         "allOf", "anyOf", "not", "if", "then", "else", "contains", "minContains", "maxContains",
     };
 
@@ -197,6 +197,11 @@ internal static class EnvelopeSchema
         {
             KindOf(minNode, out var minimum);
             if (number < minimum) errs.Add($"{Label(path)} must be >= {NumberText(minimum)}");
+        }
+        if (kind is Kind.Integer or Kind.Number && schema["maximum"] is { } maxNode)
+        {
+            KindOf(maxNode, out var maximum);
+            if (number > maximum) errs.Add($"{Label(path)} must be <= {NumberText(maximum)}");
         }
         if (instance is JsonArray arr)
         {

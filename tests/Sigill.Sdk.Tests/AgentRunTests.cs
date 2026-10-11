@@ -127,7 +127,7 @@ public partial class AgentRunTests
 
     [Fact]
     public void RunVectors_AreAllPresent() =>
-        RunVectors().Should().HaveCount(65);
+        RunVectors().Should().HaveCount(71);
 
     [Theory]
     [MemberData(nameof(RunVectors))]

@@ -25,7 +25,7 @@ public partial class AgentRunTests
         Directory.GetFiles(TreeVectorsDir, "*.json").Select(f => new object[] { Path.GetFileName(f) }).OrderBy(f => (string)f[0]);
 
     [Fact]
-    public void TreeVectors_AreAllPresent() => TreeVectors().Should().HaveCount(35);
+    public void TreeVectors_AreAllPresent() => TreeVectors().Should().HaveCount(36);
 
     private static AgentRunTreeOptions? TreeOptions(JsonNode? o) => o is null ? null : new AgentRunTreeOptions
     {
