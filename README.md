@@ -355,6 +355,9 @@ cover one controlled run:
 | During | [Execution Evidence](spec/agent-execution-evidence-v1.md) | one artifact per event, chained by signature |
 | After | [Control Evaluation](spec/control-evaluation-v1.md) | what an independent verifier observed, and each control's result |
 
+Conversations with hosted assistants recorded on the user's side (the Sigill browser
+extension) use the same profiles under the [client-observed conventions](spec/agent-client-observed-v1.md).
+
 ```csharp
 var agent = new AgentDefinition
 {
