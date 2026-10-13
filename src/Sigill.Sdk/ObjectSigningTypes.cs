@@ -17,8 +17,7 @@ public sealed record SignedObjectDigest
 {
     /// <summary>
     /// Opaque URI identifying the object (byte-exact unique; <c>sigill-envelope.json</c> and <c>urn:sigill:envelope</c>
-    /// are reserved). New objects use the AiEvidenceEnvelopeV2 §3.1 production profile; an object an earlier seal
-    /// already bound keeps its URI.
+    /// are reserved). Must match the AiEvidenceEnvelopeV2 §3.1 production profile, e.g. <c>objects/&lt;uuid&gt;</c>.
     /// </summary>
     public required string Uri { get; init; }
 
@@ -63,6 +62,14 @@ public sealed record ObjectSignOptions
 
     /// <summary>Evidence tags attached at creation (max 10 × 40 chars).</summary>
     public IReadOnlyList<string>? Tags { get; init; }
+
+    /// <summary>
+    /// URIs an earlier seal already bound that this seal re-references (a Control Evaluation reusing its Control
+    /// Artifact's control set). Exempt from the production-profile check only; reserved names are always refused.
+    /// Internal: a transition allowance for runs that straddle an upgrade, never a way to mint non-conforming URIs —
+    /// the signing service refuses them too once it enforces the profile (AiEvidenceEnvelopeV2 §10.1).
+    /// </summary>
+    internal IReadOnlyCollection<string>? ReusedUris { get; init; }
 
     /// <summary>"inherit" (default) | "on" | "off" — renewal reminder override.</summary>
     public string? Reminders { get; init; }

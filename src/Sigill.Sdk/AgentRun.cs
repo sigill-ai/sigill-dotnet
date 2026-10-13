@@ -732,9 +732,11 @@ public static class ControlEvaluation
         var objects = new JsonArray();
         var digests = new Dictionary<string, string>(StringComparer.Ordinal);
         var seal = new List<SignedObjectDigest>();
+        var reused = new HashSet<string>(StringComparer.Ordinal);
         void Reuse(JsonObject o)
         {
             var uri = AgentProfiles.Str(o["uri"])!;
+            reused.Add(uri);
             if (!control.ObjectDigests.TryGetValue(uri, out var hex))
                 throw new ArgumentException($"The Control Artifact carries no digest for its '{AgentProfiles.Str(o["role"])}' object.", nameof(request));
             objects.Add(o.DeepClone());
@@ -780,6 +782,7 @@ public static class ControlEvaluation
             new ObjectSignOptions
             {
                 Timestamp = true, Qualified = request.Qualified, EnvelopeContentType = AgentProfiles.ControlEvaluationContentType,
+                ReusedUris = reused,
             }, ct).ConfigureAwait(false);
         if (result.TimestampedBy is null)
             throw new SigillException("A Control Evaluation must be timestamped, but the seal carries no timestamp.");

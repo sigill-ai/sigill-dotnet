@@ -79,8 +79,8 @@ public class ObjectSigningTests
             EnvelopeHex,
             new[]
             {
-                new SignedObjectDigest { Uri = "urn:example:1", HashHex = ObjectHex, ContentType = "text/plain" },
-                new SignedObjectDigest { Uri = "urn:example:2", HashHex = Sha256Hex("object two"u8.ToArray()) },
+                new SignedObjectDigest { Uri = "objects/1", HashHex = ObjectHex, ContentType = "text/plain" },
+                new SignedObjectDigest { Uri = "objects/2", HashHex = Sha256Hex("object two"u8.ToArray()) },
             },
             Guid.NewGuid(),
             new ObjectSignOptions { EnvelopeContentType = SiblingCty, Label = "sibling-seal" });
@@ -94,7 +94,7 @@ public class ObjectSigningTests
 
         var objects = body["objects"]!.AsArray();
         objects.Should().HaveCount(2);
-        objects[0]!["uri"]!.GetValue<string>().Should().Be("urn:example:1");
+        objects[0]!["uri"]!.GetValue<string>().Should().Be("objects/1");
         objects[0]!["hashHex"]!.GetValue<string>().Should().Be(ObjectHex);
         objects[0]!["contentType"]!.GetValue<string>().Should().Be("text/plain");
         objects[1]!.AsObject().ContainsKey("contentType").Should().BeFalse("absent ctys stay absent");
@@ -122,7 +122,7 @@ public class ObjectSigningTests
         // Missing the SHA-512 envelope digest → rejected before any network call.
         var missingEnvelope512 = () => client.SignObjectHashesAsync(
             EnvelopeHex,
-            new[] { new SignedObjectDigest { Uri = "urn:example:1", HashHex = ObjectHex, HashHex512 = Object512 } },
+            new[] { new SignedObjectDigest { Uri = "objects/1", HashHex = ObjectHex, HashHex512 = Object512 } },
             Guid.NewGuid(),
             new ObjectSignOptions { Pqc = true });
         await missingEnvelope512.Should().ThrowAsync<SigillException>().WithMessage("*EnvelopeHashHex512*");
@@ -130,7 +130,7 @@ public class ObjectSigningTests
         // Missing a per-object SHA-512 digest → rejected before any network call.
         var missingObject512 = () => client.SignObjectHashesAsync(
             EnvelopeHex,
-            new[] { new SignedObjectDigest { Uri = "urn:example:1", HashHex = ObjectHex } },
+            new[] { new SignedObjectDigest { Uri = "objects/1", HashHex = ObjectHex } },
             Guid.NewGuid(),
             new ObjectSignOptions { Pqc = true, EnvelopeHashHex512 = Envelope512 });
         await missingObject512.Should().ThrowAsync<SigillException>().WithMessage("*hashHex512*");
@@ -138,7 +138,7 @@ public class ObjectSigningTests
 
         var result = await client.SignObjectHashesAsync(
             EnvelopeHex,
-            new[] { new SignedObjectDigest { Uri = "urn:example:1", HashHex = ObjectHex, HashHex512 = Object512 } },
+            new[] { new SignedObjectDigest { Uri = "objects/1", HashHex = ObjectHex, HashHex512 = Object512 } },
             Guid.NewGuid(),
             new ObjectSignOptions { Pqc = true, EnvelopeHashHex512 = Envelope512 });
 
@@ -156,7 +156,7 @@ public class ObjectSigningTests
             throw new InvalidOperationException("validation failures must not reach the network"));
         using var client = Client(handler);
         var cert = Guid.NewGuid();
-        var one = new SignedObjectDigest { Uri = "urn:example:1", HashHex = ObjectHex };
+        var one = new SignedObjectDigest { Uri = "objects/1", HashHex = ObjectHex };
 
         var reserved = () => client.SignObjectHashesAsync(
             EnvelopeHex, new[] { one with { Uri = "urn:sigill:envelope" } }, cert);
@@ -169,7 +169,7 @@ public class ObjectSigningTests
         // trimmed — the caller's envelope already references it verbatim, and
         // a normalized signature would no longer align with that envelope.
         var padded = () => client.SignObjectHashesAsync(
-            EnvelopeHex, new[] { one with { Uri = "urn:example:1 " } }, cert);
+            EnvelopeHex, new[] { one with { Uri = "objects/1 " } }, cert);
         await padded.Should().ThrowAsync<SigillException>().WithMessage("*whitespace*");
 
         var badEnvelopeHash = () => client.SignObjectHashesAsync("not-hex", new[] { one }, cert);
@@ -181,7 +181,7 @@ public class ObjectSigningTests
 
         var overCap = () => client.SignObjectHashesAsync(
             EnvelopeHex,
-            Enumerable.Range(0, 129).Select(i => one with { Uri = $"urn:example:{i}" }).ToArray(),
+            Enumerable.Range(0, 129).Select(i => one with { Uri = $"objects/{i}" }).ToArray(),
             cert);
         await overCap.Should().ThrowAsync<SigillException>().WithMessage("*capped*");
 

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.Text.Json.Nodes;
 
@@ -80,20 +81,65 @@ public static class EnvelopeReferences
                 "segments of A–Z a–z 0–9 . _ ~ - separated by '/', e.g. objects/<uuid>. Omit the URI to have one generated.");
     }
 
-    /// <summary><c>sigD.pars[0]</c> of the first classical signature entry, or null (see <see cref="SignedPars"/>).</summary>
-    internal static string? EnvelopeReferenceOf(JsonObject signature) => SignedPars(signature)?.FirstOrDefault();
-
     /// <summary>
-    /// <c>sigD.pars</c> of the first classical signature entry — the one a signature service verifies — in signed
-    /// order; null when that entry's header is unreadable or its <c>pars</c> is not an array of strings. That a JWS
-    /// carries exactly one classical entry is a separate check (common rules §2).
+    /// <c>sigD.pars</c> of the signature's ONLY classical entry, in signed order — the strict view every success
+    /// decision uses. Null unless there is exactly one classical entry, its protected header passes the strict
+    /// reading (§1: strict UTF-8, no repeated member names, I-JSON) and <c>pars</c> is an array of strings.
     /// </summary>
-    internal static System.Collections.Generic.List<string>? SignedPars(JsonObject signature)
+    internal static List<string>? StrictSignedPars(JsonObject signature)
     {
         var classical = AgentProfiles.ClassicalEntries(signature);
-        if (classical.Count == 0 || classical[0].Header?["sigD"] is not JsonObject sigD) return null;
-        if (sigD["pars"] is not JsonArray pars) return null;
-        var list = new System.Collections.Generic.List<string>();
+        return classical.Count == 1 ? ParsOf(classical[0].Header) : null;
+    }
+
+    /// <summary>
+    /// The envelope reference of a structurally valid signature (<see cref="StrictSignedPars"/>), when it is one of
+    /// the two; otherwise null. Only this establishes a valid envelope form.
+    /// </summary>
+    internal static string? StrictEnvelopeReference(JsonObject signature) =>
+        StrictSignedPars(signature)?.FirstOrDefault() is { } r && Classify(r) != EnvelopeReferenceForm.Invalid ? r : null;
+
+    /// <summary>
+    /// The key under which a verifier supplies the envelope digest. From the strict view when it yields one of the
+    /// two references; otherwise the locator reference — a fallback key never establishes a valid form.
+    /// <paramref name="lenient"/> (agent-run verification only): when the strict view fails, read <c>pars[0]</c> of
+    /// the FIRST classical entry the way a lenient signature service does (repeated member: the last value wins),
+    /// so the cryptographic dimension is still reported; that run's signer and verdict fail on their own (common
+    /// rules §1–§3) and the key is never treated as a valid form.
+    /// </summary>
+    internal static string DigestKeyFor(JsonObject signature, bool lenient)
+    {
+        if (StrictEnvelopeReference(signature) is { } strict) return strict;
+        if (lenient && LenientFirstEnvelopeReference(signature) is { } r && Classify(r) != EnvelopeReferenceForm.Invalid) return r;
+        return LocatorReference;
+    }
+
+    /// <summary>
+    /// True when an ML-DSA entry carries a <c>sigD</c> whose <c>pars</c> differ from the classical entry's (v2 §5.2
+    /// rule 5: byte-identical, including the envelope reference form). An ML-DSA entry without a readable
+    /// <c>sigD</c> is left to the cryptographic tier.
+    /// </summary>
+    internal static bool PqcParsMismatch(JsonObject signature)
+    {
+        var classical = StrictSignedPars(signature);
+        if (classical is null || signature["signatures"] is not JsonArray entries) return false;
+        foreach (var e in entries.OfType<JsonObject>())
+        {
+            var header = ReadHeader(e);
+            if (header is null || header["alg"] is not JsonValue a || !a.TryGetValue<string>(out var alg)
+                || !alg.StartsWith("ML-DSA", StringComparison.OrdinalIgnoreCase))
+                continue;
+            if (header["sigD"] is null) continue;
+            var pqc = ParsOf(header);
+            if (pqc is null || !pqc.SequenceEqual(classical, StringComparer.Ordinal)) return true;
+        }
+        return false;
+    }
+
+    private static List<string>? ParsOf(JsonObject? header)
+    {
+        if (header?["sigD"] is not JsonObject sigD || sigD["pars"] is not JsonArray pars) return null;
+        var list = new List<string>();
         foreach (var p in pars)
         {
             if (p is not JsonValue v || !v.TryGetValue<string>(out var s)) return null;
@@ -102,23 +148,14 @@ public static class EnvelopeReferences
         return list;
     }
 
-    /// <summary>
-    /// The key under which a verifier supplies the envelope digest for <paramref name="signature"/>: the reference
-    /// it carries when that is one of the two, otherwise the locator reference — an unknown name is never trusted,
-    /// so the envelope then reads as not covered.
-    /// </summary>
-    internal static string DigestKeyFor(JsonObject signature)
+    private static JsonObject? ReadHeader(JsonObject entry)
     {
-        var r = EnvelopeReferenceOf(signature) ?? LenientEnvelopeReference(signature);
-        return r is not null && Classify(r) != EnvelopeReferenceForm.Invalid ? r : LocatorReference;
+        if (entry["protected"] is not JsonValue pv || !pv.TryGetValue<string>(out var prot)) return null;
+        try { return JsonNode.Parse(AgentProfiles.Base64UrlDecode(prot)) as JsonObject; }
+        catch (Exception e) when (e is System.Text.Json.JsonException or FormatException or ArgumentException) { return null; }
     }
 
-    /// <summary>
-    /// <c>sigD.pars[0]</c> of the first classical entry read leniently — a repeated member name: the last value
-    /// wins — as a lenient signature service reads a header the profile layer refuses. Only for choosing the digest
-    /// key; refusing such a header stays the signer check's job (common rules §1, §3).
-    /// </summary>
-    private static string? LenientEnvelopeReference(JsonObject signature)
+    private static string? LenientFirstEnvelopeReference(JsonObject signature)
     {
         var classical = AgentProfiles.ClassicalEntries(signature);
         if (classical.Count == 0 || classical[0].Entry["protected"] is not JsonValue pv || !pv.TryGetValue<string>(out var prot))

@@ -130,6 +130,34 @@ public partial class AgentRunTests
         RunVectors().Should().HaveCount(79);
 
     [Theory]
+    [InlineData("01-finalized-digests-only.json", "7 of 7 artifact(s)")]
+    [InlineData("72-locator-finalized-with-payloads.json", null)]
+    [InlineData("73-mixed-form-run.json", "3 of 7 artifact(s)")]
+    [InlineData("75-legacy-objects-locator-envelope.json", null)]
+    public async Task LegacyEnvelopeReference_IsANoteNeverAWarning(string file, string? note)
+    {
+        var v = JsonNode.Parse(File.ReadAllText(Path.Combine(VectorsDir, "runs", file)))!;
+        var result = await AgentRunVerifier.VerifyAsync(AgentRunBundle.Parse(v["bundle"]), StubVerify);
+
+        if (note is null) result.Notes.Should().BeEmpty();
+        else result.Notes.Should().ContainSingle().Which.Should().StartWith(note).And.Contain(EnvelopeReferences.LegacyDiagnostic);
+        result.Warnings.Should().HaveCount(v["expected"]!["warningCount"]!.GetValue<int>(), "a note never adds a warning");
+        result.Warnings.Should().NotContain(w => w.Contains("legacy"));
+    }
+
+    [Theory]
+    [InlineData("25-duplicate-header-member.json")]
+    [InlineData("60-header-integer-beyond-i-json.json")]
+    public async Task LenientDigestKey_NeverRescuesARefusedHeader(string file)
+    {
+        // The lenient read only chooses which digest the crypto tier compares; the signer and the run still fail.
+        var v = JsonNode.Parse(File.ReadAllText(Path.Combine(VectorsDir, "runs", file)))!;
+        var result = await AgentRunVerifier.VerifyAsync(AgentRunBundle.Parse(v["bundle"]), StubVerify);
+        result.Verdict.Should().Be("run_invalid");
+        result.Checks["signatures"].Should().Be("bad");
+    }
+
+    [Theory]
     [MemberData(nameof(RunVectors))]
     public async Task RunVector_ReproducesExpectedVerdict(string file)
     {
@@ -945,7 +973,7 @@ public partial class AgentRunTests
         var sealer = new StubSealer();
         using var client = Client(sealer);
         var run = await Start(client, Options() with { RetainPayloads = true });
-        const string uri = "urn:example:obj:shared";
+        const string uri = "objects/shared";
         await run.RecordAsync("model_output", new[] { new AgentRunObject { Role = "model-output", Uri = uri, Bytes = Encoding.UTF8.GetBytes("first") } });
         await run.RecordAsync("model_output", new[] { new AgentRunObject { Role = "model-output", Uri = uri, Bytes = Encoding.UTF8.GetBytes("first") } });
         var sealedBefore = sealer.Requests.Count;

@@ -202,6 +202,12 @@ public sealed record AgentRunVerificationResult
 
     public required IReadOnlyList<string> Findings { get; init; }
     public required IReadOnlyList<string> Warnings { get; init; }
+
+    /// <summary>
+    /// Informational notes — currently the legacy envelope reference diagnostic (AiEvidenceEnvelopeV2 §5.4). Never a
+    /// warning: notes do not affect <see cref="Verdict"/>, <see cref="Checks"/> or <see cref="Warnings"/>.
+    /// </summary>
+    public IReadOnlyList<string> Notes { get; init; } = Array.Empty<string>();
     public string? Disposition { get; init; }
     public string? AgentId { get; init; }
     public string? AgentVersion { get; init; }
@@ -372,6 +378,8 @@ public static class AgentRunVerifier
             return "sigD.hashV does not have one entry per signed object";
         if (sigD["ctys"] is not JsonArray ctys || ctys.Count != pars.Count)
             return "sigD.ctys does not have one entry per signed object";
+        if (EnvelopeReferences.PqcParsMismatch(jws))
+            return "the ML-DSA signature's sigD.pars differ from the classical signature's";
         for (var i = 0; i < objects.Count; i++)
         {
             var signedType = AgentProfiles.Str(ctys[i + 1]);
@@ -446,7 +454,7 @@ public static class AgentRunVerifier
         }
         try
         {
-            var envelopeKey = EnvelopeReferences.DigestKeyFor(sa.Jws);
+            var envelopeKey = EnvelopeReferences.DigestKeyFor(sa.Jws, lenient: true);
             digests[envelopeKey] = EnvelopeHashing.HashHex(EnvelopeHashing.Canonicalize(sa.Env));
             var r = await blind(sa.Jws, digests, ct).ConfigureAwait(false)
                 ?? throw new SigillException("blind verifier returned no result");
@@ -1030,8 +1038,16 @@ public static class AgentRunVerifier
                 warnings.Add($"The signing certificate does not chain to a trusted root (trust: {trust}) and no expected signers were given: the run is consistent, but the verdict does not establish who produced it.");
 
         var verdict = checks.Values.Contains("bad") ? "run_invalid" : end is not null ? "run_finalized" : "run_open";
+        // The reference form is reported, never judged (v2 §5.4): a note, not a warning, and no check state changes.
+        var allSignatures = new[] { bundle.ControlArtifact }.Where(a => a is not null).Select(a => a!.Signature)
+            .Concat(bundle.Artifacts.Select(a => a.Signature)).Concat(bundle.Evaluations.Select(e => e.Signature)).ToList();
+        var legacy = allSignatures.Count(j => EnvelopeReferences.StrictEnvelopeReference(j) == EnvelopeReferences.LegacyReference);
+        var notes = legacy > 0
+            ? new List<string> { $"{legacy} of {allSignatures.Count} artifact(s): {EnvelopeReferences.LegacyDiagnostic}." }
+            : new List<string>();
         return new AgentRunVerificationResult
         {
+            Notes = notes,
             Verdict = verdict,
             Checks = checks,
             Binding = binding,

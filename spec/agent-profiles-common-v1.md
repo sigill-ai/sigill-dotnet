@@ -187,8 +187,10 @@ historical evidence: artifacts sealed before v2.1 carry `urn:uuid:<uuid>`
 object URIs and remain valid. `contentType` SHOULD be set. The same object MAY
 appear in several artifacts (the control set appears in both the Control
 Artifact and the Control Evaluation); when it does, the URI and the digest
-MUST be identical in each — this takes precedence over the production
-profile, so an object first sealed under a legacy URI keeps it. A run MAY mix reference forms across artifacts
+MUST be identical in each. An object first sealed under a legacy URI keeps
+it; re-referencing it in a new seal is a transition allowance that ends when
+the signing service enforces the production profile (v2 §3.1, §10.1) — after
+that the producer starts a fresh run. A run MAY mix reference forms across artifacts
 (a run that straddles a producer upgrade); each artifact's envelope reference
 is classified from its own signature (v2 §5.2 rule 2).
 

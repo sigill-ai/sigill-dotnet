@@ -155,6 +155,12 @@ public sealed record EvidenceV2VerificationResult
     /// <summary>Envelope-layer + platform issues, human-readable. Empty when everything holds.</summary>
     public required IReadOnlyList<string> Issues { get; init; }
 
+    /// <summary>
+    /// Informational notes — currently the legacy envelope reference diagnostic (spec §5.4). Never an issue: notes
+    /// do not affect <see cref="Ok"/>.
+    /// </summary>
+    public IReadOnlyList<string> Notes { get; init; } = Array.Empty<string>();
+
     /// <summary>The full platform response, for diagnostics and rendering.</summary>
     public required JsonObject Raw { get; init; }
 

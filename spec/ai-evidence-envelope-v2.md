@@ -156,10 +156,13 @@ Rules (normative):
   validator may dereference them, which leaks names and opens a request
   surface for third-party verifiers. Size limits are those of the signing
   endpoints and are unchanged. SDKs generate `objects/<uuid>` (lower-case
-  UUID) by default. The profile governs newly minted URIs: an object that an
-  earlier seal already bound (for example a control set sealed before an
-  upgrade and referenced again by an evaluation) keeps the URI it was sealed
-  under, as the sibling profiles require of a shared object.
+  UUID) by default. **Transition allowance (§10.1):** until the signing
+  service enforces this profile, a new seal may re-reference an object an
+  earlier seal bound under a legacy URI (an evaluation of a run that
+  straddles an upgrade reuses the control set its Control Artifact sealed);
+  the URI is kept, never renamed. Once the profile is enforced, such a seal is
+  refused, and the producer starts a fresh run whose objects conform. This
+  governs emission only: historical and transitional seals stay verifiable.
 - **On any remote path, opacity is a privacy requirement, not a style
   choice**: URIs sent to the platform (blind signing, blind verification)
   MUST carry no personal data and no content-derived names — hashing
@@ -330,11 +333,14 @@ archive is a convenience for that mapping, not the base itself.
 - Hash and signature verification is separate from document availability.
   A validator that cannot obtain an object's bytes can still verify the
   signature and every digest it is given.
-- **No verifier ever fetches a `pars` reference.** Signed references are
-  attacker-controlled input; Sigill's blind verifier is a scoped
-  digest/signature verifier, not a general URI-fetching validator.
-  Third-party validators may implement HTTP resolution; with the production
-  profile (§3.1) there is nothing on the network to resolve.
+- **Sigill never fetches a `pars` reference** — neither the platform's blind
+  verifier nor the SDK verifiers, nor Sigill's exports and adapters, which
+  supply the documents themselves. Signed references are attacker-controlled
+  input; these are scoped digest/signature verifiers, not general
+  URI-fetching validators. A third-party validator may resolve references
+  against whatever base it is configured with; the reference syntax alone
+  does not prevent that, so artifacts are presented to validators with their
+  documents supplied.
 
 **Reference forms when reporting.** A legacy envelope reference
 (`urn:sigill:envelope`) is reported as an explanatory diagnostic —
@@ -553,6 +559,12 @@ Nothing in the envelope changes; only `sigD.pars` does.
   example a prompt waiting for the model's answer) may re-mint their URIs in
   the new form before the envelope is canonicalized; a URI already bound by
   a seal is never rewritten.
+- **Enforcement.** The signing service first accepts legacy object URIs (so
+  runs that straddle the upgrade can finish and be evaluated), then refuses
+  every object URI outside the production profile. After that, a seal that
+  would re-reference a legacy-bound object fails with an upgrade message:
+  the producer restarts with a fresh, conforming run. Nothing is renamed and
+  no exemption is kept for previously sealed objects.
 
 ## 11. Test vectors
 
@@ -615,8 +627,11 @@ revisit them deliberately:
   name. Object references use a UUID rather than a digest because the same
   bytes may appear under two URIs. The production profile is narrower than
   ETSI (no absolute URLs, no percent-encoding) to keep references opaque,
-  unfetchable and byte-exact. The opaque-identifier requirement is
-  unchanged. Rejected: an ASiC-E container for a run's seals (EN 319 162
+  free of network locations and byte-exact. The opaque-identifier
+  requirement is unchanged. The checker and DSS results are a dated
+  observation (13 Oct 2026, the tools' versions of that day), not a blanket
+  conformance claim; digest verification against independently supplied
+  detached content remains the authoritative check. Rejected: an ASiC-E container for a run's seals (EN 319 162
   defines ASiC for CAdES and XAdES only, and EU DSS has no JAdES ASiC
   support) and several independent seals in one JWS (the ETSI checker does
   not accept that input).

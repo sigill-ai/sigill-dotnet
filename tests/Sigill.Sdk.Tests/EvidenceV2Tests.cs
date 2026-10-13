@@ -393,6 +393,10 @@ public class EvidenceV2Tests
         result.AlignmentOk.Should().BeTrue();
         result.Ok.Should().BeTrue("a legacy reference is a diagnostic, never a failure");
         EnvelopeReferences.Classify(envelopeRef).Should().NotBe(EnvelopeReferenceForm.Invalid);
+        if (envelopeRef == EnvelopeReferences.LegacyReference)
+            result.Notes.Should().Equal(EnvelopeReferences.LegacyDiagnostic);
+        else
+            result.Notes.Should().BeEmpty();
     }
 
     [Fact]
@@ -472,5 +476,248 @@ public class EvidenceV2Tests
 
         await seal.Should().ThrowAsync<SigillException>().WithMessage("*production-profile*");
         handler.Requests.Should().BeEmpty();
+    }
+
+    // ── Round-4 regressions: a verifier that really compares digests ─────────
+
+    private static string B64Url(string json) =>
+        Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(json)).Replace('+', '-').Replace('/', '_').TrimEnd('=');
+
+    private static string Header(string alg, params string[] pars) =>
+        B64Url(new JsonObject
+        {
+            ["alg"] = alg,
+            ["sigD"] = new JsonObject { ["pars"] = new JsonArray(pars.Select(p => (JsonNode)p!).ToArray()) },
+        }.ToJsonString());
+
+    /// <summary>Compares the supplied digests with what was signed, like the platform; hybrid when expected512 is given.</summary>
+    private static FakeHandler Comparing(IReadOnlyList<string> pars, IReadOnlyDictionary<string, string> expected,
+        IReadOnlyDictionary<string, string>? expected512 = null) => new((_, body) =>
+    {
+        var supplied = body["digests"]!.AsObject();
+        var verdicts = pars.Select(p => (JsonNode)new JsonObject
+        {
+            ["par"] = p, ["supplied"] = supplied.ContainsKey(p),
+            ["hashMatch"] = supplied[p]?.GetValue<string>() == expected[p],
+        }).ToArray();
+        var allMatch = pars.All(p => supplied[p]?.GetValue<string>() == expected[p]);
+        var pqc = "absent";
+        if (expected512 is not null)
+            pqc = body["digests512"] is JsonObject d512
+                ? pars.All(p => d512[p]?.GetValue<string>() == expected512[p]) ? "verified" : "failed"
+                : "not_checked";
+        return Task.FromResult(Json(new JsonObject
+        {
+            ["objects"] = new JsonObject
+            {
+                ["signatureValid"] = true, ["complete"] = allMatch && pqc is "absent" or "verified", ["pqc"] = pqc,
+                ["objectCount"] = pars.Count, ["suppliedCount"] = pars.Count(supplied.ContainsKey),
+                ["matchedCount"] = pars.Count(p => supplied[p]?.GetValue<string>() == expected[p]),
+                ["objects"] = new JsonArray(verdicts),
+                ["missing"] = new JsonArray(pars.Where(p => !supplied.ContainsKey(p)).Select(p => (JsonNode)p!).ToArray()),
+                ["unreferenced"] = new JsonArray(),
+            },
+        }));
+    });
+
+    [Theory]
+    [InlineData(EnvelopeReferences.LocatorReference)]
+    [InlineData(EnvelopeReferences.LegacyReference)]
+    public async Task Verify_RefusesAPayloadUnderEitherEnvelopeReference(string reserved)
+    {
+        // Codex R4: supplying the ORIGINAL envelope bytes under the envelope key used to replace the SDK's own digest,
+        // so an edited envelope verified.
+        var artifact = ArtifactSigned(EnvelopeReferences.LocatorReference, new[] { "objects/p" }, "ignored", ("objects/p", "prompt"));
+        var original = EnvelopeHashing.Canonicalize(artifact.Envelope);
+        artifact.Envelope["purpose"] = "edited after sealing";
+        var handler = Verdict(EnvelopeReferences.LocatorReference, "objects/p");
+        using var client = Client(handler);
+
+        var verify = () => client.VerifyEvidenceV2Async(artifact,
+            new Dictionary<string, byte[]> { [reserved] = original, ["objects/p"] = "p"u8.ToArray() });
+
+        await verify.Should().ThrowAsync<SigillException>().WithMessage("*reserved*");
+        handler.Requests.Should().BeEmpty();
+    }
+
+    [Theory]
+    [InlineData(EnvelopeReferences.LocatorReference, false)]
+    [InlineData(EnvelopeReferences.LegacyReference, false)]
+    [InlineData(EnvelopeReferences.LocatorReference, true)]
+    [InlineData(EnvelopeReferences.LegacyReference, true)]
+    public async Task Verify_AnEditedEnvelopeFails_InBothForms(string envelopeRef, bool hybrid)
+    {
+        var prompt = "p"u8.ToArray();
+        var artifact = ArtifactSigned(envelopeRef, new[] { "objects/p" }, "ignored", ("objects/p", "prompt"));
+        var canonical = EnvelopeHashing.Canonicalize(artifact.Envelope);
+        var pars = new[] { envelopeRef, "objects/p" };
+        var expected = new Dictionary<string, string> { [envelopeRef] = Sha256Hex(canonical), ["objects/p"] = Sha256Hex(prompt) };
+        Dictionary<string, string>? expected512 = null;
+        if (hybrid)
+        {
+            artifact.Signature["signatures"]!.AsArray().Add(new JsonObject { ["protected"] = Header("ML-DSA-87", pars), ["signature"] = "cA" });
+            expected512 = new() { [envelopeRef] = Sha512Hex(canonical), ["objects/p"] = Sha512Hex(prompt) };
+        }
+        var payloads = new Dictionary<string, byte[]> { ["objects/p"] = prompt };
+
+        using (var client = Client(Comparing(pars, expected, expected512)))
+            (await client.VerifyEvidenceV2Async(artifact, payloads)).Ok.Should().BeTrue("the untouched artifact verifies");
+
+        artifact.Envelope["purpose"] = "edited after sealing";
+        using (var client = Client(Comparing(pars, expected, expected512)))
+        {
+            var result = await client.VerifyEvidenceV2Async(artifact, payloads);
+            result.Ok.Should().BeFalse();
+            result.Objects.Single(o => o.Uri == envelopeRef).HashMatch.Should().BeFalse();
+        }
+    }
+
+    [Fact]
+    public async Task Verify_HybridLocatorSeal_KeysSha512ByTheLocatorReference()
+    {
+        var prompt = "p"u8.ToArray();
+        var pars = new[] { EnvelopeReferences.LocatorReference, "objects/p" };
+        var artifact = ArtifactSigned(pars[0], new[] { "objects/p" }, "ignored", ("objects/p", "prompt"));
+        artifact.Signature["signatures"]!.AsArray().Add(new JsonObject { ["protected"] = Header("ML-DSA-87", pars), ["signature"] = "cA" });
+        var canonical = EnvelopeHashing.Canonicalize(artifact.Envelope);
+        var handler = Comparing(pars,
+            new Dictionary<string, string> { [pars[0]] = Sha256Hex(canonical), ["objects/p"] = Sha256Hex(prompt) },
+            new Dictionary<string, string> { [pars[0]] = Sha512Hex(canonical), ["objects/p"] = Sha512Hex(prompt) });
+        using var client = Client(handler);
+
+        var result = await client.VerifyEvidenceV2Async(artifact, new Dictionary<string, byte[]> { ["objects/p"] = prompt });
+
+        var d512 = handler.Requests.Single().Body["digests512"]!.AsObject();
+        d512.Select(kv => kv.Key).Should().BeEquivalentTo(pars);
+        d512[pars[0]]!.GetValue<string>().Should().Be(Sha512Hex(canonical));
+        result.Pqc.Should().Be("verified");
+        result.Ok.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task Verify_PqcEntryWithAnotherReferenceForm_FailsAlignment()
+    {
+        var artifact = ArtifactSigned(EnvelopeReferences.LocatorReference, new[] { "objects/p" }, "ignored", ("objects/p", "prompt"));
+        artifact.Signature["signatures"]!.AsArray().Add(new JsonObject
+        {
+            ["protected"] = Header("ML-DSA-87", EnvelopeReferences.LegacyReference, "objects/p"), ["signature"] = "cA",
+        });
+        using var client = Client(Verdict(EnvelopeReferences.LocatorReference, "objects/p"));
+
+        var result = await client.VerifyEvidenceV2Async(artifact, new Dictionary<string, byte[]> { ["objects/p"] = "p"u8.ToArray() });
+
+        result.AlignmentOk.Should().BeFalse();
+        result.Ok.Should().BeFalse();
+        result.Issues.Should().Contain(i => i.Contains("ML-DSA"));
+    }
+
+    public static IEnumerable<object[]> StructurallyInvalidHeaders()
+    {
+        foreach (var form in new[] { EnvelopeReferences.LocatorReference, EnvelopeReferences.LegacyReference })
+        {
+            yield return new object[] { "duplicate-member", form,
+                B64Url($$$"""{"alg":"RS256","alg":"RS256","sigD":{"pars":["{{{form}}}","objects/p"]}}""") };
+            yield return new object[] { "duplicate-pars", form,
+                B64Url($$$"""{"alg":"RS256","sigD":{"pars":["evil"],"pars":["{{{form}}}","objects/p"]}}""") };
+            yield return new object[] { "missing-pars", form, B64Url("""{"alg":"RS256","sigD":{}}""") };
+            yield return new object[] { "non-string-pars", form, B64Url($$$"""{"alg":"RS256","sigD":{"pars":["{{{form}}}",7]}}""") };
+            yield return new object[] { "two-classical", form, Header("RS256", form, "objects/p") };
+        }
+    }
+
+    [Theory]
+    [MemberData(nameof(StructurallyInvalidHeaders))]
+    public async Task Verify_RefusesAStructurallyInvalidHeader_EvenWhenTheCryptoTierIsLenient(string name, string form, string protectedB64)
+    {
+        var artifact = ArtifactSigned(form, new[] { "objects/p" }, "ignored", ("objects/p", "prompt"));
+        var entries = artifact.Signature["signatures"]!.AsArray();
+        if (name == "two-classical")
+            entries.Add(new JsonObject { ["protected"] = protectedB64, ["signature"] = "c2ln" });
+        else
+            entries[0]!["protected"] = protectedB64;
+        using var client = Client(Verdict(form, "objects/p")); // a lenient service that reports everything fine
+
+        var result = await client.VerifyEvidenceV2Async(artifact, new Dictionary<string, byte[]> { ["objects/p"] = "p"u8.ToArray() });
+
+        result.AlignmentOk.Should().BeFalse(name);
+        result.Ok.Should().BeFalse(name);
+        result.Notes.Should().BeEmpty("a form is only reported from a structurally valid header");
+    }
+
+    [Fact]
+    public async Task SignObjectHashes_EnforcesTheProfile_ExceptForReusedUris()
+    {
+        var handler = new FakeHandler((_, _) => Task.FromResult(Json(new JsonObject
+        {
+            ["signature"] = new JsonObject { ["signatures"] = new JsonArray() },
+        })));
+        using var client = Client(handler);
+        var hex = new string('a', 64);
+        SignedObjectDigest Obj(string uri) => new() { Uri = uri, HashHex = hex };
+
+        var legacy = () => client.SignObjectHashesAsync(hex, new[] { Obj("urn:uuid:6f1c2a4e-0b7d-4c1e-9a52-3d8f0e1b7c90") }, Guid.NewGuid());
+        await legacy.Should().ThrowAsync<SigillException>().WithMessage("*production-profile*");
+        foreach (var reserved in new[] { EnvelopeReferences.LocatorReference, EnvelopeReferences.LegacyReference })
+        {
+            var r = () => client.SignObjectHashesAsync(hex, new[] { Obj(reserved) }, Guid.NewGuid(),
+                new ObjectSignOptions { ReusedUris = new[] { reserved } });
+            await r.Should().ThrowAsync<SigillException>().WithMessage("*reserved*", "reuse never admits a reserved name");
+        }
+        handler.Requests.Should().BeEmpty();
+
+        // An evaluation of a run that straddles the upgrade re-references the control set its Control Artifact
+        // sealed under a legacy URI: the transition allowance (spec §10.1). Its own new objects still conform.
+        const string reusedLegacy = "urn:uuid:00000000-0000-4000-8000-000000000001";
+        try
+        {
+            await client.SignObjectHashesAsync(hex, new[] { Obj("objects/observed"), Obj(reusedLegacy) }, Guid.NewGuid(),
+                new ObjectSignOptions { ReusedUris = new[] { reusedLegacy } });
+        }
+        catch (SigillException e) when (!e.Message.Contains("production-profile") && !e.Message.Contains("reserved")) { }
+        handler.Requests.Should().ContainSingle().Which.Body["objects"]!.AsArray()
+            .Select(o => o!["uri"]!.GetValue<string>()).Should().Equal("objects/observed", reusedLegacy);
+    }
+
+    // Codex round-4 reviewer cases, kept verbatim as regressions.
+    [Theory]
+    [InlineData(EnvelopeReferences.LocatorReference)]
+    [InlineData(EnvelopeReferences.LegacyReference)]
+    public async Task Codex_ExternalPayloadMustNotReplaceEnvelopeDigest(string envelopeRef)
+    {
+        var artifact = ArtifactSigned(envelopeRef, Array.Empty<string>(), "ignored");
+        var original = EnvelopeHashing.Canonicalize(artifact.Envelope);
+        artifact.Envelope["purpose"]!["category"] = "tampered-purpose";
+        var handler = new FakeHandler((_, body) => {
+            var match = body["digests"]![envelopeRef]!.GetValue<string>() == Sha256Hex(original);
+            return Task.FromResult(Json(new JsonObject {
+                ["objects"] = new JsonObject {
+                    ["signatureValid"] = true, ["complete"] = match, ["pqc"] = "absent",
+                    ["objectCount"] = 1, ["suppliedCount"] = 1, ["matchedCount"] = match ? 1 : 0,
+                    ["objects"] = new JsonArray(new JsonObject {
+                        ["par"] = envelopeRef, ["supplied"] = true, ["hashMatch"] = match
+                    }), ["missing"] = new JsonArray(), ["unreferenced"] = new JsonArray()
+                }
+            }));
+        });
+        using var client = Client(handler);
+        try {
+            var result = await client.VerifyEvidenceV2Async(artifact,
+                new Dictionary<string, byte[]> { [envelopeRef] = original });
+            result.Ok.Should().BeFalse("the displayed envelope was modified after sealing");
+        } catch (SigillException) { }
+    }
+
+    [Theory]
+    [InlineData(EnvelopeReferences.LocatorReference)]
+    [InlineData(EnvelopeReferences.LegacyReference)]
+    public async Task Codex_DuplicateProtectedHeaderMustNotPassGenericProfile(string envelopeRef)
+    {
+        var artifact = ArtifactSigned(envelopeRef, Array.Empty<string>(), "ignored");
+        var raw = "{\"alg\":\"RS256\",\"alg\":\"RS256\",\"sigD\":{\"pars\":[\"" + envelopeRef + "\"]}}";
+        artifact.Signature["signatures"]![0]!["protected"] = Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(raw))
+            .Replace('+','-').Replace('/','_').TrimEnd('=');
+        using var client = Client(Verdict(envelopeRef));
+        var result = await client.VerifyEvidenceV2Async(artifact);
+        result.Ok.Should().BeFalse("the profile must reject the non-I-JSON protected header even with a lenient crypto service");
     }
 }
