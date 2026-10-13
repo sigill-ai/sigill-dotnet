@@ -149,8 +149,6 @@ public static class AgentProfiles
 
     // ── internals shared by the recorder and the verifier ────────────────────
 
-    internal const string EnvelopeUri = AiEvidenceV2Artifact.EnvelopeUri;
-
     private static readonly UTF8Encoding StrictUtf8 = new(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
 
     internal static bool TryString(JsonNode? node, out string value)

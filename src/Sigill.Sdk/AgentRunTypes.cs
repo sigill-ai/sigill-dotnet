@@ -77,8 +77,11 @@ public sealed record AgentRunObject
 
     public string ContentType { get; init; } = "application/octet-stream";
 
-    /// <summary>Opaque URI; generated as <c>urn:uuid:</c> when omitted. No personal data.</summary>
-    public string Uri { get; init; } = "urn:uuid:" + Guid.NewGuid();
+    /// <summary>
+    /// Opaque URI; generated as <c>objects/&lt;uuid&gt;</c> when omitted. A URI you set must be a production-profile
+    /// reference (AiEvidenceEnvelopeV2 §3.1) and carry no personal data.
+    /// </summary>
+    public string Uri { get; init; } = EnvelopeReferences.NewObjectUri();
 
     /// <summary>A UTF-8 text object.</summary>
     public static AgentRunObject Text(string role, string text, string contentType = "text/plain") =>

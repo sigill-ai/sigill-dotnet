@@ -15,7 +15,11 @@ namespace Sigill.Sdk;
 /// </summary>
 public sealed record SignedObjectDigest
 {
-    /// <summary>Opaque URI identifying the object (byte-exact unique; <c>urn:sigill:envelope</c> is reserved).</summary>
+    /// <summary>
+    /// Opaque URI identifying the object (byte-exact unique; <c>sigill-envelope.json</c> and <c>urn:sigill:envelope</c>
+    /// are reserved). New objects use the AiEvidenceEnvelopeV2 §3.1 production profile; an object an earlier seal
+    /// already bound keeps its URI.
+    /// </summary>
     public required string Uri { get; init; }
 
     /// <summary>SHA-256 of the object bytes, lowercase hex.</summary>

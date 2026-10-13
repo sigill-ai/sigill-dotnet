@@ -27,7 +27,7 @@ public sealed record BlindObjectsVerdict
     public required bool SignatureValid { get; init; }
     public required bool Complete { get; init; }
 
-    /// <summary>Per signed URI (including <c>urn:sigill:envelope</c>): did the supplied digest match?</summary>
+    /// <summary>Per signed URI (including the envelope reference, <c>sigD.pars[0]</c>): did the supplied digest match?</summary>
     public required IReadOnlyList<(string Uri, bool HashMatch)> Objects { get; init; }
 
     public IReadOnlyList<string> Missing { get; init; } = Array.Empty<string>();
@@ -316,7 +316,7 @@ public static class AgentRunVerifier
         foreach (var o in (envelope["objects"] as JsonArray ?? new JsonArray()).OfType<JsonObject>())
         {
             if (S(o["uri"]) is not { } uri) continue;
-            if (uri == AgentProfiles.EnvelopeUri) { sa.Conformance.Add("objects[] uses the reserved envelope URI"); continue; }
+            if (EnvelopeReferences.IsReserved(uri)) { sa.Conformance.Add("objects[] uses the reserved envelope URI"); continue; }
             if (!seen.Add(uri)) { sa.Conformance.Add($"objects[] lists '{uri}' more than once"); continue; }
             sa.Objects.Add(new SignedObject(uri, S(o["role"]) ?? "?", S(o["contentType"]), AgentProfiles.Int(o["sizeBytes"])));
         }
@@ -361,10 +361,12 @@ public static class AgentRunVerifier
         if (classical.Count != 1 || classical[0].Header is not { } header) return null;
         if (header["sigD"] is not JsonObject sigD) return "the signature carries no sigD object";
         var objects = (envelope["objects"] as JsonArray ?? new JsonArray()).Select(o => o as JsonObject).ToList();
-        var expected = new List<string?> { AgentProfiles.EnvelopeUri };
-        expected.AddRange(objects.Select(o => AgentProfiles.Str(o?["uri"])));
         var pars = (sigD["pars"] as JsonArray)?.Select(AgentProfiles.Str).ToList();
-        if (pars is null || !pars.SequenceEqual(expected))
+        // pars[0] is one of the two envelope references, read from this very signature (v2 §5.2 rule 2).
+        var expected = new List<string?> { pars?.FirstOrDefault() };
+        expected.AddRange(objects.Select(o => AgentProfiles.Str(o?["uri"])));
+        if (pars is null || EnvelopeReferences.Classify(pars.FirstOrDefault()) == EnvelopeReferenceForm.Invalid
+            || !pars.SequenceEqual(expected))
             return "sigD.pars is not the envelope followed by objects[] in order";
         if (sigD["hashV"] is not JsonArray hashV || hashV.Count != pars.Count)
             return "sigD.hashV does not have one entry per signed object";
@@ -444,7 +446,8 @@ public static class AgentRunVerifier
         }
         try
         {
-            digests[AgentProfiles.EnvelopeUri] = EnvelopeHashing.HashHex(EnvelopeHashing.Canonicalize(sa.Env));
+            var envelopeKey = EnvelopeReferences.DigestKeyFor(sa.Jws);
+            digests[envelopeKey] = EnvelopeHashing.HashHex(EnvelopeHashing.Canonicalize(sa.Env));
             var r = await blind(sa.Jws, digests, ct).ConfigureAwait(false)
                 ?? throw new SigillException("blind verifier returned no result");
             c.SignatureValid = r.SignatureValid;
@@ -469,7 +472,7 @@ public static class AgentRunVerifier
                     c.Findings.Add($"{label}: object '{o.Uri}' ({o.Role}) no longer matches its signed digest.");
                 }
             }
-            var env = r.Objects.Where(x => x.Uri == AgentProfiles.EnvelopeUri).Select(x => (bool?)x.HashMatch).FirstOrDefault();
+            var env = r.Objects.Where(x => x.Uri == envelopeKey).Select(x => (bool?)x.HashMatch).FirstOrDefault();
             c.EnvelopeCovered = env == true;
             if (env != true)
             {

@@ -84,7 +84,7 @@ public class EvidenceV2Tests
             new[]
             {
                 new AiEvidenceV2Payload { Role = "prompt", Bytes = prompt, ContentType = "text/plain", Encoding = "utf-8" },
-                new AiEvidenceV2Payload { Role = "output", Bytes = output, Uri = "urn:test:out", ContentType = "text/markdown" },
+                new AiEvidenceV2Payload { Role = "output", Bytes = output, Uri = "objects/test-out", ContentType = "text/markdown" },
             },
             Guid.NewGuid());
 
@@ -100,8 +100,9 @@ public class EvidenceV2Tests
         var objects = body["objects"]!.AsArray();
         objects.Count.Should().Be(2);
         objects[0]!["hashHex"]!.GetValue<string>().Should().Be(Sha256Hex(prompt));
-        objects[0]!["uri"]!.GetValue<string>().Should().StartWith("urn:uuid:", "generated URIs are opaque by default");
-        objects[1]!["uri"]!.GetValue<string>().Should().Be("urn:test:out");
+        objects[0]!["uri"]!.GetValue<string>().Should().MatchRegex("^objects/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+            "generated URIs are opaque production-profile references by default (spec §3.1)");
+        objects[1]!["uri"]!.GetValue<string>().Should().Be("objects/test-out");
 
         // The envelope hash binds the SDK's own canonicalization.
         var expectedHash = Sha256Hex(EnvelopeHashing.Canonicalize(artifact.Envelope));
@@ -155,11 +156,16 @@ public class EvidenceV2Tests
             Guid.NewGuid());
         await reserved.Should().ThrowAsync<SigillException>().WithMessage("*reserved*");
 
+        var reservedLocator = () => client.SealEvidenceV2Async(CoreEnvelope(),
+            new[] { new AiEvidenceV2Payload { Role = "prompt", Bytes = bytes, Uri = "sigill-envelope.json" } },
+            Guid.NewGuid());
+        await reservedLocator.Should().ThrowAsync<SigillException>().WithMessage("*reserved*");
+
         var dup = () => client.SealEvidenceV2Async(CoreEnvelope(),
             new[]
             {
-                new AiEvidenceV2Payload { Role = "prompt", Bytes = bytes, Uri = "urn:t:a" },
-                new AiEvidenceV2Payload { Role = "output", Bytes = bytes, Uri = "urn:t:a" },
+                new AiEvidenceV2Payload { Role = "prompt", Bytes = bytes, Uri = "objects/a" },
+                new AiEvidenceV2Payload { Role = "output", Bytes = bytes, Uri = "objects/a" },
             },
             Guid.NewGuid());
         await dup.Should().ThrowAsync<SigillException>().WithMessage("*Duplicate*");
@@ -172,7 +178,12 @@ public class EvidenceV2Tests
         handler.Requests.Should().BeEmpty("validation failures must not reach the network");
     }
 
-    private static AiEvidenceV2Artifact ArtifactWith(string envelopeHex, params (string Uri, string Role)[] objects)
+    private static AiEvidenceV2Artifact ArtifactWith(string envelopeHex, params (string Uri, string Role)[] objects) =>
+        ArtifactSigned(EnvelopeReferences.LegacyReference, objects.Select(o => o.Uri).ToArray(), envelopeHex, objects);
+
+    /// <summary>An artifact whose classical header signs <c>pars = [envelopeRef, signedObjects…]</c>.</summary>
+    private static AiEvidenceV2Artifact ArtifactSigned(
+        string envelopeRef, string[] signedObjects, string envelopeHex, params (string Uri, string Role)[] objects)
     {
         var envObjects = new JsonArray(objects
             .Select(o => (JsonNode)new JsonObject { ["uri"] = o.Uri, ["role"] = o.Role }).ToArray());
@@ -180,9 +191,19 @@ public class EvidenceV2Tests
         envelope["schemaName"] = "AiEvidenceEnvelope";
         envelope["schemaVersion"] = "2";
         envelope["objects"] = envObjects;
+        var header = new JsonObject
+        {
+            ["alg"] = "RS256",
+            ["sigD"] = new JsonObject
+            {
+                ["pars"] = new JsonArray(new[] { envelopeRef }.Concat(signedObjects).Select(u => (JsonNode)u!).ToArray()),
+            },
+        };
+        var protectedB64 = Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(header.ToJsonString()))
+            .Replace('+', '-').Replace('/', '_').TrimEnd('=');
         var signature = new JsonObject
         {
-            ["signatures"] = new JsonArray(new JsonObject { ["protected"] = "e30", ["signature"] = "c2ln" }),
+            ["signatures"] = new JsonArray(new JsonObject { ["protected"] = protectedB64, ["signature"] = "c2ln" }),
         };
         return new AiEvidenceV2Artifact(envelope, signature, envelopeHex);
     }
@@ -315,7 +336,7 @@ public class EvidenceV2Tests
     public async Task Verify_SurfacesMisalignment_AndUncoveredRoles()
     {
         // Envelope claims urn:t:prompt, but the signature signed urn:t:evil.
-        var artifact = ArtifactWith("ignored", ("urn:t:prompt", "prompt"));
+        var artifact = ArtifactSigned(EnvelopeReferences.LegacyReference, new[] { "urn:t:evil" }, "ignored", ("urn:t:prompt", "prompt"));
         var handler = new FakeHandler((_, _) => Task.FromResult(Json(new JsonObject
         {
             ["objects"] = new JsonObject
@@ -337,5 +358,119 @@ public class EvidenceV2Tests
         result.MissingRoles.Should().ContainSingle().Which.Should().Be("prompt");
         result.Ok.Should().BeFalse();
         result.Issues.Should().Contain(i => i.Contains("align"));
+    }
+
+    // ── v2.1 reference form (spec §3.1, §5.2, §5.4) ───────────────────────────
+
+    private static FakeHandler Verdict(params string[] pars) => new((_, _) => Task.FromResult(Json(new JsonObject
+    {
+        ["objects"] = new JsonObject
+        {
+            ["signatureValid"] = true, ["complete"] = true, ["pqc"] = "absent",
+            ["objectCount"] = pars.Length, ["suppliedCount"] = pars.Length, ["matchedCount"] = pars.Length,
+            ["objects"] = new JsonArray(pars.Select(p =>
+                (JsonNode)new JsonObject { ["par"] = p, ["supplied"] = true, ["hashMatch"] = true }).ToArray()),
+            ["missing"] = new JsonArray(), ["unreferenced"] = new JsonArray(),
+        },
+    })));
+
+    [Theory]
+    [InlineData(EnvelopeReferences.LocatorReference)]
+    [InlineData(EnvelopeReferences.LegacyReference)]
+    public async Task Verify_KeysTheEnvelopeDigestByTheReferenceTheSignatureCarries(string envelopeRef)
+    {
+        var prompt = "p"u8.ToArray();
+        var artifact = ArtifactSigned(envelopeRef, new[] { "objects/p" }, "ignored", ("objects/p", "prompt"));
+        var handler = Verdict(envelopeRef, "objects/p");
+        using var client = Client(handler);
+
+        var result = await client.VerifyEvidenceV2Async(artifact, new Dictionary<string, byte[]> { ["objects/p"] = prompt });
+
+        var digests = handler.Requests.Single().Body["digests"]!.AsObject();
+        digests.Select(kv => kv.Key).Should().BeEquivalentTo(new[] { envelopeRef, "objects/p" },
+            "the envelope digest travels under this signature's own reference, never under both");
+        digests[envelopeRef]!.GetValue<string>().Should().Be(Sha256Hex(EnvelopeHashing.Canonicalize(artifact.Envelope)));
+        result.AlignmentOk.Should().BeTrue();
+        result.Ok.Should().BeTrue("a legacy reference is a diagnostic, never a failure");
+        EnvelopeReferences.Classify(envelopeRef).Should().NotBe(EnvelopeReferenceForm.Invalid);
+    }
+
+    [Fact]
+    public async Task Verify_RejectsAnUnknownEnvelopeReference()
+    {
+        var artifact = ArtifactSigned("envelope.json", new[] { "objects/p" }, "ignored", ("objects/p", "prompt"));
+        var handler = Verdict("envelope.json", "objects/p");
+        using var client = Client(handler);
+
+        var result = await client.VerifyEvidenceV2Async(artifact, new Dictionary<string, byte[]> { ["objects/p"] = "p"u8.ToArray() });
+
+        handler.Requests.Single().Body["digests"]!.AsObject().ContainsKey("envelope.json")
+            .Should().BeFalse("an unknown name is never trusted as the envelope");
+        result.AlignmentOk.Should().BeFalse();
+        result.Ok.Should().BeFalse();
+        result.Issues.Should().Contain(i => i.Contains("not an envelope reference"));
+    }
+
+    [Theory]
+    [InlineData(EnvelopeReferences.LocatorReference)]
+    [InlineData(EnvelopeReferences.LegacyReference)]
+    public async Task Verify_FailsWhenAnObjectUsesAReservedName(string reserved)
+    {
+        var artifact = ArtifactSigned(EnvelopeReferences.LocatorReference, new[] { reserved }, "ignored", (reserved, "prompt"));
+        using var client = Client(Verdict(EnvelopeReferences.LocatorReference, reserved));
+
+        var result = await client.VerifyEvidenceV2Async(artifact);
+
+        result.Ok.Should().BeFalse();
+        result.Issues.Should().Contain(i => i.Contains("reserved"));
+    }
+
+    [Theory]
+    [InlineData("", false)]
+    [InlineData(".", false)]
+    [InlineData("..", false)]
+    [InlineData("a/", false)]
+    [InlineData("/a", false)]
+    [InlineData("a//b", false)]
+    [InlineData("a\\b", false)]
+    [InlineData("a b", false)]
+    [InlineData("a%20b", false)]
+    [InlineData("a?b", false)]
+    [InlineData("a#b", false)]
+    [InlineData("urn:x", false)]
+    [InlineData("https://x", false)]
+    [InlineData("objects/../x", false)]
+    [InlineData("a\tb", false)]
+    [InlineData("ø", false)]
+    [InlineData("a", true)]
+    [InlineData("objects/6f1c2a4e-0b7d-4c1e-9a52-3d8f0e1b7c90", true)]
+    [InlineData("x/y.z/A_b~c-d", true)]
+    [InlineData("...", true)]
+    public void ProductionProfile_Boundaries(string uri, bool expected) =>
+        EnvelopeReferences.IsProductionReference(uri).Should().Be(expected, uri);
+
+    [Fact]
+    public void NewObjectUri_IsInTheProductionProfile()
+    {
+        var uri = EnvelopeReferences.NewObjectUri();
+        EnvelopeReferences.IsProductionReference(uri).Should().BeTrue();
+        uri.Should().MatchRegex("^objects/[0-9a-f-]{36}$");
+        EnvelopeReferences.IsReserved(uri).Should().BeFalse();
+    }
+
+    [Theory]
+    [InlineData("urn:uuid:6f1c2a4e-0b7d-4c1e-9a52-3d8f0e1b7c90")]
+    [InlineData("contract olsen.pdf")]
+    [InlineData("https://example.com/x")]
+    public async Task Seal_RejectsCallerUrisOutsideTheProductionProfile(string uri)
+    {
+        var handler = new FakeHandler((_, _) => Task.FromResult(Json(new JsonObject())));
+        using var client = Client(handler);
+
+        var seal = () => client.SealEvidenceV2Async(CoreEnvelope(),
+            new[] { new AiEvidenceV2Payload { Role = "prompt", Bytes = "x"u8.ToArray(), Uri = uri } }, Guid.NewGuid());
+
+        await seal.Should().ThrowAsync<SigillException>().WithMessage("*production-profile*");
+        handler.Requests.Should().BeEmpty();
     }
 }

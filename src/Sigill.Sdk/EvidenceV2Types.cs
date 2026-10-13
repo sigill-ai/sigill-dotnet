@@ -11,10 +11,10 @@ namespace Sigill.Sdk;
 /// <summary>
 /// One content payload of an AI evidence v2 record. The bytes NEVER leave the
 /// machine — the SDK hashes them locally and transmits digests only (the blind
-/// contract, spec §7.1/§8). URIs are opaque identifiers; when omitted the SDK
-/// generates a <c>urn:uuid:</c> — the normative choice for remote paths (spec
-/// §3.1): human-meaningful names (filenames, paths) belong in
-/// <see cref="Metadata"/>, which stays inside the envelope.
+/// contract, spec §7.1/§8). URIs are opaque locator references; when omitted
+/// the SDK generates <c>objects/&lt;uuid&gt;</c>, and a URI you set must match
+/// the spec §3.1 production profile. Human-meaningful names (filenames, paths)
+/// belong in <see cref="Metadata"/>, which stays inside the envelope.
 /// </summary>
 public sealed record AiEvidenceV2Payload
 {
@@ -24,7 +24,7 @@ public sealed record AiEvidenceV2Payload
     /// <summary>The payload bytes as fed to / produced by the model. Hashed locally, never transmitted.</summary>
     public required byte[] Bytes { get; init; }
 
-    /// <summary>Opaque URI identifying the payload. Default: a generated <c>urn:uuid:</c>.</summary>
+    /// <summary>Opaque URI identifying the payload. Default: a generated <c>objects/&lt;uuid&gt;</c>.</summary>
     public string? Uri { get; init; }
 
     /// <summary>MIME type, e.g. <c>text/plain</c>. Plain type/subtype only — it is persisted by Sigill.</summary>
@@ -66,8 +66,12 @@ public sealed record EvidenceV2SealOptions
 /// </summary>
 public sealed class AiEvidenceV2Artifact
 {
-    /// <summary>The reserved sigD URI of the envelope (object 0).</summary>
-    public const string EnvelopeUri = "urn:sigill:envelope";
+    /// <summary>
+    /// The v2.0 envelope reference (<c>sigD.pars[0]</c> of seals made before v2.1). New seals carry
+    /// <see cref="EnvelopeReferences.LocatorReference"/>; read a seal's form with
+    /// <see cref="EnvelopeReferences.Classify"/>. Both are reserved.
+    /// </summary>
+    public const string EnvelopeUri = EnvelopeReferences.LegacyReference;
 
     /// <summary>The artifact media type / default envelope cty.</summary>
     public const string MediaType = "application/vnd.sigill.ai-evidence+json";

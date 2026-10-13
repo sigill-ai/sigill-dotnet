@@ -665,9 +665,8 @@ public sealed class SigillClient : ISigillAiEvidenceClient, IDisposable
             if (p.Bytes is null) throw new ArgumentNullException(nameof(payloads), "payload Bytes is required");
             if (!V2Roles.Contains(p.Role))
                 throw new SigillException($"Invalid payload role '{p.Role}' — expected one of: {string.Join(", ", V2Roles)}.");
-            var uri = string.IsNullOrWhiteSpace(p.Uri) ? $"urn:uuid:{Guid.NewGuid()}" : p.Uri.Trim();
-            if (string.Equals(uri, AiEvidenceV2Artifact.EnvelopeUri, StringComparison.Ordinal))
-                throw new SigillException($"'{AiEvidenceV2Artifact.EnvelopeUri}' is reserved for the envelope itself.");
+            var uri = string.IsNullOrWhiteSpace(p.Uri) ? EnvelopeReferences.NewObjectUri() : p.Uri.Trim();
+            EnvelopeReferences.RequireEmittable(uri);
             if (!seenUris.Add(uri))
                 throw new SigillException($"Duplicate payload URI '{uri}' — URIs are compared byte-exactly and must be unique.");
 
@@ -745,8 +744,10 @@ public sealed class SigillClient : ISigillAiEvidenceClient, IDisposable
                 throw new SigillException("Every object needs a non-empty opaque URI.");
             if (!string.Equals(uri, uri.Trim(), StringComparison.Ordinal))
                 throw new SigillException($"Object URI '{uri}' has leading or trailing whitespace — URIs are signed byte-exactly and are never normalized.");
-            if (string.Equals(uri, AiEvidenceV2Artifact.EnvelopeUri, StringComparison.Ordinal))
-                throw new SigillException($"'{AiEvidenceV2Artifact.EnvelopeUri}' is reserved for the envelope itself.");
+            // Reserved names only: this low-level call also re-seals objects an earlier seal bound under a legacy
+            // URI (a Control Evaluation reuses its Control Artifact's control set), which must keep that URI.
+            if (EnvelopeReferences.IsReserved(uri))
+                throw new SigillException($"'{uri}' is reserved for the envelope itself.");
             if (!seenUris.Add(uri))
                 throw new SigillException($"Duplicate object URI '{uri}' — URIs are compared byte-exactly and must be unique.");
             if (!IsHex(o.HashHex, 64))
@@ -865,11 +866,14 @@ public sealed class SigillClient : ISigillAiEvidenceClient, IDisposable
         payloads ??= new Dictionary<string, byte[]>();
 
         // Hashing anonymity: only digests travel. The envelope digest is just
-        // the entry for urn:sigill:envelope, recomputed locally with JCS.
+        // the entry for the envelope reference this signature carries
+        // (sigill-envelope.json, or urn:sigill:envelope before v2.1 — spec
+        // §5.2 rule 2), recomputed locally with JCS. Never both.
         var canonical = EnvelopeHashing.Canonicalize(artifact.Envelope);
+        var envelopeKey = EnvelopeReferences.DigestKeyFor(artifact.Signature);
         var digests = new Dictionary<string, string>(StringComparer.Ordinal)
         {
-            [AiEvidenceV2Artifact.EnvelopeUri] = EnvelopeHashing.HashHex(canonical),
+            [envelopeKey] = EnvelopeHashing.HashHex(canonical),
         };
         foreach (var (uri, bytes) in payloads)
             digests[uri] = EnvelopeHashing.HashHex(bytes);
@@ -882,7 +886,7 @@ public sealed class SigillClient : ISigillAiEvidenceClient, IDisposable
         {
             digests512 = new Dictionary<string, string>(StringComparer.Ordinal)
             {
-                [AiEvidenceV2Artifact.EnvelopeUri] = EnvelopeHashing.HashHex(canonical, "SHA-512"),
+                [envelopeKey] = EnvelopeHashing.HashHex(canonical, "SHA-512"),
             };
             foreach (var (uri, bytes) in payloads)
                 digests512[uri] = EnvelopeHashing.HashHex(bytes, "SHA-512");
@@ -906,8 +910,20 @@ public sealed class SigillClient : ISigillAiEvidenceClient, IDisposable
         // 1:1 order-preserving alignment between objects[] and pars[1…].
         var envelopeUris = (artifact.Envelope["objects"] as JsonArray ?? new JsonArray())
             .OfType<JsonObject>().Select(o => o["uri"]?.GetValue<string>() ?? "").ToList();
-        var signedPayloadUris = signedUris.Where(u => u != AiEvidenceV2Artifact.EnvelopeUri).ToList();
-        var alignmentOk = envelopeUris.Count == signedPayloadUris.Count
+        // The signed object list comes from the classical header itself (pars, in signed order); the verdict list is
+        // the fallback when that header cannot be read.
+        var signedPars = EnvelopeReferences.SignedPars(artifact.Signature);
+        var envelopeForm = EnvelopeReferences.Classify(signedPars?.FirstOrDefault() ?? envelopeKey);
+        var signedPayloadUris = signedPars is { Count: > 0 }
+            ? signedPars.Skip(1).ToList()
+            : signedUris.Where(u => u != envelopeKey).ToList();
+        if (envelopeForm == EnvelopeReferenceForm.Invalid)
+            issues.Add("The signature's first sigD object is not an envelope reference (sigill-envelope.json or urn:sigill:envelope).");
+        var reservedObject = envelopeUris.Any(EnvelopeReferences.IsReserved);
+        if (reservedObject)
+            issues.Add("The envelope's objects[] use a reserved envelope reference as an object URI.");
+        var alignmentOk = envelopeForm != EnvelopeReferenceForm.Invalid && !reservedObject
+            && envelopeUris.Count == signedPayloadUris.Count
             && !envelopeUris.Where((u, i) => !string.Equals(u, signedPayloadUris[i], StringComparison.Ordinal)).Any();
         if (!alignmentOk)
             issues.Add("The envelope's objects[] do not align 1:1 (in order) with the signed sigD object list.");
