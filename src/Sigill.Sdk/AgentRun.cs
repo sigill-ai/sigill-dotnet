@@ -216,11 +216,18 @@ public sealed class AgentRun
     /// signed policy says <c>consequential: true</c>.
     /// <paramref name="requireTimestamp"/> timestamps this event even when the
     /// policy would not (a producer may require more, never less).
+    /// <paramref name="eventTime"/> is when the event happened, captured by the caller (default: now). It lets
+    /// a producer capture events as they happen and seal them later, in order (e.g. from a queue), while
+    /// <c>step.eventTime</c> still states the moment of the event and the signed timestamp policy is decided on
+    /// it (common rules §4). It must not lie in the future (more than <see cref="MaxEventTimeSkew"/> ahead of
+    /// this run's clock) or before the Control Artifact was created — such an event would not verify as
+    /// plausible (common rules §8).
     /// </summary>
     /// <exception cref="ArgumentException">The event would not verify; nothing was sealed and the run stays usable.</exception>
     public async Task<AgentRunArtifact> RecordAsync(
         string stepType, IReadOnlyList<AgentRunObject>? objects = null, JsonObject? fields = null,
-        bool consequential = false, bool requireTimestamp = false, CancellationToken cancellationToken = default)
+        bool consequential = false, bool requireTimestamp = false, DateTimeOffset? eventTime = null,
+        CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrEmpty(stepType)) throw new ArgumentException("stepType is required.", nameof(stepType));
         if (stepType is "run_start" or "run_end")
@@ -230,6 +237,7 @@ public sealed class AgentRun
         var reserved = fields?.Select(kv => kv.Key).Where(ReservedStepFields.Contains).OrderBy(k => k, StringComparer.Ordinal).ToList();
         if (reserved is { Count: > 0 })
             throw new ArgumentException("fields uses reserved step member(s): " + string.Join(", ", reserved), nameof(fields));
+        if (eventTime is { } supplied) CheckEventTime(supplied);
         AgentRunArtifact artifact;
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
@@ -244,7 +252,7 @@ public sealed class AgentRun
                         : $"The run has {_artifacts.Count} events; the rest of the bundle limit of {AgentRunBundle.MaxArtifacts} is reserved for run_end and {_outstanding.Count} delegation result(s).");
             var step = (JsonObject?)fields?.DeepClone() ?? new JsonObject();
             if (requireTimestamp) step["timestamp"] = "required";
-            artifact = await SealEventAsync(stepType, objects ?? Array.Empty<AgentRunObject>(), step, consequential, cancellationToken).ConfigureAwait(false);
+            artifact = await SealEventAsync(stepType, objects ?? Array.Empty<AgentRunObject>(), step, consequential, cancellationToken, eventTime).ConfigureAwait(false);
         }
         finally { _gate.Release(); }
         await NotifyAsync(artifact, artifact.Seq!.Value, cancellationToken).ConfigureAwait(false);
@@ -253,9 +261,9 @@ public sealed class AgentRun
 
     /// <summary>Retrieved context (RAG) the agent read.</summary>
     public Task<AgentRunArtifact> RecordRetrievalAsync(byte[] context, string contentType = "text/plain",
-        string? detail = null, CancellationToken cancellationToken = default) =>
+        string? detail = null, DateTimeOffset? eventTime = null, CancellationToken cancellationToken = default) =>
         RecordAsync("retrieval", new[] { Obj("retrieved-context", context, contentType) }, Detail(new JsonObject(), detail),
-            cancellationToken: cancellationToken);
+            eventTime: eventTime, cancellationToken: cancellationToken);
 
     /// <summary>
     /// A tool call the agent decided to make. <paramref name="operation"/>
@@ -265,24 +273,27 @@ public sealed class AgentRun
     /// </summary>
     public Task<AgentRunArtifact> RecordToolCallAsync(string tool, byte[] arguments, string? operation = null,
         bool consequential = false, string contentType = "application/json", string? useId = null,
-        CancellationToken cancellationToken = default) =>
+        DateTimeOffset? eventTime = null, CancellationToken cancellationToken = default) =>
         RecordAsync("tool_call", new[] { Obj("tool-arguments", arguments, contentType) },
-            new JsonObject { ["tool"] = ToolBlock(tool, operation, useId) }, consequential, cancellationToken: cancellationToken);
+            new JsonObject { ["tool"] = ToolBlock(tool, operation, useId) }, consequential, eventTime: eventTime,
+            cancellationToken: cancellationToken);
 
     /// <summary>The result a tool returned — context for the model's next turn.</summary>
     public Task<AgentRunArtifact> RecordToolResultAsync(string tool, byte[] result,
-        string contentType = "application/json", string? useId = null, CancellationToken cancellationToken = default) =>
+        string contentType = "application/json", string? useId = null, DateTimeOffset? eventTime = null,
+        CancellationToken cancellationToken = default) =>
         RecordAsync("tool_result", new[] { Obj("tool-result", result, contentType) },
-            new JsonObject { ["tool"] = ToolBlock(tool, null, useId) }, cancellationToken: cancellationToken);
+            new JsonObject { ["tool"] = ToolBlock(tool, null, useId) }, eventTime: eventTime, cancellationToken: cancellationToken);
 
     /// <summary>A policy decision taken before an action, e.g. "this write needs approval".</summary>
     public Task<AgentRunArtifact> RecordAuthorizationAsync(AgentAuthorization authorization,
-        CancellationToken cancellationToken = default)
+        DateTimeOffset? eventTime = null, CancellationToken cancellationToken = default)
     {
         if (authorization is null) throw new ArgumentNullException(nameof(authorization));
         var fields = new JsonObject { ["decision"] = authorization.Decision };
         if (authorization.PolicyId is not null) fields["policyId"] = authorization.PolicyId;
-        return RecordAsync("authorization", fields: Detail(fields, authorization.Detail), cancellationToken: cancellationToken);
+        return RecordAsync("authorization", fields: Detail(fields, authorization.Detail), eventTime: eventTime,
+            cancellationToken: cancellationToken);
     }
 
     /// <summary>
@@ -295,21 +306,22 @@ public sealed class AgentRun
     public Task<AgentRunArtifact> RecordHumanApprovalAsync(string decision, byte[]? receipt = null,
         byte[]? identityAssertion = null, string? approver = null, string? detail = null,
         string receiptContentType = "application/json", string identityAssertionContentType = "application/jwt",
-        CancellationToken cancellationToken = default)
+        DateTimeOffset? eventTime = null, CancellationToken cancellationToken = default)
     {
         var fields = new JsonObject { ["decision"] = decision };
         if (approver is not null) fields["approver"] = approver;
         var objects = new List<AgentRunObject>();
         if (receipt is not null) objects.Add(Obj("approval-receipt", receipt, receiptContentType));
         if (identityAssertion is not null) objects.Add(Obj("identity-assertion", identityAssertion, identityAssertionContentType));
-        return RecordAsync("human_approval", objects, Detail(fields, detail), cancellationToken: cancellationToken);
+        return RecordAsync("human_approval", objects, Detail(fields, detail), eventTime: eventTime,
+            cancellationToken: cancellationToken);
     }
 
     /// <summary>What the model produced.</summary>
     public Task<AgentRunArtifact> RecordModelOutputAsync(byte[] output, string contentType = "text/plain",
-        bool consequential = false, CancellationToken cancellationToken = default) =>
+        bool consequential = false, DateTimeOffset? eventTime = null, CancellationToken cancellationToken = default) =>
         RecordAsync("model_output", new[] { Obj("model-output", output, contentType) }, consequential: consequential,
-            cancellationToken: cancellationToken);
+            eventTime: eventTime, cancellationToken: cancellationToken);
 
     /// <summary>
     /// Anchors the chain head with a timestamped <c>checkpoint</c> — e.g. from
@@ -467,14 +479,33 @@ public sealed class AgentRun
 
     // ── Sealing ──────────────────────────────────────────────────────────────
 
+    /// <summary>How far a caller-supplied <c>eventTime</c> may lie ahead of this run's clock (clock skew between threads/hosts).</summary>
+    public static readonly TimeSpan MaxEventTimeSkew = TimeSpan.FromSeconds(5);
+
+    /// <summary>A caller-supplied event time must be one the verifier will accept as plausible (common rules §8).</summary>
+    private void CheckEventTime(DateTimeOffset eventTime)
+    {
+        var at = AgentProfiles.Truncate(eventTime.ToUniversalTime());
+        if (at > _clock() + MaxEventTimeSkew)
+            throw new ArgumentOutOfRangeException(nameof(eventTime), "eventTime lies in the future.");
+        if (ControlArtifact?.Envelope["createdAt"]?.GetValue<string>() is { } c
+            && DateTimeOffset.TryParse(c, System.Globalization.CultureInfo.InvariantCulture,
+                System.Globalization.DateTimeStyles.AssumeUniversal, out var controlCreated)
+            && at < controlCreated)
+            throw new ArgumentOutOfRangeException(nameof(eventTime), "eventTime lies before the run's Control Artifact was created.");
+    }
+
     /// <summary>
     /// Builds, validates and seals one event. Call with the gate held (or
     /// before the run is published); the callback is the caller's job.
     /// </summary>
     private async Task<AgentRunArtifact> SealEventAsync(
-        string stepType, IReadOnlyList<AgentRunObject> objects, JsonObject fields, bool consequential, CancellationToken ct)
+        string stepType, IReadOnlyList<AgentRunObject> objects, JsonObject fields, bool consequential, CancellationToken ct,
+        DateTimeOffset? eventTime = null)
     {
-        var now = AgentProfiles.Truncate(_clock()); // the decision below must use the signed, truncated time
+        // createdAt is when this envelope is made; eventTime is when the event happened (the caller's capture, or now).
+        var created = AgentProfiles.Truncate(_clock());
+        var now = eventTime is { } at ? AgentProfiles.Truncate(at.ToUniversalTime()) : created; // the decision below must use the signed, truncated time
         int seq;
         lock (_artifacts) seq = _artifacts.Count;
         var coverage = _coverage.Clone(); // committed only once the event is sealed
@@ -503,7 +534,7 @@ public sealed class AgentRun
             ["schemaName"] = AgentProfiles.ExecutionEvidenceSchema,
             ["schemaVersion"] = _schemaVersion,
             ["evidenceId"] = Guid.NewGuid().ToString(),
-            ["createdAt"] = AgentProfiles.FormatTime(now),
+            ["createdAt"] = AgentProfiles.FormatTime(created),
             ["actor"] = actor,
             ["activity"] = new JsonObject { ["name"] = _options.Activity, ["correlationId"] = CorrelationId },
             ["chain"] = chain,
