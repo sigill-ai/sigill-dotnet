@@ -12,7 +12,7 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="System.Security.Cryptography.Pkcs" Version="9.0.0" />
+    <PackageReference Include="System.Security.Cryptography.Pkcs" Version="9.0.21" />
     <PackageReference Include="System.Text.Json" Version="9.0.5" />
     <!-- System.Net.Http.Json is part of the BCL on net5+ but ships as a separate
          package for netstandard2.1. Reference it unconditionally; on net8+/net9+/net10+
