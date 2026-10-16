@@ -464,6 +464,13 @@ What to know:
   (every consequential event), `EveryEvents` / `EverySeconds` (a cadence),
   `AgentTimestampPolicy.PerEvent`, `requireTimestamp: true` on one event, or
   `run.CheckpointAsync()` from a timer while a long run is idle.
+- **Seal off the hot path.** Every `Record…Async` takes an optional
+  `eventTime`: capture it when the event happens and seal later, in order
+  (e.g. from a queue), so the agent never waits on sealing while
+  `step.eventTime` still states when the event happened (the timestamp
+  cadence is decided on it, as the verifier recomputes it). It may not lie in
+  the future (more than `AgentRun.MaxEventTimeSkew`, 5 s) or before the
+  Control Artifact was created — the SDK refuses such an event before sealing.
 - **One certificate per run.** The Control Artifact and every event must be
   sealed with the same certificate; the verifier fails a run that mixes
   signers, so events forged by anyone else cannot be appended. Pin your
