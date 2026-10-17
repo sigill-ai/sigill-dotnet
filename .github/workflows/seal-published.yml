@@ -52,5 +52,5 @@ jobs:
           set -euo pipefail
           v="${VERSION#v}"
           cp "nuget.org/Sigill.Sdk.$v.nupkg.p7s" "Sigill.Sdk.$v.nuget-org.nupkg.p7s"
-          gh release view "v$v" >/dev/null 2>&1 || gh release create "v$v" --verify-tag --generate-notes --repo "$GITHUB_REPOSITORY"
+          gh release view "v$v" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || gh release create "v$v" --verify-tag --generate-notes --repo "$GITHUB_REPOSITORY"
           gh release upload "v$v" "Sigill.Sdk.$v.nuget-org.nupkg.p7s" --clobber --repo "$GITHUB_REPOSITORY"
