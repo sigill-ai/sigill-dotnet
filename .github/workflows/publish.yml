@@ -47,13 +47,14 @@ jobs:
       - name: Pack
         run: dotnet pack src/Sigill.Sdk/Sigill.Sdk.csproj --configuration Release -p:Version="${GITHUB_REF_NAME#v}" --output ./artifacts
       - name: Seal with Sigill
-        uses: sigill-ai/evidence-action@be2e7dafdd3c86ca5689995917b5e98f8c882a01 # v1.0.1
+        uses: sigill-ai/evidence-action@29c7582a2072557734f1d566abeaf292462ce46b # v1.1.0
         with:
           files: |
             artifacts/*.nupkg
             artifacts/*.snupkg
           mode: seal
           pqc: true
+          qualified: true
       - name: Push
         run: |
           dotnet nuget push ./artifacts/*.nupkg --api-key ${{ secrets.NUGET_ORG }} --source https://api.nuget.org/v3/index.json --skip-duplicate
