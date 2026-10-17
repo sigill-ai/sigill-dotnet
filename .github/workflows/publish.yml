@@ -24,10 +24,18 @@ jobs:
       - run: dotnet build --configuration Release --no-restore
       - run: dotnet test --configuration Release --no-build
 
+  # Every release is sealed by Sigill before it is published: a detached CAdES
+  # seal (.p7s) with an RFC 3161 timestamp and a post-quantum hybrid signature,
+  # over the exact packages built here. Only digests leave the runner. No seal,
+  # no release. nuget.org adds its own repository signature inside the .nupkg,
+  # so the file it serves is sealed as well, once it is available (seal-published).
   publish:
-    name: Publish to NuGet.org
+    name: Seal and publish to NuGet.org
     needs: test
     runs-on: ubuntu-latest
+    permissions:
+      id-token: write   # GitHub OIDC token, exchanged for a short-lived Sigill token
+      contents: write   # GitHub release + assets
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-dotnet@v4
@@ -37,8 +45,32 @@ jobs:
             9.0.x
             10.0.x
       - name: Pack
-        run: dotnet pack src/Sigill.Sdk/Sigill.Sdk.csproj --configuration Release -p:Version=${GITHUB_REF_NAME#v} --output ./artifacts
+        run: dotnet pack src/Sigill.Sdk/Sigill.Sdk.csproj --configuration Release -p:Version="${GITHUB_REF_NAME#v}" --output ./artifacts
+      - name: Seal with Sigill
+        uses: sigill-ai/evidence-action@be2e7dafdd3c86ca5689995917b5e98f8c882a01 # v1.0.1
+        with:
+          files: |
+            artifacts/*.nupkg
+            artifacts/*.snupkg
+          mode: seal
+          pqc: true
       - name: Push
         run: |
           dotnet nuget push ./artifacts/*.nupkg --api-key ${{ secrets.NUGET_ORG }} --source https://api.nuget.org/v3/index.json --skip-duplicate
           dotnet nuget push ./artifacts/*.snupkg --api-key ${{ secrets.NUGET_ORG }} --source https://api.nuget.org/v3/index.json --skip-duplicate
+      - name: GitHub release with the packages and their seals
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes
+          gh release upload "$GITHUB_REF_NAME" artifacts/*.nupkg artifacts/*.snupkg artifacts/*.p7s --clobber
+
+  seal-published:
+    name: Seal the package nuget.org serves
+    needs: publish
+    permissions:
+      id-token: write
+      contents: write
+    uses: ./.github/workflows/seal-published.yml
+    with:
+      version: ${{ github.ref_name }}
