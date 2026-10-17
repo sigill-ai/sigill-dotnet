@@ -680,6 +680,17 @@ embedded message-imprint matches your envelope, but it does not — by design in
 `POST /tsa/verify` endpoint does that server-side. v2 of this SDK will provide a
 pluggable trust policy.
 
+## Verifying a release
+
+Every release is sealed with Sigill before it is published: the `.nupkg` and
+`.snupkg` each get a detached CAdES seal (`.p7s`) with a qualified (eIDAS) RFC 3161 timestamp and
+a post-quantum hybrid signature (ML-DSA-87 strengthens the classic seal). The
+seals are attached to the [GitHub release](https://github.com/sigill-ai/sigill-dotnet/releases).
+nuget.org adds its own repository signature inside the package, so the file it
+serves differs from the one we built; that file is sealed too
+(`Sigill.Sdk.<version>.nuget-org.nupkg.p7s`). To check a download, put the
+file and the matching `.p7s` into [sigill.ai/verify](https://sigill.ai/verify).
+
 ## Development
 
 ```

@@ -1,0 +1,56 @@
+# Seal the package exactly as nuget.org serves it. nuget.org adds a repository
+# signature inside every .nupkg, so its bytes differ from the package built in
+# publish.yml (sealed there). Called after every publish; can also be run by
+# hand for a release published before releases were sealed automatically —
+# the timestamp is then the time of this run, not of the original release.
+name: Seal published release
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        type: string
+        required: true
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Released version, e.g. 0.9.1"
+        required: true
+
+jobs:
+  seal:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: write
+    steps:
+      - name: Download the package from nuget.org
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          v="${VERSION#v}"
+          url="https://api.nuget.org/v3-flatcontainer/sigill.sdk/$v/sigill.sdk.$v.nupkg"
+          mkdir -p nuget.org
+          for i in $(seq 1 60); do
+            curl -fsSL "$url" -o "nuget.org/Sigill.Sdk.$v.nupkg" && break
+            echo "not on nuget.org yet ($i/60)"; sleep 30
+          done
+          test -s "nuget.org/Sigill.Sdk.$v.nupkg"
+          sha256sum "nuget.org/Sigill.Sdk.$v.nupkg"
+      - uses: sigill-ai/evidence-action@29c7582a2072557734f1d566abeaf292462ce46b # v1.1.0
+        with:
+          files: nuget.org/*.nupkg
+          mode: seal
+          pqc: true
+          qualified: true
+      - name: Attach the seal to the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          v="${VERSION#v}"
+          cp "nuget.org/Sigill.Sdk.$v.nupkg.p7s" "Sigill.Sdk.$v.nuget-org.nupkg.p7s"
+          gh release view "v$v" >/dev/null 2>&1 || gh release create "v$v" --verify-tag --generate-notes --repo "$GITHUB_REPOSITORY"
+          gh release upload "v$v" "Sigill.Sdk.$v.nuget-org.nupkg.p7s" --clobber --repo "$GITHUB_REPOSITORY"
