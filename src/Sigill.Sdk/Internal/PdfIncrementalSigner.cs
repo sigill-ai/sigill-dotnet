@@ -114,16 +114,14 @@ internal static class PdfIncrementalSigner
         AppendObj(catId, AddAcroFormToCatalog(s.CatalogContent, afId));
 
         long xrefPos = baseOff + inc.Length;
-        var xsb = new StringBuilder("xref\n");
-        foreach (var kv in offmap.OrderBy(x => x.Key))
-            xsb.Append($"{kv.Key} 1\n{kv.Value:D10} 00000 n \n");
-        xsb.Append($"trailer\n<< /Size {next} /Root {catId} 0 R /Prev {s.StartXref} >>\n");
-        xsb.Append($"startxref\n{xrefPos}\n%%EOF\n");
+        // Cross-reference section in the base document's own format (table or stream).
+        var xrefBytes = BuildXrefSection(offmap, next, catId, s.StartXref, xrefPos, s.UsesXrefStream);
 
-        var incBytes = Latin1.GetBytes(inc + xsb.ToString());
-        var full     = new byte[originalPdf.Length + incBytes.Length];
+        var incBytes = Latin1.GetBytes(inc.ToString());
+        var full     = new byte[originalPdf.Length + incBytes.Length + xrefBytes.Length];
         originalPdf.CopyTo(full, 0);
         incBytes.CopyTo(full, originalPdf.Length);
+        xrefBytes.CopyTo(full, originalPdf.Length + incBytes.Length);
 
         var needle = Encoding.ASCII.GetBytes($"<{emptyHex}>");
         int angle  = ByteFind(full, needle, originalPdf.Length);
@@ -275,12 +273,7 @@ internal static class PdfIncrementalSigner
         Emit(catId, Encoding.ASCII.GetBytes($"{catId} 0 obj\n{newCatBody}\nendobj\n"));
 
         long xrefPos = pos;
-        var xsb = new StringBuilder("xref\n");
-        foreach (var kv in offmap.OrderBy(x => x.Key))
-            xsb.Append($"{kv.Key} 1\n{kv.Value:D10} 00000 n \n");
-        xsb.Append($"trailer\n<< /Size {next} /Root {catId} 0 R /Prev {s.StartXref} >>\n");
-        xsb.Append($"startxref\n{xrefPos}\n%%EOF\n");
-        var xrefBytes = Encoding.ASCII.GetBytes(xsb.ToString());
+        var xrefBytes = BuildXrefSection(offmap, next, catId, s.StartXref, xrefPos, s.UsesXrefStream);
 
         var result = new byte[signedPdf.Length + (int)(pos - signedPdf.Length) + xrefBytes.Length];
         signedPdf.CopyTo(result, 0);
@@ -363,16 +356,13 @@ internal static class PdfIncrementalSigner
         AppendObj(catId, AddAcroFormToCatalog(s.CatalogContent, afId));
 
         long xrefPos = baseOff + inc.Length;
-        var xsb = new StringBuilder("xref\n");
-        foreach (var kv in offmap.OrderBy(x => x.Key))
-            xsb.Append($"{kv.Key} 1\n{kv.Value:D10} 00000 n \n");
-        xsb.Append($"trailer\n<< /Size {next} /Root {catId} 0 R /Prev {s.StartXref} >>\n");
-        xsb.Append($"startxref\n{xrefPos}\n%%EOF\n");
+        var xrefBytes = BuildXrefSection(offmap, next, catId, s.StartXref, xrefPos, s.UsesXrefStream);
 
-        var incBytes = Latin1.GetBytes(inc + xsb.ToString());
-        var full = new byte[signedPdf.Length + incBytes.Length];
+        var incBytes = Latin1.GetBytes(inc.ToString());
+        var full = new byte[signedPdf.Length + incBytes.Length + xrefBytes.Length];
         signedPdf.CopyTo(full, 0);
         incBytes.CopyTo(full, signedPdf.Length);
+        xrefBytes.CopyTo(full, signedPdf.Length + incBytes.Length);
 
         var needle = Encoding.ASCII.GetBytes($"<{emptyHex}>");
         int angle  = ByteFind(full, needle, signedPdf.Length);
@@ -403,11 +393,76 @@ internal static class PdfIncrementalSigner
         return final;
     }
 
+    // ─── Cross-reference section ──────────────────────────────────────────────
+
+    /// <summary>
+    /// Builds the cross-reference section for one incremental update in the
+    /// format the base document uses: a classic <c>xref</c> table + <c>trailer</c>
+    /// for a classic base, a cross-reference STREAM (PDF 1.5+) for a
+    /// cross-reference-stream base — a classic trailer whose <c>/Prev</c> points
+    /// at a cross-reference stream is a chain strict readers (Adobe Acrobat among
+    /// them) refuse to follow, reporting the signature as invalid. Returns the
+    /// bytes to write at <paramref name="xrefPos"/>, ending with
+    /// <c>startxref</c>/<c>%%EOF</c>. <paramref name="next"/> is the first free
+    /// object number (highest existing + 1); the stream form uses it for the
+    /// cross-reference stream object itself.
+    /// </summary>
+    private static byte[] BuildXrefSection(
+        Dictionary<int, long> offmap, int next, int catId,
+        long prevStartXref, long xrefPos, bool usesXrefStream)
+    {
+        if (!usesXrefStream)
+        {
+            var xsb = new StringBuilder("xref\n");
+            foreach (var kv in offmap.OrderBy(x => x.Key))
+                xsb.Append($"{kv.Key} 1\n{kv.Value:D10} 00000 n \n");
+            xsb.Append($"trailer\n<< /Size {next} /Root {catId} 0 R /Prev {prevStartXref} >>\n");
+            xsb.Append($"startxref\n{xrefPos}\n%%EOF\n");
+            return Latin1.GetBytes(xsb.ToString());
+        }
+
+        // Cross-reference STREAM. The stream is itself a new indirect object
+        // (number next) located at xrefPos, so it lists itself too.
+        int xrefObjId = next;
+        int size      = next + 1;
+        var entries = offmap.Select(kv => (Id: kv.Key, Off: kv.Value))
+            .Append((Id: xrefObjId, Off: xrefPos))
+            .OrderBy(e => e.Id)
+            .ToList();
+
+        // /W [1 4 2]: type (1 = in use, at offset), 4-byte big-endian offset,
+        // 2-byte generation. Written unfiltered — a cross-reference stream needs
+        // no /Filter (ISO 32000-1 §7.5.8.2).
+        var data = new byte[entries.Count * 7];
+        for (int i = 0; i < entries.Count; i++)
+        {
+            if (entries[i].Off < 0 || entries[i].Off > uint.MaxValue)
+                throw new InvalidOperationException("PDF too large for a 4-byte cross-reference stream offset");
+            int p = i * 7;
+            uint o = (uint)entries[i].Off;
+            data[p]     = 1;
+            data[p + 1] = (byte)(o >> 24); data[p + 2] = (byte)(o >> 16);
+            data[p + 3] = (byte)(o >> 8);  data[p + 4] = (byte)o;
+            data[p + 5] = 0; data[p + 6] = 0;
+        }
+        var index = string.Join(" ", entries.Select(e => $"{e.Id} 1"));
+        var head = Latin1.GetBytes(
+            $"{xrefObjId} 0 obj\n<< /Type /XRef /Size {size} /Root {catId} 0 R "
+            + $"/Prev {prevStartXref} /W [1 4 2] /Index [{index}] /Length {data.Length} >>\nstream\n");
+        var tail = Latin1.GetBytes($"\nendstream\nendobj\nstartxref\n{xrefPos}\n%%EOF\n");
+
+        var outp = new byte[head.Length + data.Length + tail.Length];
+        head.CopyTo(outp, 0);
+        data.CopyTo(outp, head.Length);
+        tail.CopyTo(outp, head.Length + data.Length);
+        return outp;
+    }
+
     // ─── PDF structure parser ─────────────────────────────────────────────────
 
     private sealed record Struct(int MaxObjectId, int CatalogId, string CatalogContent,
         int Page1Id, string Page1Content, int AcroFormId, string? AcroFormContent,
-        int AnnotsArrayId, string? AnnotsArrayContent, long StartXref);
+        int AnnotsArrayId, string? AnnotsArrayContent, long StartXref, bool UsesXrefStream);
 
     private static Struct ParseStructure(byte[] pdf)
     {
@@ -418,6 +473,23 @@ internal static class PdfIncrementalSigner
             RegexOptions.RightToLeft | RegexOptions.Singleline);
         if (!sxm.Success) throw new InvalidOperationException("startxref not found in PDF");
         long sx = long.Parse(sxm.Groups[1].Value);
+
+        // Cross-reference FORMAT of the most recent revision: a classic section
+        // starts with the "xref" keyword; a cross-reference STREAM (PDF 1.5+) is
+        // an object "N 0 obj << ... /Type /XRef ... >>". Incremental updates must
+        // match it (see BuildXrefSection). Only treat it as a stream when the
+        // object at startxref actually carries /Type /XRef — a malformed or
+        // approximate startxref (some synthetic PDFs point it at the first
+        // object) falls back to the classic table, preserving behaviour.
+        bool usesXrefStream = false;
+        if (sx >= 0 && sx < t.Length
+            && string.CompareOrdinal(t, (int)sx, "xref", 0, 4) != 0
+            && Regex.IsMatch(t.Substring((int)sx, Math.Min(40, t.Length - (int)sx)), @"^\d+\s+\d+\s+obj\b"))
+        {
+            int streamKw = t.IndexOf("stream", (int)sx, StringComparison.Ordinal);
+            int scanEnd  = streamKw > (int)sx ? streamKw : Math.Min((int)sx + 400, t.Length);
+            usesXrefStream = Regex.IsMatch(t.Substring((int)sx, scanEnd - (int)sx), @"/Type\s*/XRef\b");
+        }
 
         // Object discovery: top-level "N 0 obj" offsets plus objects unpacked
         // from /Type /ObjStm streams. Last write wins so incremental updates
@@ -462,7 +534,7 @@ internal static class PdfIncrementalSigner
             offsets.Keys.DefaultIfEmpty(0).Max(),
             compressed.Keys.DefaultIfEmpty(0).Max());
 
-        return new Struct(maxId, catId, cat, p1Id, p1, afId, afContent, annotsId, annotsContent, sx);
+        return new Struct(maxId, catId, cat, p1Id, p1, afId, afContent, annotsId, annotsContent, sx, usesXrefStream);
     }
 
     private static int WalkToFirstLeafPage(string t,
