@@ -532,6 +532,85 @@ public partial class AgentRunTests
 
     private static bool Stamped(JsonObject request) => request["timestamp"]?.GetValue<bool>() ?? true;
 
+    private static DateTimeOffset StepTime(AgentRunArtifact a) =>
+        DateTimeOffset.Parse(a.Envelope["step"]!["eventTime"]!.GetValue<string>(), CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal);
+    private static DateTimeOffset CreatedAt(AgentRunArtifact a) =>
+        DateTimeOffset.Parse(a.Envelope["createdAt"]!.GetValue<string>(), CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal);
+
+    [Fact]
+    public async Task CallerCapturedEventTime_IsSigned_SealedLater_AndTheRunStaysPlausible()
+    {
+        // A queued producer: events are captured as they happen and sealed afterwards, in order.
+        var now = new DateTimeOffset(2026, 10, 1, 9, 0, 0, TimeSpan.Zero);
+        DateTimeOffset Tick() => now = now.AddMinutes(1);
+        var sealer = new StubSealer { GenTime = () => now.UtcDateTime.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", CultureInfo.InvariantCulture) };
+        using var client = Client(sealer);
+        var run = await AgentRun.StartCoreAsync(client, Agent(), Options(), Tick, CancellationToken.None);
+        var start = StepTime(run.Artifacts[0]);
+        var captured = new[] { start.AddSeconds(5.123), start.AddSeconds(7.5), start.AddSeconds(9) };
+
+        var call = await run.RecordToolCallAsync("lookup_ticket", Encoding.UTF8.GetBytes("""{"ticket":"4411"}"""), operation: "read", useId: "c1", eventTime: captured[0]);
+        var res = await run.RecordToolResultAsync("lookup_ticket", Encoding.UTF8.GetBytes("""{"status":"open"}"""), useId: "c1", eventTime: captured[1]);
+        var output = await run.RecordModelOutputAsync(Encoding.UTF8.GetBytes("Open."), eventTime: captured[2]);
+        var bundle = await run.FinishAsync("completed");
+
+        // The signed eventTime is the capture (millisecond precision); createdAt is when the envelope was made.
+        StepTime(call).Should().Be(captured[0]);
+        StepTime(res).Should().Be(captured[1]);
+        StepTime(output).Should().Be(captured[2]);
+        CreatedAt(call).Should().BeAfter(StepTime(call));
+
+        var result = await AgentRunVerifier.VerifyAsync(AgentRunBundle.Parse(bundle.ToJsonString()), StubVerify);
+        result.Verdict.Should().Be("run_finalized", string.Join("\n", result.Findings));
+        result.Checks["timestamps"].Should().Be("ok");
+        result.EventTimesPlausible.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task CallerEventTime_InTheFuture_OrBeforeTheControlArtifact_IsRefused_AndNothingIsSealed()
+    {
+        var sealer = new StubSealer();
+        using var client = Client(sealer);
+        var run = await Start(client);
+        var sealedBefore = sealer.Requests.Count;
+        var controlCreated = CreatedAt(run.ControlArtifact);
+
+        var future = () => run.RecordToolCallAsync("t", Encoding.UTF8.GetBytes("{}"), eventTime: DateTimeOffset.UtcNow.AddYears(5));
+        await future.Should().ThrowAsync<ArgumentOutOfRangeException>().WithMessage("*future*");
+        var early = () => run.RecordToolCallAsync("t", Encoding.UTF8.GetBytes("{}"), eventTime: controlCreated.AddSeconds(-1));
+        await early.Should().ThrowAsync<ArgumentOutOfRangeException>().WithMessage("*Control Artifact*");
+        sealer.Requests.Count.Should().Be(sealedBefore, "a refused event seals nothing");
+
+        // The run is still usable.
+        var ok = await run.RecordToolCallAsync("t", Encoding.UTF8.GetBytes("{}"));
+        ok.Seq.Should().Be(1);
+    }
+
+    [Fact]
+    public async Task TimestampCadence_IsDecidedOnTheSuppliedEventTime_SoTheVerifierAgrees()
+    {
+        // everySeconds = 60, decided on step.eventTime (common rules §4) — not on when the event was sealed.
+        var now = new DateTimeOffset(2026, 10, 1, 9, 0, 0, TimeSpan.Zero);
+        DateTimeOffset Tick() => now = now.AddMinutes(1);
+        var sealer = new StubSealer { GenTime = () => now.UtcDateTime.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", CultureInfo.InvariantCulture) };
+        using var client = Client(sealer);
+        var run = await AgentRun.StartCoreAsync(client, Agent(), Options(new AgentTimestampPolicy { EverySeconds = 60 }), Tick, CancellationToken.None);
+        var start = StepTime(run.Artifacts[0]);
+        var stampedBefore = sealer.Requests.Count;
+
+        // 20 s and 40 s after run_start: inside the cadence → no timestamp, although the clock moves a minute per reading.
+        await run.RecordToolCallAsync("t", Encoding.UTF8.GetBytes("{}"), eventTime: start.AddSeconds(20));
+        await run.RecordToolResultAsync("t", Encoding.UTF8.GetBytes("{}"), eventTime: start.AddSeconds(40));
+        // 70 s after: due → timestamped.
+        await run.RecordModelOutputAsync(Encoding.UTF8.GetBytes("done"), eventTime: start.AddSeconds(70));
+        var bundle = await run.FinishAsync("completed");
+        sealer.Requests.Skip(stampedBefore).Take(3).Select(Stamped).Should().Equal(false, false, true);
+
+        var result = await AgentRunVerifier.VerifyAsync(AgentRunBundle.Parse(bundle.ToJsonString()), StubVerify);
+        result.Checks["timestamps"].Should().Be("ok", string.Join("\n", result.Findings));
+        result.Verdict.Should().Be("run_finalized");
+    }
+
     [Fact]
     public async Task RecordedRun_WithEvaluation_VerifiesAsFinalized_WithThreeTimestamps_AndNoContentTravels()
     {
