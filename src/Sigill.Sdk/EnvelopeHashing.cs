@@ -26,6 +26,13 @@ public static class EnvelopeHashing
         return JsonCanonicalizer.Canonicalize(rawText);
     }
 
+    /// <summary>Canonicalize any JSON value (array, string, …) per RFC 8785 (JCS).</summary>
+    public static byte[] Canonicalize(JsonNode value)
+    {
+        if (value is null) throw new ArgumentNullException(nameof(value));
+        return JsonCanonicalizer.Canonicalize(value.ToJsonString());
+    }
+
     /// <summary>
     /// Compute the envelope hash per spec §4: strip <c>integrity.envelopeHash</c> and
     /// <c>proofs</c>, canonicalize, hash. Returns the hex digest and the canonical bytes.

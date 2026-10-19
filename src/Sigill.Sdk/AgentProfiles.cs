@@ -40,8 +40,24 @@ public static class AgentProfiles
     public const string ExecutionEvidenceSchemaV2 = "AgentExecutionEvidence/2";
 
     /// <summary>The execution schema to validate against: v2 when the envelope says <c>schemaVersion "2"</c>, else v1.</summary>
-    internal static string ExecutionSchemaFor(JsonObject envelope) =>
+    public static string ExecutionSchemaFor(JsonObject envelope) =>
         Str(envelope["schemaVersion"]) == "2" ? ExecutionEvidenceSchemaV2 : ExecutionEvidenceSchema;
+
+    /// <summary>
+    /// Every reason <paramref name="envelope"/> is not a valid instance of the named profile schema
+    /// (<see cref="ControlArtifactSchema"/>, <see cref="ExecutionEvidenceSchema"/>, <see cref="ExecutionEvidenceSchemaV2"/>,
+    /// <see cref="ControlEvaluationSchema"/>), I-JSON included; empty when valid. For services that
+    /// index envelopes other producers sealed; the verifier applies the same rules.
+    /// </summary>
+    public static IReadOnlyList<string> ValidateEnvelope(JsonObject envelope, string schemaName)
+    {
+        if (envelope is null) throw new ArgumentNullException(nameof(envelope));
+        List<string> errs;
+        try { errs = EnvelopeSchema.Validate(envelope, schemaName); }
+        catch (KeyNotFoundException) { throw new ArgumentException($"Unknown profile schema '{schemaName}'.", nameof(schemaName)); }
+        if (!IsIJson(envelope)) errs.Insert(0, "the envelope is not valid I-JSON");
+        return errs;
+    }
 
     /// <summary>The Control Artifact's content type, signed as <c>sigD.ctys[0]</c>.</summary>
     public const string ControlArtifactContentType = "application/vnd.sigill.agent-control+json";

@@ -879,6 +879,34 @@ public partial class AgentRunTests
     }
 
     [Fact]
+    public async Task ValidateEnvelope_AcceptsWhatTheRecorderSeals_AndNamesEveryViolation()
+    {
+        using var client = Client(new StubSealer());
+        var run = await Start(client);
+        var ctl = run.ControlArtifact.Envelope;
+        var start = run.Artifacts[0].Envelope;
+        AgentProfiles.ValidateEnvelope(ctl, AgentProfiles.ControlArtifactSchema).Should().BeEmpty();
+        AgentProfiles.ValidateEnvelope(start, AgentProfiles.ExecutionSchemaFor(start)).Should().BeEmpty();
+        AgentProfiles.ExecutionSchemaFor(start).Should().Be(AgentProfiles.ExecutionEvidenceSchema);
+
+        var broken = (JsonObject)start.DeepClone();
+        broken.Remove("chain");
+        broken["step"]!["eventTime"] = "yesterday";
+        AgentProfiles.ValidateEnvelope(broken, AgentProfiles.ExecutionEvidenceSchema).Should().HaveCountGreaterThanOrEqualTo(2);
+        var huge = (JsonObject)start.DeepClone();
+        huge["chain"]!["seq"] = JsonValue.Create(9007199254740993m);
+        AgentProfiles.ValidateEnvelope(huge, AgentProfiles.ExecutionEvidenceSchema).Should().Contain("the envelope is not valid I-JSON");
+        var v2 = (JsonObject)start.DeepClone();
+        v2["schemaVersion"] = "2";
+        AgentProfiles.ExecutionSchemaFor(v2).Should().Be(AgentProfiles.ExecutionEvidenceSchemaV2);
+        FluentActions.Invoking(() => AgentProfiles.ValidateEnvelope(start, "NoSuchProfile")).Should().Throw<ArgumentException>();
+
+        // Any JSON value canonicalizes, not only objects (indexers hash arrays of signature parts).
+        Encoding.UTF8.GetString(EnvelopeHashing.Canonicalize(JsonNode.Parse("""[["b", 1.0E2], {"z":1,"a":"\u00e9"}]""")!))
+            .Should().Be("""[["b",100],{"a":"é","z":1}]""");
+    }
+
+    [Fact]
     public async Task OptionalInputs_AreSealed_AndVerify()
     {
         var sealer = new StubSealer();
