@@ -70,6 +70,9 @@ public sealed class AgentRun
     /// <summary>The run's Control Artifact, sealed before <c>run_start</c>.</summary>
     public AgentRunArtifact ControlArtifact { get; private set; } = null!;
 
+    /// <summary>Outcome of <see cref="AgentRunOptions.DisclosePolicy"/>; null when the policy was not shared.</summary>
+    public AgentIndexResult? PolicyDisclosure { get; private set; }
+
     /// <summary>The sealed events so far, in chain order.</summary>
     public IReadOnlyList<AgentRunArtifact> Artifacts
     {
@@ -130,6 +133,7 @@ public sealed class AgentRun
         if (options is null) throw new ArgumentNullException(nameof(options));
         if (options.ControlSet is null) throw new ArgumentException("ControlSet is required.", nameof(options));
         ValidatePolicy(options.TimestampPolicy);
+        ValidateControlSet(options);
         if (parent is not null)
         {
             if (string.IsNullOrEmpty(parent.ChildCorrelationId) || string.IsNullOrEmpty(parent.ParentCorrelationId)
@@ -178,7 +182,8 @@ public sealed class AgentRun
         AgentRunVerifier.Prevalidate(envelope, AgentProfiles.ControlArtifactSchema);
 
         var result = await SealAsync(client, envelope, objects, AgentProfiles.ControlArtifactContentType,
-            options.CertificateId, timestamp: true, options.Qualified, cancellationToken).ConfigureAwait(false);
+            options.CertificateId, timestamp: true, options.Qualified || options.QualifiedFor.HasFlag(QualifiedArtifacts.ControlArtifact),
+            cancellationToken).ConfigureAwait(false);
         if (result.TimestampedBy is null)
             throw new SigillException("The Control Artifact must be timestamped, but the seal carries no timestamp.");
         var (signer, problem) = AgentProfiles.SignerOf(result.Signature);
@@ -193,6 +198,17 @@ public sealed class AgentRun
         // Seal run_start before any callback runs, so a failing callback cannot strand a sealed control basis.
         var start = await run.SealEventAsync("run_start", options.StartObjects ?? Array.Empty<AgentRunObject>(),
             new JsonObject(), consequential: false, cancellationToken).ConfigureAwait(false);
+        if (options.DisclosePolicy)
+        {
+            // Sharing is a side channel: it never fails the run (the evidence is in the producer's bundle either way).
+            try
+            {
+                run.PolicyDisclosure = client is SigillClient sigill
+                    ? await sigill.IndexAgentArtifactAsync(run.ControlArtifact, options.ControlSet.Content, cancellationToken).ConfigureAwait(false)
+                    : new AgentIndexResult("failed", Error: "Only SigillClient can share a policy with the evidence index.");
+            }
+            catch (Exception ex) { run.PolicyDisclosure = new AgentIndexResult("failed", Error: ex.Message); }
+        }
         // Both are delivered even when the first callback fails: later events wait for their turn in order.
         Exception? failure = null;
         foreach (var (artifact, seq) in new[] { (run.ControlArtifact, -1), (start, 0) })
@@ -527,7 +543,8 @@ public sealed class AgentRun
         try
         {
             var result = await SealAsync(_client, envelope, objects, AgentProfiles.ExecutionEvidenceContentType,
-                _options.CertificateId, stamp, _options.Qualified, ct).ConfigureAwait(false);
+                _options.CertificateId, stamp,
+                _options.Qualified || (stepType == "run_end" && _options.QualifiedFor.HasFlag(QualifiedArtifacts.RunEnd)), ct).ConfigureAwait(false);
             if (stamp && result.TimestampedBy is null)
                 throw new SigillException($"{stepType}: a timestamp is required by the run's policy, but the seal carries none.");
             var (signer, problem) = AgentProfiles.SignerOf(result.Signature);
@@ -670,6 +687,22 @@ public sealed class AgentRun
             throw new ArgumentException("TimestampPolicy.Profile must be 'throughput' or 'per-event'.");
         if (p.EveryEvents < 0 || p.EverySeconds < 0)
             throw new ArgumentException("TimestampPolicy cadence values must be zero or positive.");
+    }
+
+    /// <summary>A policy control set is checked before anything is sealed: a malformed policy must never become the run's control basis.</summary>
+    private static void ValidateControlSet(AgentRunOptions o)
+    {
+        if (o.ControlSet.ContentType != AgentPolicy.ControlSetContentType)
+        {
+            if (o.DisclosePolicy)
+                throw new ArgumentException($"DisclosePolicy requires a control set of type {AgentPolicy.ControlSetContentType} (AgentPolicy.ControlSetFromDocument).", nameof(o));
+            return;
+        }
+        var errors = AgentPolicy.Validate(o.ControlSet.Content);
+        if (errors.Count > 0) throw new ArgumentException("Invalid policy control set: " + string.Join("; ", errors), nameof(o));
+        var doc = JsonNode.Parse(o.ControlSet.Content)!;
+        if (doc["id"]!.GetValue<string>() != o.ControlSet.Id || doc["version"]!.GetValue<string>() != o.ControlSet.Version)
+            throw new ArgumentException("ControlSet.Id and Version must equal the document's id and version.", nameof(o));
     }
 
     private static JsonObject ToolBlock(string name, string? operation, string? useId)

@@ -817,6 +817,32 @@ public sealed class SigillClient : ISigillAiEvidenceClient, IDisposable
         AgentRun.StartAsync(this, agent, options, cancellationToken);
 
     /// <summary>
+    /// Uploads a sealed Control Artifact (with its policy control-set document) to the organisation's evidence
+    /// index — the transport of <see cref="AgentRunOptions.DisclosePolicy"/>. Internal on purpose: a general upload
+    /// of execution events is sharing with the index, which waits for its data-processing terms.
+    /// </summary>
+    internal async Task<AgentIndexResult> IndexAgentArtifactAsync(
+        AgentRunArtifact artifact, byte[]? controlSetDocument = null, CancellationToken cancellationToken = default)
+    {
+        if (artifact is null) throw new ArgumentNullException(nameof(artifact));
+        var body = new JsonObject
+        {
+            ["envelope"] = artifact.Envelope.DeepClone(),
+            ["signature"] = artifact.Signature.DeepClone(),
+            ["objectDigests"] = new JsonObject(artifact.ObjectDigests.Select(kv => new KeyValuePair<string, JsonNode?>(kv.Key, kv.Value))),
+        };
+        if (controlSetDocument is not null) body["controlSet"] = Convert.ToBase64String(controlSetDocument);
+        using var resp = await _http.PostAsJsonAsync("/api/agent-evidence/artifacts", body, cancellationToken).ConfigureAwait(false);
+        JsonObject? json = null;
+        try { json = await resp.Content.ReadFromJsonAsync<JsonObject>(cancellationToken: cancellationToken).ConfigureAwait(false); }
+        catch (System.Text.Json.JsonException) { /* a non-JSON error page: the status code says enough */ }
+        if (!resp.IsSuccessStatusCode)
+            return new AgentIndexResult("failed", Error: $"{(int)resp.StatusCode} {AgentProfiles.Str(json?["code"]) ?? resp.ReasonPhrase}");
+        return new AgentIndexResult(AgentProfiles.Str(json?["status"]) ?? "indexed",
+            Guid.TryParse(AgentProfiles.Str(json?["runId"]), out var runId) ? runId : null);
+    }
+
+    /// <summary>
     /// Seals a Control Evaluation of a finished run. See <see cref="ControlEvaluation"/>.
     /// </summary>
     public Task<AgentRunArtifact> SealControlEvaluationAsync(
