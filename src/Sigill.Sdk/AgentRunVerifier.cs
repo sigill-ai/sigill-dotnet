@@ -218,6 +218,15 @@ public sealed record AgentEvaluationVerdict
     /// </summary>
     public string? SealedFor { get; init; }
 
+    /// <summary>policy: the approval requires qualified time across the evidence (§4.7).</summary>
+    public bool QualifiedTimestampsRequired { get; init; }
+
+    /// <summary>
+    /// policy, when required: every timestamp the run and the approval rest on is qualified, as the evaluator determined
+    /// (§4.7); null when not required. The SDK checks the claim's shape and its binding to the approval, not the TSAs.
+    /// </summary>
+    public bool? QualifiedTimestampsMet { get; init; }
+
     /// <summary>The evidenceId this evaluation supersedes (§6), when it names one.</summary>
     public string? Supersedes { get; init; }
 
@@ -435,7 +444,8 @@ public static class AgentRunVerifier
     private sealed class EvaluationV2Check
     {
         public List<string> Findings = new();
-        public bool? FactsMatch, DigestsMatch;
+        public bool? FactsMatch, DigestsMatch, QualifiedMet;
+        public bool QualifiedRequired;
         public string? PolicyStatus, State;
     }
 
@@ -560,10 +570,33 @@ public static class AgentRunVerifier
             }
         }
 
-        // Approval (§4.4).
-        if (r.PolicyStatus == "unapproved") return;
+        // Approval (§4.4) and required qualified time (§4.7).
+        var timestamps = policy?["timestamps"] as JsonObject;
+        if (r.PolicyStatus == "unapproved")
+        {
+            if (timestamps is not null) bad("timestamps is present, but no approval requires qualified time");
+            return;
+        }
         var approval = ParseObject(approvalBytes);
         if (approval is null) { bad($"policyStatus is {r.PolicyStatus}, but the approval record is not supplied"); return; }
+        var requiresQualified = AgentProfiles.Str(approval["timestamps"]) == "qualified";
+        if (requiresQualified != (timestamps is not null))
+            bad("timestamps must be present exactly when the approval record requires qualified time");
+        if (timestamps is not null)
+        {
+            r.QualifiedRequired = true;
+            var where = (timestamps["where"] as JsonArray ?? new JsonArray()).Select(AgentProfiles.Str).OfType<string>().ToList();
+            var met = timestamps["met"] is JsonValue mv && mv.GetValueKind() == JsonValueKind.True;
+            if (met != (where.Count == 0)) bad("timestamps.met does not follow from timestamps.where");
+            // Order: approval, control, events by seq, run_end — each at most once, events inside the evaluated prefix.
+            static int Rank(string w) => w switch { "approval" => -3, "control" => -2, "run_end" => int.MaxValue, _ => int.Parse(w, CultureInfo.InvariantCulture) };
+            var ranks = where.Select(Rank).ToList();
+            if (ranks.Zip(ranks.Skip(1), (a, b) => a < b).Any(x => !x)) bad("timestamps.where is not in order or repeats an entry");
+            if (where.Where(w => w is not ("approval" or "control" or "run_end")).Any(w => int.Parse(w, CultureInfo.InvariantCulture) > through))
+                bad("timestamps.where names an event outside the evaluated prefix");
+            if (where.Contains("run_end") && r.State != "finalized") bad("timestamps.where names run_end, but the evaluated prefix has none");
+            r.QualifiedMet = met && where.Count == 0;
+        }
         if (AgentProfiles.Str(approval["schemaName"]) != "AgentPolicyApproval" || AgentProfiles.Str(approval["decision"]) != "approved")
             bad("its policy-approval object is not an approval record");
         if (AgentProfiles.Str(approval["approvalScopeDigest"]) != AgentProfiles.Str(policy?["approvalScopeDigest"]))
@@ -1261,6 +1294,7 @@ public static class AgentRunVerifier
                 SchemaVersion = AgentProfiles.Str(sa.Env["schemaVersion"]), Kind = kind,
                 PolicyStatus = v2?.PolicyStatus, PolicyState = v2?.State, FactsMatch = v2?.FactsMatch,
                 PolicyDigestsMatch = v2?.DigestsMatch, SealedFor = SealedForOf(sa.Jws),
+                QualifiedTimestampsRequired = v2?.QualifiedRequired ?? false, QualifiedTimestampsMet = v2?.QualifiedMet,
                 Supersedes = AgentProfiles.Str((sa.Env["supersedes"] as JsonObject)?["evidenceId"]),
                 ObjectsComplete = c.ObjectsComplete, WellFormed = sa.Conformance.Count == 0, Signer = signer,
                 Certificate = c.Certificate, Overall = AgentProfiles.Str(sa.Env["overall"]),

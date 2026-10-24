@@ -127,7 +127,7 @@ public partial class AgentRunTests
 
     [Fact]
     public void RunVectors_AreAllPresent() =>
-        RunVectors().Should().HaveCount(92);
+        RunVectors().Should().HaveCount(97);
 
     [Theory]
     [InlineData("01-finalized-digests-only.json", "7 of 7 artifact(s)")]
@@ -214,6 +214,8 @@ public partial class AgentRunTests
             if (o.ContainsKey("policyDigestsMatch")) r.PolicyDigestsMatch.Should().Be(e["policyDigestsMatch"]?.GetValue<bool>(), because);
             if (o.ContainsKey("current")) r.Current.Should().Be(e["current"]!.GetValue<bool>(), because);
             if (o.ContainsKey("sealedFor")) r.SealedFor.Should().Be(e["sealedFor"]?.GetValue<string>(), because);
+            if (o.ContainsKey("qualifiedRequired")) r.QualifiedTimestampsRequired.Should().Be(e["qualifiedRequired"]!.GetValue<bool>(), because);
+            if (o.ContainsKey("qualifiedMet")) r.QualifiedTimestampsMet.Should().Be(e["qualifiedMet"]?.GetValue<bool>(), because);
         }
     }
 

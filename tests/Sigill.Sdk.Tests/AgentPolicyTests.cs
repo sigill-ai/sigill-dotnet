@@ -195,6 +195,37 @@ public partial class AgentRunTests
     }
 
     [Fact]
+    public async Task UnderAQualifiedTimeRequirement_TheEvaluationStatesIt_AndIsSealedQualified()
+    {
+        var sealer = new StubSealer();
+        using var client = Client(sealer);
+        var run = await Start(client, PolicyOptions());
+        await run.RecordToolCallAsync("crm.read_customer", Encoding.UTF8.GetBytes("{}"), operation: "read", useId: "c1");
+        var bundle = await run.FinishAsync("completed");
+        var digests = AgentPolicy.ComputeDigests(PolicyDoc);
+        var approval = Encoding.UTF8.GetBytes(new JsonObject
+        {
+            ["schemaName"] = "AgentPolicyApproval", ["decision"] = "approved", ["agentId"] = Agent().AgentId,
+            ["approvalScopeDigest"] = digests.ApprovalScopeDigest, ["timestamps"] = "qualified",
+        }.ToJsonString());
+        var request = new PolicyEvaluationRequest
+        {
+            CertificateId = VerifierCert, EvaluatorId = "e", EvaluatorVersion = "1", ControlArtifact = run.ControlArtifact,
+            ControlSetDocument = PolicyDoc, Events = bundle.Artifacts,
+            Rules = new[] { "allowed-tools", "consequential-needs-approval", "max-steps", "no-unpaired-consequential" }.Select(id => new PolicyRuleResult(id, "PASS")).ToList(),
+            PolicyStatus = "approved_before_run", ApprovalRecord = approval, Engine = "cedar-policy@4.14.0", PrivateControlsReported = "missing",
+        };
+        // Silence is a loophole: a requirement in the approval must be answered.
+        FluentActions.Invoking(() => ControlEvaluation.PreparePolicy(request)).Should().Throw<ArgumentException>().WithMessage("*NotQualified*");
+
+        var prepared = ControlEvaluation.PreparePolicy(request with { NotQualified = new[] { "control", "run_end" } }, Clock());
+        prepared.RequiresQualifiedTimestamp.Should().BeTrue();
+        prepared.Envelope["policy"]!["timestamps"]!["met"]!.GetValue<bool>().Should().BeFalse();
+        await ControlEvaluation.SealAsync(client, prepared, VerifierCert); // qualified: false is overridden
+        sealer.Requests[^1]["qualified"]!.GetValue<bool>().Should().BeTrue("an evaluation under the requirement is never best-effort");
+    }
+
+    [Fact]
     public void PreparePolicy_RefusesWhatWouldNotVerify()
     {
         var control = new AgentRunArtifact(new JsonObject(), new JsonObject(), new Dictionary<string, string>());
