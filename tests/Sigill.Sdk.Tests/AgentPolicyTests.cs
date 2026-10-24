@@ -194,3 +194,35 @@ public partial class AgentRunTests
         sealer.Requests.Select(Q).Should().Equal(true, false, false, true); // control, run_start, checkpoint, run_end
     }
 }
+
+public class PolicyFactsVectorTests
+{
+    private static string Dir => Path.Combine(SpecRoot.TestVectorsDir, "12-policy-evaluation");
+
+    public static IEnumerable<object[]> Runs() =>
+        Directory.GetFiles(Path.Combine(Dir, "runs"), "*.json").Select(p => new object[] { Path.GetFileNameWithoutExtension(p) });
+
+    [Theory]
+    [MemberData(nameof(Runs))]
+    public void BuildFacts_IsByteExactWithTheVector(string run)
+    {
+        var input = JsonNode.Parse(File.ReadAllText(Path.Combine(Dir, "runs", run + ".json")))!;
+        var events = input["events"]!.AsArray().Select(e => e!.AsObject()).Reverse(); // any order
+        var facts = AgentPolicy.BuildFacts(input["agentId"]!.GetValue<string>(), input["correlationId"]!.GetValue<string>(), events);
+
+        Encoding.UTF8.GetString(facts.Bytes).Should().Be(File.ReadAllText(Path.Combine(Dir, "expected", run + ".facts.json")));
+        var expected = JsonNode.Parse(File.ReadAllText(Path.Combine(Dir, "expected", run + ".results.json")))!;
+        facts.Sha256.Should().Be(expected["factsSha256"]!.GetValue<string>());
+        facts.ThroughSeq.Should().Be(expected["throughSeq"]!.GetValue<int>());
+        facts.RunLevel.Should().Be(expected["runLevel"]!.GetValue<bool>());
+        facts.MissingSeqs.Should().Equal(expected["missingSeqs"]!.AsArray().Select(m => m!.GetValue<int>()));
+    }
+
+    [Fact]
+    public void BuildFacts_RefusesTwoEventsWithTheSameSeq()
+    {
+        var e = JsonNode.Parse("""{"chain":{"seq":0},"step":{"type":"run_start"}}""")!.AsObject();
+        var act = () => AgentPolicy.BuildFacts("a", "r", new[] { e, e.DeepClone().AsObject() });
+        act.Should().Throw<ArgumentException>().WithMessage("*seq 0*");
+    }
+}
