@@ -589,10 +589,15 @@ public static class AgentRunVerifier
             var met = timestamps["met"] is JsonValue mv && mv.GetValueKind() == JsonValueKind.True;
             if (met != (where.Count == 0)) bad("timestamps.met does not follow from timestamps.where");
             // Order: approval, control, events by seq, run_end — each at most once, events inside the evaluated prefix.
-            static int Rank(string w) => w switch { "approval" => -3, "control" => -2, "run_end" => int.MaxValue, _ => int.Parse(w, CultureInfo.InvariantCulture) };
+            // A seq beyond any run (it would not even parse as a long) is simply outside the prefix — never an exception.
+            static decimal Rank(string w) => w switch
+            {
+                "approval" => -3, "control" => -2, "run_end" => decimal.MaxValue,
+                _ => decimal.TryParse(w, NumberStyles.None, CultureInfo.InvariantCulture, out var n) ? n : decimal.MaxValue - 1,
+            };
             var ranks = where.Select(Rank).ToList();
             if (ranks.Zip(ranks.Skip(1), (a, b) => a < b).Any(x => !x)) bad("timestamps.where is not in order or repeats an entry");
-            if (where.Where(w => w is not ("approval" or "control" or "run_end")).Any(w => int.Parse(w, CultureInfo.InvariantCulture) > through))
+            if (where.Where(w => w is not ("approval" or "control" or "run_end")).Any(w => Rank(w) > through))
                 bad("timestamps.where names an event outside the evaluated prefix");
             if (where.Contains("run_end") && r.State != "finalized") bad("timestamps.where names run_end, but the evaluated prefix has none");
             r.QualifiedMet = met && where.Count == 0;

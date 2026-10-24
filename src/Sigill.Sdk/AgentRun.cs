@@ -4,6 +4,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
@@ -913,7 +914,14 @@ public static class ControlEvaluation
         };
         if (request.PrivateControlsReported is { } reported) policy["privateControlsReported"] = reported;
         // §4.7: present exactly when the approval record requires qualified time.
-        var requiresQualified = request.ApprovalRecord is { } rec && AgentProfiles.Str(JsonNode.Parse(rec)?["timestamps"]) == "qualified";
+        JsonObject? approvalDoc = null;
+        if (request.ApprovalRecord is { } rec)
+        {
+            try { approvalDoc = JsonNode.Parse(rec) as JsonObject; }
+            catch (JsonException) { }
+            if (approvalDoc is null) throw new ArgumentException("ApprovalRecord is not a JSON object.", nameof(request));
+        }
+        var requiresQualified = AgentProfiles.Str(approvalDoc?["timestamps"]) == "qualified";
         if (requiresQualified != (request.NotQualified is not null))
             throw new ArgumentException("NotQualified is required exactly when the approval record requires qualified timestamps.", nameof(request));
         if (request.NotQualified is { } notQualified)

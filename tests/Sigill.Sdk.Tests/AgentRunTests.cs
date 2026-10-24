@@ -127,7 +127,7 @@ public partial class AgentRunTests
 
     [Fact]
     public void RunVectors_AreAllPresent() =>
-        RunVectors().Should().HaveCount(97);
+        RunVectors().Should().HaveCount(98);
 
     [Theory]
     [InlineData("01-finalized-digests-only.json", "7 of 7 artifact(s)")]
