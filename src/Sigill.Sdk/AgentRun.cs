@@ -821,4 +821,218 @@ public static class ControlEvaluation
             throw new SigillException("A Control Evaluation must be timestamped, but the seal carries no timestamp.");
         return new AgentRunArtifact(envelope, result.Signature, digests);
     }
+
+    private static readonly Dictionary<string, int> Rank = new(StringComparer.Ordinal) { ["PASS"] = 0, ["INDETERMINATE"] = 1, ["FAIL"] = 2 };
+    private static readonly HashSet<string> Statuses = new(StringComparer.Ordinal) { "approved_before_run", "approved_after_start", "unapproved" };
+
+    /// <summary>
+    /// Builds a policy evaluation (<c>spec/control-evaluation-v2.md</c> §4) ready to sign. Nothing is sent.
+    /// </summary>
+    /// <exception cref="ArgumentException">The evaluation would not verify.</exception>
+    public static PreparedEvaluation PreparePolicy(PolicyEvaluationRequest request) => PreparePolicy(request, () => DateTimeOffset.UtcNow);
+
+    internal static PreparedEvaluation PreparePolicy(PolicyEvaluationRequest request, Func<DateTimeOffset> clock)
+    {
+        if (request is null) throw new ArgumentNullException(nameof(request));
+        var control = request.ControlArtifact ?? throw new ArgumentException("ControlArtifact is required.", nameof(request));
+        var doc = request.ControlSetDocument ?? throw new ArgumentException("ControlSetDocument is required.", nameof(request));
+        var problems = AgentPolicy.Validate(doc);
+        if (problems.Count > 0) throw new ArgumentException("Invalid policy control set: " + string.Join("; ", problems), nameof(request));
+        var policyDoc = (JsonObject)JsonNode.Parse(doc)!;
+        if (policyDoc["cedar"] is not JsonObject cedar) throw new ArgumentException("The control set carries no Cedar rules.", nameof(request));
+        var (csUri, csNode) = ControlSetObject(control, doc, request);
+        if (AgentProfiles.Str(csNode["contentType"]) != AgentPolicy.ControlSetContentType)
+            throw new ArgumentException("The Control Artifact's control set is not a policy control set.", nameof(request));
+        if (!Statuses.Contains(request.PolicyStatus ?? "")) throw new ArgumentException($"Unknown policy status '{request.PolicyStatus}'.", nameof(request));
+        if ((request.PolicyStatus == "unapproved") != (request.ApprovalRecord is null))
+            throw new ArgumentException("ApprovalRecord is required exactly when the policy status is not unapproved.", nameof(request));
+        var declaresPrivate = policyDoc["privateControls"] is JsonArray pc && pc.Count > 0;
+        if (declaresPrivate != (request.PrivateControlsReported is not null))
+            throw new ArgumentException("PrivateControlsReported is required exactly when the control set declares private controls.", nameof(request));
+
+        var agentId = AgentProfiles.Str(control.Envelope["agent"]?["id"]) ?? throw new ArgumentException("The Control Artifact names no agent.", nameof(request));
+        var correlationId = AgentProfiles.Str(control.Envelope["activity"]?["correlationId"]) ?? throw new ArgumentException("The Control Artifact has no correlationId.", nameof(request));
+        var events = (request.Events ?? Array.Empty<AgentRunArtifact>()).OrderBy(e => AgentProfiles.Int(e.Envelope["chain"]?["seq"])).ToList();
+        if (events.Count == 0) throw new ArgumentException("Events must hold the evaluated prefix, starting at seq 0.", nameof(request));
+        var facts = AgentPolicy.BuildFacts(agentId, correlationId, events.Select(e => e.Envelope), request.MissingSeqs ?? Array.Empty<int>());
+        if (facts.MissingSeqs.Count > 0 && facts.MissingSeqs[0] != facts.ThroughSeq + 1)
+            throw new ArgumentException("MissingSeqs must start right after the evaluated prefix.", nameof(request));
+        var last = events[^1];
+        var runEnd = events.FirstOrDefault(e => e.StepType == "run_end");
+        var finalized = runEnd is not null && facts.MissingSeqs.Count == 0;
+
+        var rules = request.Rules ?? Array.Empty<PolicyRuleResult>();
+        var ruleIds = (cedar["policies"]?["staticPolicies"] as JsonObject)!.Select(kv => kv.Key).ToList();
+        if (!new HashSet<string>(ruleIds, StringComparer.Ordinal).SetEquals(rules.Select(r => r.Id)) || rules.Count != ruleIds.Count)
+            throw new ArgumentException("Rules must hold exactly one result per Cedar rule of the control set.", nameof(request));
+        foreach (var r in rules)
+        {
+            if (!Rank.ContainsKey(r.Result)) throw new ArgumentException($"Rule '{r.Id}': unknown result '{r.Result}'.", nameof(request));
+            if ((r.Result == "PASS") != (r.Where is null || r.Where.Count == 0))
+                throw new ArgumentException($"Rule '{r.Id}': Where is required exactly when the result is not PASS.", nameof(request));
+        }
+
+        var now = AgentProfiles.Truncate(clock());
+        var factsUri = EnvelopeReferences.NewObjectUri();
+        var objects = new JsonArray { csNode.DeepClone() };
+        var seal = new List<SignedObjectDigest> { new() { Uri = csUri, HashHex = control.ObjectDigests[csUri], ContentType = AgentPolicy.ControlSetContentType } };
+        var digests = new Dictionary<string, string>(StringComparer.Ordinal) { [csUri] = control.ObjectDigests[csUri] };
+        var payloads = new Dictionary<string, byte[]>(StringComparer.Ordinal) { [csUri] = doc };
+        void Add(string uri, string role, string contentType, byte[] bytes)
+        {
+            var hex = EnvelopeHashing.HashHex(bytes);
+            objects.Add(new JsonObject { ["uri"] = uri, ["role"] = role, ["contentType"] = contentType, ["sizeBytes"] = bytes.Length });
+            seal.Add(new SignedObjectDigest { Uri = uri, HashHex = hex, ContentType = contentType });
+            digests[uri] = hex;
+            payloads[uri] = bytes;
+        }
+        Add(factsUri, "evaluation-facts", "application/json", facts.Bytes);
+        if (request.ApprovalRecord is { } approval)
+            Add(EnvelopeReferences.NewObjectUri(), "policy-approval", "application/vnd.sigill.policy-approval+json", approval);
+
+        var digestsOfPolicy = AgentPolicy.ComputeDigests(doc);
+        var subject = new JsonObject
+        {
+            ["controlArtifactSignatureSha256"] = control.SignatureSha256 ?? throw new ArgumentException("The Control Artifact carries no classical signature.", nameof(request)),
+            ["throughSignatureSha256"] = last.SignatureSha256 ?? throw new ArgumentException("An event carries no classical signature.", nameof(request)),
+        };
+        if (finalized) subject["runEndSignatureSha256"] = runEnd!.SignatureSha256;
+        var policy = new JsonObject
+        {
+            ["approvalScopeDigest"] = digestsOfPolicy.ApprovalScopeDigest,
+            ["cedarDigest"] = digestsOfPolicy.CedarDigest,
+            ["policyStatus"] = request.PolicyStatus,
+            ["evaluator"] = new JsonObject { ["engine"] = request.Engine, ["factsVersion"] = AgentPolicy.FactsVersion, ["schemaSha256"] = AgentProfiles.Str(cedar["schemaSha256"]) },
+            ["prefix"] = new JsonObject
+            {
+                ["throughSeq"] = facts.ThroughSeq,
+                ["finalSeq"] = runEnd is null ? null : JsonValue.Create(AgentProfiles.Int(runEnd.Envelope["step"]?["finalSeq"])),
+                ["missingSeqs"] = new JsonArray(facts.MissingSeqs.Select(m => (JsonNode?)m).ToArray()),
+            },
+            ["state"] = finalized ? "finalized" : "partial",
+        };
+        if (request.PrivateControlsReported is { } reported) policy["privateControlsReported"] = reported;
+        var envelope = Envelope("policy", "verifier", request.EvaluatorId, request.EvaluatorVersion, control, subject, now, request.EvaluatedAt,
+            rules.Select(r =>
+            {
+                var j = new JsonObject { ["id"] = r.Id, ["result"] = r.Result };
+                if (r.Where is { Count: > 0 } w) j["where"] = new JsonArray(w.Select(x => (JsonNode?)x).ToArray());
+                if (r.Detail is not null) j["detail"] = r.Detail;
+                return j;
+            }), rules.Select(r => r.Result), objects, request.Supersedes);
+        envelope["policy"] = policy;
+        return Prepared(envelope, seal, new[] { csUri }, digests, payloads);
+    }
+
+    /// <summary>Builds an attested evaluation (<c>spec/control-evaluation-v2.md</c> §5) ready to sign. Nothing is sent.</summary>
+    /// <exception cref="ArgumentException">The evaluation would not verify.</exception>
+    public static PreparedEvaluation PrepareAttested(AttestedEvaluationRequest request) => PrepareAttested(request, () => DateTimeOffset.UtcNow);
+
+    internal static PreparedEvaluation PrepareAttested(AttestedEvaluationRequest request, Func<DateTimeOffset> clock)
+    {
+        if (request is null) throw new ArgumentNullException(nameof(request));
+        var control = request.ControlArtifact ?? throw new ArgumentException("ControlArtifact is required.", nameof(request));
+        if (request.RunEnd?.StepType != "run_end") throw new ArgumentException("RunEnd must be the run's run_end artifact.", nameof(request));
+        var doc = request.ControlSetDocument ?? throw new ArgumentException("ControlSetDocument is required.", nameof(request));
+        var (csUri, csNode) = ControlSetObject(control, doc, request);
+        var declared = (JsonNode.Parse(doc)?["privateControls"] as JsonArray ?? new JsonArray())
+            .Select(x => AgentProfiles.Str(x?["id"])).OfType<string>().ToList();
+        var controls = request.Controls ?? Array.Empty<ControlResult>();
+        if (declared.Count == 0) throw new ArgumentException("The control set declares no private controls.", nameof(request));
+        if (!new HashSet<string>(declared, StringComparer.Ordinal).SetEquals(controls.Select(c => c.Id)) || controls.Count != declared.Count)
+            throw new ArgumentException("Controls must hold exactly one result per declared private control.", nameof(request));
+        if (controls.Any(c => !Rank.ContainsKey(c.Result))) throw new ArgumentException("A control has an unknown result.", nameof(request));
+
+        var subject = new JsonObject
+        {
+            ["controlArtifactSignatureSha256"] = control.SignatureSha256 ?? throw new ArgumentException("The Control Artifact carries no classical signature.", nameof(request)),
+            ["runEndSignatureSha256"] = request.RunEnd.SignatureSha256 ?? throw new ArgumentException("run_end carries no classical signature.", nameof(request)),
+        };
+        var envelope = Envelope("attested", "producer", request.ProducerId, request.ProducerVersion, control, subject,
+            AgentProfiles.Truncate(clock()), request.EvaluatedAt,
+            controls.Select(c =>
+            {
+                var j = new JsonObject { ["id"] = c.Id, ["result"] = c.Result };
+                if (c.Detail is not null) j["detail"] = c.Detail;
+                return j;
+            }), controls.Select(c => c.Result), new JsonArray { csNode.DeepClone() }, request.Supersedes);
+        if (request.EvaluatorId is not null || request.EvaluatorVersion is not null)
+        {
+            var a = new JsonObject();
+            if (request.EvaluatorId is not null) a["evaluatorId"] = request.EvaluatorId;
+            if (request.EvaluatorVersion is not null) a["evaluatorVersion"] = request.EvaluatorVersion;
+            envelope["attested"] = a;
+        }
+        var hex = control.ObjectDigests[csUri];
+        return Prepared(envelope, new[] { new SignedObjectDigest { Uri = csUri, HashHex = hex, ContentType = AgentProfiles.Str(csNode["contentType"]) } },
+            new[] { csUri }, new Dictionary<string, string>(StringComparer.Ordinal) { [csUri] = hex },
+            new Dictionary<string, byte[]>(StringComparer.Ordinal) { [csUri] = doc });
+    }
+
+    /// <summary>Signs a prepared evaluation through the blind sealing endpoint, always timestamped.</summary>
+    public static async Task<AgentRunArtifact> SealAsync(ISigillAiEvidenceClient client, PreparedEvaluation prepared, Guid certificateId,
+        bool qualified = false, CancellationToken cancellationToken = default)
+    {
+        if (client is null) throw new ArgumentNullException(nameof(client));
+        if (prepared is null) throw new ArgumentNullException(nameof(prepared));
+        var result = await client.SignObjectHashesAsync(prepared.EnvelopeHashHex, prepared.Objects, certificateId,
+            new ObjectSignOptions
+            {
+                Timestamp = true, Qualified = qualified, EnvelopeContentType = AgentProfiles.ControlEvaluationContentType,
+                ReusedUris = prepared.ReusedUris,
+            }, cancellationToken).ConfigureAwait(false);
+        if (result.TimestampedBy is null)
+            throw new SigillException("A Control Evaluation must be timestamped, but the seal carries no timestamp.");
+        return Complete(prepared, result.Signature);
+    }
+
+    /// <summary>The evaluation artifact, once <paramref name="signature"/> (a JAdES JWS over the prepared hashes) exists.</summary>
+    public static AgentRunArtifact Complete(PreparedEvaluation prepared, JsonObject signature) =>
+        new(prepared.Envelope, signature, prepared.ObjectDigests);
+
+    private static (string Uri, JsonObject Node) ControlSetObject(AgentRunArtifact control, byte[] doc, object request)
+    {
+        var node = (control.Envelope["objects"] as JsonArray)?.OfType<JsonObject>().FirstOrDefault(o => AgentProfiles.Str(o["role"]) == "control-set")
+            ?? throw new ArgumentException("The Control Artifact carries no control-set object.", nameof(request));
+        var uri = AgentProfiles.Str(node["uri"])!;
+        if (!control.ObjectDigests.TryGetValue(uri, out var hex) || hex != EnvelopeHashing.HashHex(doc))
+            throw new ArgumentException("ControlSetDocument is not the control set sealed in the Control Artifact.", nameof(request));
+        return (uri, node);
+    }
+
+    private static JsonObject Envelope(string kind, string actorType, string actorId, string actorVersion, AgentRunArtifact control,
+        JsonObject subject, DateTimeOffset now, DateTimeOffset? evaluatedAt, IEnumerable<JsonObject> controls, IEnumerable<string> results,
+        JsonArray objects, EvaluationReference? supersedes)
+    {
+        var envelope = new JsonObject
+        {
+            ["schemaName"] = AgentProfiles.ControlEvaluationSchema,
+            ["schemaVersion"] = "2",
+            ["kind"] = kind,
+            ["evidenceId"] = Guid.NewGuid().ToString(),
+            ["createdAt"] = AgentProfiles.FormatTime(now),
+            ["actor"] = new JsonObject { ["type"] = actorType, ["id"] = actorId, ["version"] = actorVersion },
+            ["activity"] = control.Envelope["activity"]?.DeepClone(),
+            ["subject"] = subject,
+            ["controlSet"] = control.Envelope["controlSet"]?.DeepClone(),
+            ["controls"] = new JsonArray(controls.Select(c => (JsonNode?)c).ToArray()),
+            ["overall"] = results.Aggregate("PASS", (a, b) => Rank[b] > Rank[a] ? b : a), // §2: derived, never asserted
+            ["evaluatedAt"] = AgentProfiles.FormatTime(AgentProfiles.Truncate(evaluatedAt ?? now)),
+            ["objects"] = objects,
+        };
+        if (supersedes is not null)
+            envelope["supersedes"] = new JsonObject { ["evidenceId"] = supersedes.EvidenceId, ["signatureSha256"] = supersedes.SignatureSha256 };
+        return envelope;
+    }
+
+    private static PreparedEvaluation Prepared(JsonObject envelope, IReadOnlyList<SignedObjectDigest> seal, IReadOnlyCollection<string> reused,
+        Dictionary<string, string> digests, Dictionary<string, byte[]> payloads)
+    {
+        AgentRunVerifier.Prevalidate(envelope, AgentProfiles.ControlEvaluationSchemaV2);
+        return new PreparedEvaluation
+        {
+            Envelope = envelope, EnvelopeHashHex = EnvelopeHashing.HashHex(EnvelopeHashing.Canonicalize(envelope)),
+            Objects = seal, ReusedUris = reused, ObjectDigests = digests, Payloads = payloads,
+        };
+    }
 }

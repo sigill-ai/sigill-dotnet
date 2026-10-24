@@ -127,7 +127,7 @@ public partial class AgentRunTests
 
     [Fact]
     public void RunVectors_AreAllPresent() =>
-        RunVectors().Should().HaveCount(79);
+        RunVectors().Should().HaveCount(92);
 
     [Theory]
     [InlineData("01-finalized-digests-only.json", "7 of 7 artifact(s)")]
@@ -201,12 +201,19 @@ public partial class AgentRunTests
             var because = string.Join(" | ", r.Findings);
             r.SubjectBound.Should().Be(e["subjectBound"]!.GetValue<bool>(), because);
             r.ControlSetDigestMatches.Should().Be(e["controlSetDigestMatches"]!.GetValue<bool>(), because);
-            r.BaselineDigestMatches.Should().Be(e["baselineDigestMatches"]!.GetValue<bool>(), because);
+            r.BaselineDigestMatches.Should().Be(e["baselineDigestMatches"]?.GetValue<bool>(), because);
             r.SignatureValid.Should().Be(e["signatureValid"]!.GetValue<bool>(), because);
             r.TimestampValid.Should().Be(e["timestampValid"]!.GetValue<bool>(), because);
             r.ObjectsComplete.Should().Be(e["objectsComplete"]!.GetValue<bool>(), because);
             r.Valid.Should().Be(e["valid"]!.GetValue<bool>(), because);
             r.Overall.Should().Be(e["overall"]!.GetValue<string>());
+            // Control Evaluation v2 expectations, present only in the v2 scenarios.
+            var o = e.AsObject();
+            if (o.ContainsKey("kind")) r.Kind.Should().Be(e["kind"]!.GetValue<string>(), because);
+            if (o.ContainsKey("factsMatch")) r.FactsMatch.Should().Be(e["factsMatch"]?.GetValue<bool>(), because);
+            if (o.ContainsKey("policyDigestsMatch")) r.PolicyDigestsMatch.Should().Be(e["policyDigestsMatch"]?.GetValue<bool>(), because);
+            if (o.ContainsKey("current")) r.Current.Should().Be(e["current"]!.GetValue<bool>(), because);
+            if (o.ContainsKey("sealedFor")) r.SealedFor.Should().Be(e["sealedFor"]?.GetValue<string>(), because);
         }
     }
 

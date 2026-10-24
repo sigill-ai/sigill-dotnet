@@ -312,7 +312,7 @@ public sealed record ControlResult(string Id, string Result, string? Detail = nu
 
 /// <summary>
 /// What an independent verifier observed after a run, and how each control came
-/// out (<c>spec/control-evaluation-v1.md</c>). See <see cref="ControlEvaluation.SealAsync"/>.
+/// out (<c>spec/control-evaluation-v1.md</c>). See <see cref="ControlEvaluation.SealAsync(ISigillAiEvidenceClient, ControlEvaluationRequest, CancellationToken)"/>.
 /// </summary>
 public sealed record ControlEvaluationRequest
 {
@@ -345,4 +345,105 @@ public sealed record ControlEvaluationRequest
     public bool IncludeBaseline { get; init; } = true;
 
     public bool Qualified { get; init; }
+}
+
+/// <summary>One Cedar rule's result in a policy evaluation (<c>spec/control-evaluation-v2.md</c> §4.1).</summary>
+/// <param name="Id">The rule's <c>id</c> annotation.</param>
+/// <param name="Result">PASS, FAIL or INDETERMINATE.</param>
+/// <param name="Detail">Optional explanation.</param>
+/// <param name="Where">For FAIL and INDETERMINATE: the requests that produced it (seq as a decimal string, or <c>run</c>).</param>
+public sealed record PolicyRuleResult(string Id, string Result, IReadOnlyList<string>? Where = null, string? Detail = null);
+
+/// <summary>An earlier evaluation this one supersedes (<c>spec/control-evaluation-v2.md</c> §6).</summary>
+public sealed record EvaluationReference(string EvidenceId, string SignatureSha256);
+
+/// <summary>
+/// A policy evaluation of a run (<c>spec/control-evaluation-v2.md</c> §4): the results of the control set's Cedar
+/// rules over the run's facts, computed by the caller with the official Cedar core. The SDK builds the facts from
+/// <see cref="Events"/>, derives <c>overall</c>, the prefix and the state, and refuses anything that would not verify.
+/// </summary>
+public sealed record PolicyEvaluationRequest
+{
+    /// <summary>The evaluator's seal certificate — SHOULD differ from the run's.</summary>
+    public required Guid CertificateId { get; init; }
+
+    public required string EvaluatorId { get; init; }
+    public required string EvaluatorVersion { get; init; }
+
+    /// <summary>The run's Control Artifact; its control set must be a policy control set.</summary>
+    public required AgentRunArtifact ControlArtifact { get; init; }
+
+    /// <summary>The policy control set's exact bytes, as sealed in the Control Artifact.</summary>
+    public required byte[] ControlSetDocument { get; init; }
+
+    /// <summary>The evaluated contiguous prefix seq 0…k of the run's events.</summary>
+    public required IReadOnlyList<AgentRunArtifact> Events { get; init; }
+
+    /// <summary>Seqs missing above the prefix when the evaluation was made (ascending, starting at k+1).</summary>
+    public IReadOnlyList<int> MissingSeqs { get; init; } = Array.Empty<int>();
+
+    /// <summary>One result per Cedar rule.</summary>
+    public required IReadOnlyList<PolicyRuleResult> Rules { get; init; }
+
+    /// <summary>approved_before_run, approved_after_start or unapproved (§4.4).</summary>
+    public required string PolicyStatus { get; init; }
+
+    /// <summary>The sealed approval record's exact bytes; required unless <see cref="PolicyStatus"/> is unapproved.</summary>
+    public byte[]? ApprovalRecord { get; init; }
+
+    /// <summary>The Cedar core that evaluated, e.g. <c>cedar-policy@4.14.0</c>.</summary>
+    public required string Engine { get; init; }
+
+    /// <summary>reported, missing or pending — required when the control set declares private controls.</summary>
+    public string? PrivateControlsReported { get; init; }
+
+    public EvaluationReference? Supersedes { get; init; }
+    public DateTimeOffset? EvaluatedAt { get; init; }
+    public bool Qualified { get; init; }
+}
+
+/// <summary>
+/// The producer's own results for its private controls (<c>spec/control-evaluation-v2.md</c> §5): one per
+/// declared private control id. Sealed with the producer's certificate.
+/// </summary>
+public sealed record AttestedEvaluationRequest
+{
+    public required Guid CertificateId { get; init; }
+
+    /// <summary>The producer (<c>actor.id</c>, type producer).</summary>
+    public required string ProducerId { get; init; }
+    public required string ProducerVersion { get; init; }
+
+    public required AgentRunArtifact ControlArtifact { get; init; }
+    public required AgentRunArtifact RunEnd { get; init; }
+
+    /// <summary>The policy control set's exact bytes, as sealed in the Control Artifact.</summary>
+    public required byte[] ControlSetDocument { get; init; }
+
+    public required IReadOnlyList<ControlResult> Controls { get; init; }
+
+    /// <summary>The producer's evaluating component, optional.</summary>
+    public string? EvaluatorId { get; init; }
+    public string? EvaluatorVersion { get; init; }
+
+    public EvaluationReference? Supersedes { get; init; }
+    public DateTimeOffset? EvaluatedAt { get; init; }
+    public bool Qualified { get; init; }
+}
+
+/// <summary>
+/// A Control Evaluation v2 ready to sign: the envelope, the object digests to seal (with the URIs it reuses from the
+/// Control Artifact) and the payloads a verifier needs. Sign it with <see cref="ControlEvaluation.SealAsync(ISigillAiEvidenceClient, PreparedEvaluation, Guid, bool, CancellationToken)"/>, or through
+/// another signing path and complete it with <see cref="ControlEvaluation.Complete"/>.
+/// </summary>
+public sealed record PreparedEvaluation
+{
+    public required JsonObject Envelope { get; init; }
+    public required string EnvelopeHashHex { get; init; }
+    public required IReadOnlyList<SignedObjectDigest> Objects { get; init; }
+    public required IReadOnlyCollection<string> ReusedUris { get; init; }
+    public required IReadOnlyDictionary<string, string> ObjectDigests { get; init; }
+
+    /// <summary>Bytes a verifier needs (control set, facts, approval record): add them to the bundle's payloads.</summary>
+    public required IReadOnlyDictionary<string, byte[]> Payloads { get; init; }
 }
