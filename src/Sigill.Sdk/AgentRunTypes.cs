@@ -397,6 +397,12 @@ public sealed record PolicyEvaluationRequest
     /// <summary>reported, missing or pending — required when the control set declares private controls.</summary>
     public string? PrivateControlsReported { get; init; }
 
+    /// <summary>
+    /// When the approval record requires qualified time (§4.7): the timestamps that are not qualified — "approval",
+    /// "control", event seqs, "run_end" — empty when every one is. Null exactly when there is no such requirement.
+    /// </summary>
+    public IReadOnlyList<string>? NotQualified { get; init; }
+
     public EvaluationReference? Supersedes { get; init; }
     public DateTimeOffset? EvaluatedAt { get; init; }
     public bool Qualified { get; init; }
@@ -446,4 +452,7 @@ public sealed record PreparedEvaluation
 
     /// <summary>Bytes a verifier needs (control set, facts, approval record): add them to the bundle's payloads.</summary>
     public required IReadOnlyDictionary<string, byte[]> Payloads { get; init; }
+
+    /// <summary>The approval requires qualified time (§4.7): the evaluation itself must be sealed with a qualified timestamp.</summary>
+    public bool RequiresQualifiedTimestamp { get; init; }
 }

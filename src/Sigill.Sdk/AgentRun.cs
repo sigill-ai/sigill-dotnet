@@ -4,6 +4,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
@@ -912,6 +913,23 @@ public static class ControlEvaluation
             ["state"] = finalized ? "finalized" : "partial",
         };
         if (request.PrivateControlsReported is { } reported) policy["privateControlsReported"] = reported;
+        // §4.7: present exactly when the approval record requires qualified time.
+        JsonObject? approvalDoc = null;
+        if (request.ApprovalRecord is { } rec)
+        {
+            try { approvalDoc = JsonNode.Parse(rec) as JsonObject; }
+            catch (JsonException) { }
+            if (approvalDoc is null) throw new ArgumentException("ApprovalRecord is not a JSON object.", nameof(request));
+        }
+        var requiresQualified = AgentProfiles.Str(approvalDoc?["timestamps"]) == "qualified";
+        if (requiresQualified != (request.NotQualified is not null))
+            throw new ArgumentException("NotQualified is required exactly when the approval record requires qualified timestamps.", nameof(request));
+        if (request.NotQualified is { } notQualified)
+            policy["timestamps"] = new JsonObject
+            {
+                ["required"] = "qualified", ["met"] = notQualified.Count == 0,
+                ["where"] = new JsonArray(notQualified.Select(w => (JsonNode?)w).ToArray()),
+            };
         var envelope = Envelope("policy", "verifier", request.EvaluatorId, request.EvaluatorVersion, control, subject, now, request.EvaluatedAt,
             rules.Select(r =>
             {
@@ -921,7 +939,7 @@ public static class ControlEvaluation
                 return j;
             }), rules.Select(r => r.Result), objects, request.Supersedes);
         envelope["policy"] = policy;
-        return Prepared(envelope, seal, new[] { csUri }, digests, payloads);
+        return Prepared(envelope, seal, new[] { csUri }, digests, payloads) with { RequiresQualifiedTimestamp = requiresQualified };
     }
 
     /// <summary>Builds an attested evaluation (<c>spec/control-evaluation-v2.md</c> §5) ready to sign. Nothing is sent.</summary>
@@ -978,7 +996,8 @@ public static class ControlEvaluation
         var result = await client.SignObjectHashesAsync(prepared.EnvelopeHashHex, prepared.Objects, certificateId,
             new ObjectSignOptions
             {
-                Timestamp = true, Qualified = qualified, EnvelopeContentType = AgentProfiles.ControlEvaluationContentType,
+                // §4.7: an evaluation under a qualified-time requirement is itself qualified — never a best-effort stamp.
+                Timestamp = true, Qualified = qualified || prepared.RequiresQualifiedTimestamp, EnvelopeContentType = AgentProfiles.ControlEvaluationContentType,
                 ReusedUris = prepared.ReusedUris,
             }, cancellationToken).ConfigureAwait(false);
         if (result.TimestampedBy is null)
