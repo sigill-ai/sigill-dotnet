@@ -200,6 +200,22 @@ public sealed record AgentRunOptions
     public bool Qualified { get; init; }
 
     /// <summary>
+    /// Request eIDAS-qualified timestamps for these artifacts only, in addition to <see cref="Qualified"/>.
+    /// A declared policy rests on the Control Artifact's timestamp ("sealed before the run") and the run's
+    /// outcome on <c>run_end</c>'s, so these two are the ones worth paying a qualified stamp for.
+    /// </summary>
+    public QualifiedArtifacts QualifiedFor { get; init; }
+
+    /// <summary>
+    /// <b>Preview.</b> Share the declared policy with your Sigill organisation's evidence index: after the Control Artifact
+    /// is sealed, upload its signed envelope (metadata and digests, no content) together with the control-set
+    /// document, so the organisation can review, approve and track the policy. Requires a
+    /// <see cref="AgentPolicy.ControlSetContentType"/> control set. Off by default. The upload never fails
+    /// the run; its outcome is <see cref="AgentRun.PolicyDisclosure"/>. Execution events are not uploaded.
+    /// </summary>
+    public bool DisclosePolicy { get; init; }
+
+    /// <summary>
     /// The run may start sub-agent runs (<c>spec/agent-delegation-v1.md</c>). Its events are sealed as
     /// <c>AgentExecutionEvidence</c> <c>schemaVersion "2"</c>, which a run must use throughout once it
     /// delegates. Child runs started with <see cref="AgentRun.StartChildAsync"/> always use version 2.
@@ -229,6 +245,24 @@ public sealed record AgentDelegation(
 {
     /// <summary>The parent's sealed <c>delegation</c> event, when sealed in this process.</summary>
     public AgentRunArtifact? Artifact { get; init; }
+}
+
+/// <summary>Artifacts that get a qualified timestamp (<see cref="AgentRunOptions.QualifiedFor"/>).</summary>
+[Flags]
+public enum QualifiedArtifacts
+{
+    None = 0,
+    ControlArtifact = 1,
+    RunEnd = 2,
+}
+
+/// <summary>Outcome of an upload to the organisation's evidence index.</summary>
+/// <param name="Status"><c>indexed</c> or <c>exists</c> on success, <c>failed</c> otherwise.</param>
+/// <param name="RunId">The index's run id, on success.</param>
+/// <param name="Error">Why the upload failed (status code and the index's error code).</param>
+public sealed record AgentIndexResult(string Status, Guid? RunId = null, string? Error = null)
+{
+    public bool Succeeded => Status is "indexed" or "exists";
 }
 
 /// <summary>
