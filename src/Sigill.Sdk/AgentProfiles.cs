@@ -40,6 +40,12 @@ public static class AgentProfiles
     public const string ExecutionEvidenceSchemaV2 = "AgentExecutionEvidence/2";
 
     /// <summary>The execution schema to validate against: v2 when the envelope says <c>schemaVersion "2"</c>, else v1.</summary>
+    /// <summary>Control Evaluation v2 (<c>spec/control-evaluation-v2.md</c>): state, policy or attested.</summary>
+    public const string ControlEvaluationSchemaV2 = "ControlEvaluation/2";
+
+    internal static string EvaluationSchemaFor(JsonObject envelope) =>
+        Str(envelope["schemaVersion"]) == "2" ? ControlEvaluationSchemaV2 : ControlEvaluationSchema;
+
     internal static string ExecutionSchemaFor(JsonObject envelope) =>
         Str(envelope["schemaVersion"]) == "2" ? ExecutionEvidenceSchemaV2 : ExecutionEvidenceSchema;
 

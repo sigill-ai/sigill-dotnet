@@ -5,6 +5,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
+using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
@@ -186,6 +187,42 @@ public sealed record AgentEvaluationVerdict
     public string? Overall { get; init; }
     public IReadOnlyList<ControlResult> Controls { get; init; } = Array.Empty<ControlResult>();
     public IReadOnlyList<string> Findings { get; init; } = Array.Empty<string>();
+
+    /// <summary>"1" or "2".</summary>
+    public string? SchemaVersion { get; init; }
+
+    /// <summary>v2: state | policy | attested (<c>spec/control-evaluation-v2.md</c>); null for v1.</summary>
+    public string? Kind { get; init; }
+
+    /// <summary>policy: approved_before_run | approved_after_start | unapproved, as the evaluator states it.</summary>
+    public string? PolicyStatus { get; init; }
+
+    /// <summary>policy: finalized | partial.</summary>
+    public string? PolicyState { get; init; }
+
+    /// <summary>policy: the facts rebuilt from this run's signed events equal the sealed facts byte for byte (§4.5); null when not checked.</summary>
+    public bool? FactsMatch { get; init; }
+
+    /// <summary>policy: approvalScopeDigest and cedarDigest recompute from the sealed control set; null when not checked.</summary>
+    public bool? PolicyDigestsMatch { get; init; }
+
+    /// <summary>
+    /// policy: the per-rule results were recomputed with a Cedar engine (§4.6). This SDK has no Cedar engine, so it
+    /// is always false: the facts are checked, the results are the evaluator's.
+    /// </summary>
+    public bool ResultsRecomputed { get; init; }
+
+    /// <summary>
+    /// The role in the seal's <c>srAts.claimed</c> "sealed for" attribute (§8), e.g. <c>urn:sigill:role:policy-evaluator</c>.
+    /// Meaningful only together with the signer: a shared service certificate's operator emits it for its own statements only.
+    /// </summary>
+    public string? SealedFor { get; init; }
+
+    /// <summary>The evidenceId this evaluation supersedes (§6), when it names one.</summary>
+    public string? Supersedes { get; init; }
+
+    /// <summary>No other valid evaluation of the same kind and control set supersedes it (§6).</summary>
+    public bool Current { get; init; } = true;
 }
 
 /// <summary>The run-level result (common rules §8).</summary>
@@ -334,6 +371,190 @@ public static class AgentRunVerifier
         if (!AgentProfiles.IsIJson(node)) return false;
         try { EnvelopeHashing.HashHex(AgentProfiles.Canonical(node)); return true; }
         catch (Exception ex) when (ex is not OperationCanceledException) { return false; }
+    }
+
+    private static string NormalizeId(string id) =>
+        (id.StartsWith("urn:uuid:", StringComparison.OrdinalIgnoreCase) ? id.Substring(9) : id).ToLowerInvariant();
+
+    private const string SealedForMediaType = "application/vnd.sigill.sealed-for+json";
+
+    /// <summary>The "sealed for" role of the classical signature's protected header (CE v2 §8), or null.</summary>
+    private static string? SealedForOf(JsonObject jws)
+    {
+        foreach (var e in (jws["signatures"] as JsonArray ?? new JsonArray { jws }).OfType<JsonObject>())
+        {
+            if (AgentProfiles.Str(e["protected"]) is not { } p) continue;
+            JsonObject? header;
+            try { header = JsonNode.Parse(Base64UrlDecode(p)) as JsonObject; }
+            catch (Exception ex) when (ex is FormatException or JsonException) { continue; }
+            if (AgentProfiles.Str(header?["alg"]) is { } alg && alg.StartsWith("ML-DSA", StringComparison.OrdinalIgnoreCase)) continue;
+            foreach (var claim in (header?["srAts"]?["claimed"] as JsonArray ?? new JsonArray()).OfType<JsonObject>())
+                if (AgentProfiles.Str(claim["mediaType"]) == SealedForMediaType && claim["qVals"] is JsonArray q && q.Count == 1)
+                    return AgentProfiles.Str(q[0]);
+            return null;
+        }
+        return null;
+    }
+
+    private static byte[] Base64UrlDecode(string s)
+    {
+        var b = s.Replace('-', '+').Replace('_', '/');
+        return Convert.FromBase64String(b.PadRight(b.Length + (4 - b.Length % 4) % 4, '='));
+    }
+
+    /// <summary>CE v2 §4.2: a policy evaluation names the Control Artifact, the event at throughSeq and, when finalized, run_end.</summary>
+    private static bool PolicySubjectBound(JsonObject env, JsonObject? subject, List<Signed> events, string? ctlSig, string? runEndSig)
+    {
+        if (ctlSig is null || AgentProfiles.Str(subject?["controlArtifactSignatureSha256"]) != ctlSig) return false;
+        var through = AgentProfiles.Int(env["policy"]?["prefix"]?["throughSeq"]);
+        var at = events.FirstOrDefault(e => e.Seq is { } s && s == through);
+        if (at is null || AgentProfiles.Str(subject?["throughSignatureSha256"]) != AgentProfiles.SignatureSha256(at.Jws)) return false;
+        return AgentProfiles.Str(env["policy"]?["state"]) != "finalized"
+            || (runEndSig is not null && AgentProfiles.Str(subject?["runEndSignatureSha256"]) == runEndSig);
+    }
+
+    private sealed class EvaluationV2Check
+    {
+        public List<string> Findings = new();
+        public bool? FactsMatch, DigestsMatch;
+        public string? PolicyStatus, State;
+    }
+
+    private static readonly Dictionary<string, int> ResultRank = new(StringComparer.Ordinal) { ["PASS"] = 0, ["INDETERMINATE"] = 1, ["FAIL"] = 2 };
+
+    /// <summary>The kind-specific rules of <c>spec/control-evaluation-v2.md</c> §2–§5. Schema conformance is checked elsewhere.</summary>
+    private static EvaluationV2Check CheckEvaluationV2(Signed sa, ArtifactCheck c, IReadOnlyDictionary<string, byte[]> payloads,
+        Signed? ctl, List<Signed> events, string label)
+    {
+        var r = new EvaluationV2Check();
+        void Bad(string m) => r.Findings.Add($"{label}: {m}.");
+        var env = sa.Env;
+        var kind = AgentProfiles.Str(env["kind"]);
+        var controls = (env["controls"] as JsonArray ?? new JsonArray()).OfType<JsonObject>().ToList();
+
+        // §2: overall follows from the controls.
+        var worst = controls.Select(x => AgentProfiles.Str(x["result"]) ?? "").Where(ResultRank.ContainsKey)
+            .Aggregate("PASS", (a, b) => ResultRank[b] > ResultRank[a] ? b : a);
+        if (AgentProfiles.Str(env["overall"]) != worst) Bad($"overall is {AgentProfiles.Str(env["overall"])}, but its controls give {worst}");
+        var ids = controls.Select(x => AgentProfiles.Str(x["id"]) ?? "").ToList();
+        foreach (var dup in ids.GroupBy(x => x).Where(g => g.Count() > 1)) Bad($"control '{dup.Key}' is reported more than once");
+        foreach (var x in controls)
+        {
+            var hasWhere = x["where"] is not null;
+            var pass = AgentProfiles.Str(x["result"]) == "PASS";
+            if (kind != "policy" && hasWhere) Bad($"control '{AgentProfiles.Str(x["id"])}' carries where, which only a policy evaluation may");
+            if (kind == "policy" && hasWhere == pass) Bad($"control '{AgentProfiles.Str(x["id"])}': where must be present exactly when the result is not PASS");
+        }
+
+        // The bytes of a signed object: only when supplied and equal to what the signature confirmed.
+        byte[]? Bytes(string role)
+        {
+            var o = sa.Objects.FirstOrDefault(x => x.Role == role);
+            if (o is null || !payloads.TryGetValue(o.Uri, out var b)) return null;
+            if (c.SignedDigest(o.Uri) != EnvelopeHashing.HashHex(b)) { Bad($"the supplied {role} bytes are not the signed ones"); return null; }
+            return b;
+        }
+        JsonObject? Doc(byte[]? b)
+        {
+            if (b is null) return null;
+            try { return JsonNode.Parse(b) as JsonObject; } catch (JsonException) { return null; }
+        }
+        static IEnumerable<string> IdsOf(JsonNode? arr) => (arr as JsonArray ?? new JsonArray())
+            .Select(x => x is JsonObject o ? AgentProfiles.Str(o["id"]) : AgentProfiles.Str(x)).OfType<string>();
+        void SameIds(IEnumerable<string> expected, string what)
+        {
+            var want = new HashSet<string>(expected, StringComparer.Ordinal);
+            var got = new HashSet<string>(ids, StringComparer.Ordinal);
+            foreach (var m in want.Except(got).OrderBy(x => x, StringComparer.Ordinal)) Bad($"{what} '{m}' is not reported");
+            foreach (var m in got.Except(want).OrderBy(x => x, StringComparer.Ordinal)) Bad($"control '{m}' is not one of the control set's {what}s");
+        }
+
+        var csBytes = Bytes("control-set");
+        var cs = Doc(csBytes);
+        switch (kind)
+        {
+            case "state":
+                if (cs is not null) SameIds(IdsOf(cs["controls"]), "state control"); // digests-only bundles keep v1 behaviour
+                break;
+            case "attested":
+                if (cs is null) { Bad("the control-set object is not supplied, so it cannot be checked that every private control was reported"); break; }
+                SameIds(IdsOf(cs["privateControls"]), "private control");
+                break;
+            case "policy":
+                CheckPolicy(env, csBytes, cs, Bytes("evaluation-facts"), Bytes("policy-approval"), sa, ctl, events, r, Bad, SameIds);
+                break;
+        }
+        return r;
+    }
+
+    private static void CheckPolicy(JsonObject env, byte[]? csBytes, JsonObject? cs, byte[]? factsBytes, byte[]? approvalBytes,
+        Signed sa, Signed? ctl, List<Signed> events, EvaluationV2Check r, Action<string> bad, Action<IEnumerable<string>, string> sameIds)
+    {
+        var policy = env["policy"] as JsonObject;
+        r.PolicyStatus = AgentProfiles.Str(policy?["policyStatus"]);
+        r.State = AgentProfiles.Str(policy?["state"]);
+        if (csBytes is null || cs is null) { bad("the control-set object is not supplied, so the evaluation cannot be checked"); return; }
+        if (sa.Objects.FirstOrDefault(o => o.Role == "control-set")?.ContentType != AgentPolicy.ControlSetContentType)
+            bad("its control set is not a policy control set");
+        if (AgentPolicy.Validate(csBytes).Count > 0 || cs["cedar"] is not JsonObject cedar) { bad("its control set is not a valid policy control set with Cedar rules"); return; }
+
+        var digests = AgentPolicy.ComputeDigests(csBytes);
+        r.DigestsMatch = digests.ApprovalScopeDigest == AgentProfiles.Str(policy?["approvalScopeDigest"])
+            && digests.CedarDigest == AgentProfiles.Str(policy?["cedarDigest"]);
+        if (r.DigestsMatch == false) bad("approvalScopeDigest or cedarDigest does not recompute from its control set");
+        if (AgentProfiles.Str(policy?["evaluator"]?["schemaSha256"]) != AgentProfiles.Str(cedar["schemaSha256"]))
+            bad("evaluator.schemaSha256 is not the control set's cedar.schemaSha256");
+        sameIds((cedar["policies"]?["staticPolicies"] as JsonObject ?? new JsonObject()).Select(kv => kv.Key), "rule");
+        var declaresPrivate = cs["privateControls"] is JsonArray pcs && pcs.Count > 0;
+        if (declaresPrivate != (policy?["privateControlsReported"] is not null))
+            bad("privateControlsReported must be present exactly when the control set declares private controls");
+
+        // Prefix (§4.2).
+        var prefix = policy?["prefix"] as JsonObject;
+        var through = AgentProfiles.Int(prefix?["throughSeq"]) ?? -2;
+        var missing = (prefix?["missingSeqs"] as JsonArray ?? new JsonArray()).Select(AgentProfiles.Int).ToList();
+        var missingOk = missing.All(m => m is not null) && missing.Zip(missing.Skip(1), (a, b) => a < b).All(x => x)
+            && (missing.Count == 0 || missing[0] == through + 1);
+        if (!missingOk) bad("prefix.missingSeqs must be ascending, start right after throughSeq and repeat nothing");
+        var prefixEvents = events.Where(e => e.Seq is { } s && s <= through).ToList();
+        var contiguous = through >= -1 && prefixEvents.Count == through + 1 && prefixEvents.Select(e => e.Seq).Distinct().Count() == through + 1;
+        var runEnd = prefixEvents.FirstOrDefault(e => e.StepType == "run_end");
+        var finalSeq = prefix?["finalSeq"] is JsonValue fv && fv.GetValueKind() != JsonValueKind.Null ? AgentProfiles.Int(fv) : null;
+        if (finalSeq != AgentProfiles.Int((runEnd?.Env["step"] as JsonObject)?["finalSeq"]))
+            bad("prefix.finalSeq is not the evaluated run_end's finalSeq");
+        var finalized = runEnd is not null && missing.Count == 0;
+        if ((r.State == "finalized") != finalized) bad($"state is {r.State}, but the evaluated prefix is {(finalized ? "finalized" : "partial")}");
+
+        // Facts (§4.5): rebuilt from the signed events, byte for byte.
+        if (factsBytes is null) bad("the evaluation-facts object is not supplied, so the facts cannot be rebuilt");
+        else if (!contiguous) bad($"the bundle lacks events of the evaluated prefix seq 0…{through}");
+        else if (AgentProfiles.Str(ctl?.Env["agent"]?["id"]) is not { } agentId || sa.CorrelationId is null) bad("the agent id or correlationId the facts depend on is missing");
+        else if (missingOk)
+        {
+            var rebuilt = AgentPolicy.BuildFacts(agentId, sa.CorrelationId, prefixEvents.Select(e => e.Env), missing.Select(m => m!.Value).ToList());
+            r.FactsMatch = rebuilt.Bytes.AsSpan().SequenceEqual(factsBytes);
+            if (r.FactsMatch == false) bad("its facts are not the facts of this run's signed events");
+            else
+            {
+                var seqs = new HashSet<string>((JsonNode.Parse(factsBytes)!["requests"] as JsonArray ?? new JsonArray())
+                    .Select(q => q?["seq"] is JsonValue v && v.GetValueKind() == JsonValueKind.String ? v.GetValue<string>() : AgentProfiles.Int(q?["seq"])?.ToString(System.Globalization.CultureInfo.InvariantCulture))
+                    .OfType<string>(), StringComparer.Ordinal);
+                foreach (var w in (env["controls"] as JsonArray ?? new JsonArray()).OfType<JsonObject>()
+                    .SelectMany(x => (x["where"] as JsonArray ?? new JsonArray()).Select(AgentProfiles.Str)).OfType<string>().Distinct())
+                    if (!seqs.Contains(w)) bad($"where names request '{w}', which is not in its facts");
+            }
+        }
+
+        // Approval (§4.4).
+        if (r.PolicyStatus == "unapproved") return;
+        var approval = approvalBytes is null ? null : JsonNode.Parse(approvalBytes) as JsonObject;
+        if (approval is null) { bad($"policyStatus is {r.PolicyStatus}, but the approval record is not supplied"); return; }
+        if (AgentProfiles.Str(approval["schemaName"]) != "AgentPolicyApproval" || AgentProfiles.Str(approval["decision"]) != "approved")
+            bad("its policy-approval object is not an approval record");
+        if (AgentProfiles.Str(approval["approvalScopeDigest"]) != AgentProfiles.Str(policy?["approvalScopeDigest"]))
+            bad("the approval record approves another approval scope");
+        if (AgentProfiles.Str(approval["agentId"]) != AgentProfiles.Str(ctl?.Env["agent"]?["id"]))
+            bad("the approval record is for another agent");
     }
 
     /// <summary>§6.4: never seal an envelope the verifier would reject. Throws ArgumentException.</summary>
@@ -881,7 +1102,7 @@ public static class AgentRunVerifier
             }
 
         // ── every payload must be a signed object of some artifact (§7)
-        var evalParsed = bundle.Evaluations.Select(e => ParseSigned(e.Envelope, e.Signature, AgentProfiles.ControlEvaluationSchema)).ToList();
+        var evalParsed = bundle.Evaluations.Select(e => ParseSigned(e.Envelope, e.Signature, AgentProfiles.EvaluationSchemaFor(e.Envelope))).ToList();
         var signedUris = new HashSet<string>(
             good.SelectMany(s => s.Objects).Concat(ctl?.Objects ?? new List<SignedObject>())
                 .Concat(evalParsed.Where(e => e.Sa is not null).SelectMany(e => e.Sa!.Objects)).Select(o => o.Uri),
@@ -979,10 +1200,14 @@ public static class AgentRunVerifier
             if (!c.TimestampOk) ef.Add($"{label}: a timestamp is required and it is {(c.TimestampPresent ? "invalid" : "missing")}.");
 
             var subject = sa.Env["subject"] as JsonObject;
-            var subjectBound = runEndSig is not null && ctlSig is not null
-                && AgentProfiles.Str(subject?["runEndSignatureSha256"]) == runEndSig
-                && AgentProfiles.Str(subject?["controlArtifactSignatureSha256"]) == ctlSig
-                && (correlation is null || sa.CorrelationId == correlation);
+            var isV2 = AgentProfiles.Str(sa.Env["schemaVersion"]) == "2";
+            var kind = isV2 ? AgentProfiles.Str(sa.Env["kind"]) : null;
+            var subjectBound = kind == "policy"
+                ? PolicySubjectBound(sa.Env, subject, good, ctlSig, runEndSig) && (correlation is null || sa.CorrelationId == correlation)
+                : runEndSig is not null && ctlSig is not null
+                    && AgentProfiles.Str(subject?["runEndSignatureSha256"]) == runEndSig
+                    && AgentProfiles.Str(subject?["controlArtifactSignatureSha256"]) == ctlSig
+                    && (correlation is null || sa.CorrelationId == correlation);
             if (!subjectBound) ef.Add($"{label}: its subject does not name this run's run_end and Control Artifact.");
 
             var controlSetMatches = false;
@@ -1007,6 +1232,8 @@ public static class AgentRunVerifier
                 && subjectRunEnd is not null && subjectRunEnd != runEndSig)
                 warnings.Add($"{label} names run_end {subjectRunEnd} of this control basis, which is not in the bundle: events may have been withheld.");
             if (baselineMatches == false) ef.Add($"{label}: its baseline is not the one sealed in the Control Artifact.");
+            var v2 = isV2 ? CheckEvaluationV2(sa, c, bundle.Payloads, ctl, good, label) : null;
+            if (v2 is not null) ef.AddRange(v2.Findings);
 
             evaluations.Add(new AgentEvaluationVerdict
             {
@@ -1014,7 +1241,11 @@ public static class AgentRunVerifier
                 SubjectBound = subjectBound, ControlSetDigestMatches = controlSetMatches, BaselineDigestMatches = baselineMatches,
                 SignatureValid = signatureValid, TimestampValid = c.TimestampOk, TimestampGenTime = c.GenTime,
                 Valid = signatureValid && c.TimestampOk && c.ObjectsComplete && sa.Conformance.Count == 0
-                    && subjectBound && controlSetMatches && baselineMatches != false,
+                    && subjectBound && controlSetMatches && baselineMatches != false && (v2 is null || v2.Findings.Count == 0),
+                SchemaVersion = AgentProfiles.Str(sa.Env["schemaVersion"]), Kind = kind,
+                PolicyStatus = v2?.PolicyStatus, PolicyState = v2?.State, FactsMatch = v2?.FactsMatch,
+                PolicyDigestsMatch = v2?.DigestsMatch, SealedFor = SealedForOf(sa.Jws),
+                Supersedes = AgentProfiles.Str((sa.Env["supersedes"] as JsonObject)?["evidenceId"]),
                 ObjectsComplete = c.ObjectsComplete, WellFormed = sa.Conformance.Count == 0, Signer = signer,
                 Certificate = c.Certificate, Overall = AgentProfiles.Str(sa.Env["overall"]),
                 Controls = (sa.Env["controls"] as JsonArray ?? new JsonArray()).OfType<JsonObject>()
@@ -1023,6 +1254,15 @@ public static class AgentRunVerifier
                 Findings = ef,
             });
         }
+
+        // v2 §6: evaluations are append-only; the current one of a kind is the one no valid evaluation supersedes.
+        var superseded = new HashSet<string>(evaluations.Where(e => e.Valid && e.Supersedes is not null)
+            .Select(e => NormalizeId(e.Supersedes!)), StringComparer.Ordinal);
+        for (var i = 0; i < evaluations.Count; i++)
+            if (evaluations[i].EvidenceId is { } id && superseded.Contains(NormalizeId(id)))
+                evaluations[i] = evaluations[i] with { Current = false };
+        foreach (var g in evaluations.Where(e => e.Valid && e.Current && e.Kind is not null).GroupBy(e => e.Kind).Where(g => g.Count() > 1))
+            warnings.Add($"{g.Count()} valid {g.Key} evaluations each claim to be current: none supersedes the others.");
 
         // A timestamp proves time only if its TSA is trusted (§8); the signature service reports that per timestamp.
         var timestamped = (ctlCheck is not null ? new[] { ("control artifact", ctlCheck) } : Array.Empty<(string, ArtifactCheck)>())

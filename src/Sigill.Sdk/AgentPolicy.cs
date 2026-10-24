@@ -150,7 +150,14 @@ public static class AgentPolicy
     /// <param name="correlationId">The run's <c>activity.correlationId</c>.</param>
     /// <param name="events">The run's Agent Execution Evidence envelopes, any order. Only typed fields are read.</param>
     /// <exception cref="ArgumentException">An event has no seq, or two claim the same one (the chain is not valid).</exception>
-    public static PolicyFacts BuildFacts(string agentId, string correlationId, IEnumerable<JsonObject> events)
+    public static PolicyFacts BuildFacts(string agentId, string correlationId, IEnumerable<JsonObject> events) =>
+        BuildFacts(agentId, correlationId, events, null);
+
+    /// <summary>
+    /// With <paramref name="claimedMissing"/>, <paramref name="events"/> is an evaluator's contiguous prefix and the
+    /// gaps it reported above it are taken as given: what a verifier rebuilds (<c>control-evaluation-v2.md</c> §4.5).
+    /// </summary>
+    internal static PolicyFacts BuildFacts(string agentId, string correlationId, IEnumerable<JsonObject> events, IReadOnlyList<int>? claimedMissing)
     {
         var bySeq = new SortedDictionary<int, JsonObject>();
         foreach (var e in events)
@@ -163,6 +170,11 @@ public static class AgentPolicy
         var missing = new List<int>();
         for (var s = 0; s <= maxSeq; s++) if (!bySeq.ContainsKey(s)) missing.Add(s);
         var throughSeq = missing.Count > 0 ? missing[0] - 1 : maxSeq;
+        if (claimedMissing is not null)
+        {
+            if (missing.Count > 0) throw new ArgumentException($"the prefix is not contiguous (seq {missing[0]} missing)", nameof(events));
+            missing = claimedMissing.ToList();
+        }
         var prefix = bySeq.Where(kv => kv.Key <= throughSeq).Select(kv => (Seq: kv.Key, Env: kv.Value)).ToList();
 
         static JsonObject? Step(JsonObject e) => e["step"] as JsonObject;

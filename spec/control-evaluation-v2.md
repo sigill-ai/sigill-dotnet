@@ -231,3 +231,10 @@ this run, the control set matches the Control Artifact, `overall` follows from
 `controls[]`, and for `policy`: both digests recompute, the facts rebuild byte-exactly, the
 approval record matches (§4.4), and the results recompute when the engine is available.
 Evaluations are reported on their own and never change the run's verdict.
+
+A `policy` evaluation can only be checked with its `control-set` and `evaluation-facts`
+bytes (and its `policy-approval` bytes when approved), so a verifier given its digests alone
+MUST NOT report it valid. The facts and the policy carry no prompts, arguments or results,
+so a bundle can carry them without carrying content. An `attested` evaluation likewise needs
+the `control-set` bytes to show every private control was reported. A `state` evaluation
+keeps v1 behaviour: without the control set's bytes its control ids are not checked.
