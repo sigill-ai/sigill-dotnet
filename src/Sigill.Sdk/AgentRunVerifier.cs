@@ -381,6 +381,12 @@ public static class AgentRunVerifier
     /// <summary>The "sealed for" role of the classical signature's protected header (CE v2 §8), or null.</summary>
     private static string? SealedForOf(JsonObject jws)
     {
+        try { return SealedForCore(jws); }
+        catch (Exception ex) when (ex is FormatException or JsonException or ArgumentException or InvalidOperationException) { return null; }
+    }
+
+    private static string? SealedForCore(JsonObject jws)
+    {
         foreach (var e in (jws["signatures"] as JsonArray ?? new JsonArray { jws }).OfType<JsonObject>())
         {
             if (AgentProfiles.Str(e["protected"]) is not { } p) continue;
@@ -388,7 +394,7 @@ public static class AgentRunVerifier
             try { header = JsonNode.Parse(Base64UrlDecode(p)) as JsonObject; }
             catch (Exception ex) when (ex is FormatException or JsonException) { continue; }
             if (AgentProfiles.Str(header?["alg"]) is { } alg && alg.StartsWith("ML-DSA", StringComparison.OrdinalIgnoreCase)) continue;
-            foreach (var claim in (header?["srAts"]?["claimed"] as JsonArray ?? new JsonArray()).OfType<JsonObject>())
+            foreach (var claim in ((header?["srAts"] as JsonObject)?["claimed"] as JsonArray ?? new JsonArray()).OfType<JsonObject>())
                 if (AgentProfiles.Str(claim["mediaType"]) == SealedForMediaType && claim["qVals"] is JsonArray q && q.Count == 1)
                     return AgentProfiles.Str(q[0]);
             return null;
@@ -411,6 +417,19 @@ public static class AgentRunVerifier
         if (at is null || AgentProfiles.Str(subject?["throughSignatureSha256"]) != AgentProfiles.SignatureSha256(at.Jws)) return false;
         return AgentProfiles.Str(env["policy"]?["state"]) != "finalized"
             || (runEndSig is not null && AgentProfiles.Str(subject?["runEndSignatureSha256"]) == runEndSig);
+    }
+
+    /// <summary>Supplied object bytes are untrusted: an I-JSON object, or null (never an exception).</summary>
+    private static JsonObject? ParseObject(byte[]? b)
+    {
+        if (b is null) return null;
+        try
+        {
+            using (var d = JsonDocument.Parse(b))
+                if (AgentProfiles.FindDuplicateName(d.RootElement) is not null) return null;
+            return JsonNode.Parse(b) is JsonObject o && AgentProfiles.IsIJson(o) ? o : null;
+        }
+        catch (Exception ex) when (ex is JsonException or ArgumentException or InvalidOperationException) { return null; }
     }
 
     private sealed class EvaluationV2Check
@@ -454,11 +473,7 @@ public static class AgentRunVerifier
             if (c.SignedDigest(o.Uri) != EnvelopeHashing.HashHex(b)) { Bad($"the supplied {role} bytes are not the signed ones"); return null; }
             return b;
         }
-        JsonObject? Doc(byte[]? b)
-        {
-            if (b is null) return null;
-            try { return JsonNode.Parse(b) as JsonObject; } catch (JsonException) { return null; }
-        }
+        JsonObject? Doc(byte[]? b) => ParseObject(b);
         static IEnumerable<string> IdsOf(JsonNode? arr) => (arr as JsonArray ?? new JsonArray())
             .Select(x => x is JsonObject o ? AgentProfiles.Str(o["id"]) : AgentProfiles.Str(x)).OfType<string>();
         void SameIds(IEnumerable<string> expected, string what)
@@ -547,7 +562,7 @@ public static class AgentRunVerifier
 
         // Approval (§4.4).
         if (r.PolicyStatus == "unapproved") return;
-        var approval = approvalBytes is null ? null : JsonNode.Parse(approvalBytes) as JsonObject;
+        var approval = ParseObject(approvalBytes);
         if (approval is null) { bad($"policyStatus is {r.PolicyStatus}, but the approval record is not supplied"); return; }
         if (AgentProfiles.Str(approval["schemaName"]) != "AgentPolicyApproval" || AgentProfiles.Str(approval["decision"]) != "approved")
             bad("its policy-approval object is not an approval record");
@@ -1203,7 +1218,7 @@ public static class AgentRunVerifier
             var isV2 = AgentProfiles.Str(sa.Env["schemaVersion"]) == "2";
             var kind = isV2 ? AgentProfiles.Str(sa.Env["kind"]) : null;
             var subjectBound = kind == "policy"
-                ? PolicySubjectBound(sa.Env, subject, good, ctlSig, runEndSig) && (correlation is null || sa.CorrelationId == correlation)
+                ? sa.Conformance.Count == 0 && PolicySubjectBound(sa.Env, subject, good, ctlSig, runEndSig) && (correlation is null || sa.CorrelationId == correlation)
                 : runEndSig is not null && ctlSig is not null
                     && AgentProfiles.Str(subject?["runEndSignatureSha256"]) == runEndSig
                     && AgentProfiles.Str(subject?["controlArtifactSignatureSha256"]) == ctlSig
@@ -1232,7 +1247,8 @@ public static class AgentRunVerifier
                 && subjectRunEnd is not null && subjectRunEnd != runEndSig)
                 warnings.Add($"{label} names run_end {subjectRunEnd} of this control basis, which is not in the bundle: events may have been withheld.");
             if (baselineMatches == false) ef.Add($"{label}: its baseline is not the one sealed in the Control Artifact.");
-            var v2 = isV2 ? CheckEvaluationV2(sa, c, bundle.Payloads, ctl, good, label) : null;
+            // Kind rules read typed fields, so they run on a schema-valid envelope only; a non-conforming one is never valid anyway.
+            var v2 = isV2 && sa.Conformance.Count == 0 ? CheckEvaluationV2(sa, c, bundle.Payloads, ctl, good, label) : null;
             if (v2 is not null) ef.AddRange(v2.Findings);
 
             evaluations.Add(new AgentEvaluationVerdict
