@@ -130,6 +130,84 @@ public partial class AgentRunTests
     private static AgentRunOptions PolicyOptions() => Options() with { ControlSet = AgentPolicy.ControlSetFromDocument(PolicyDoc) };
 
     [Fact]
+    public async Task PolicyAndAttestedEvaluations_SealAndVerify_AsControlEvaluationV2()
+    {
+        var sealer = new StubSealer();
+        using var client = Client(sealer);
+        var run = await Start(client, PolicyOptions());
+        await run.RecordToolCallAsync("crm.read_customer", Encoding.UTF8.GetBytes("{}"), operation: "read", useId: "c1");
+        await run.RecordToolResultAsync("crm.read_customer", Encoding.UTF8.GetBytes("{}"), useId: "c1");
+        await run.RecordToolCallAsync("crm.delete_customer", Encoding.UTF8.GetBytes("{}"), operation: "delete", consequential: true, useId: "c2");
+        await run.RecordToolResultAsync("crm.delete_customer", Encoding.UTF8.GetBytes("{}"), useId: "c2");
+        var bundle = await run.FinishAsync("completed");
+
+        sealer.Cert = CertV;
+        var rules = new[]
+        {
+            new PolicyRuleResult("allowed-tools", "FAIL", new[] { "3" }),
+            new PolicyRuleResult("consequential-needs-approval", "FAIL", new[] { "3" }),
+            new PolicyRuleResult("max-steps", "PASS"),
+            new PolicyRuleResult("no-unpaired-consequential", "PASS"),
+        };
+        var partial = ControlEvaluation.PreparePolicy(new PolicyEvaluationRequest
+        {
+            CertificateId = VerifierCert, EvaluatorId = "urn:example:policy-evaluator", EvaluatorVersion = "1.0.0",
+            ControlArtifact = run.ControlArtifact, ControlSetDocument = PolicyDoc, Events = bundle.Artifacts.Take(3).ToList(),
+            Rules = rules.Select(r => r with { Result = "PASS", Where = null }).ToList(), PolicyStatus = "unapproved",
+            Engine = "cedar-policy@4.14.0", PrivateControlsReported = "pending",
+        }, Clock());
+        partial.Envelope["policy"]!["state"]!.GetValue<string>().Should().Be("partial");
+        var first = await ControlEvaluation.SealAsync(client, partial, VerifierCert);
+
+        var prepared = ControlEvaluation.PreparePolicy(new PolicyEvaluationRequest
+        {
+            CertificateId = VerifierCert, EvaluatorId = "urn:example:policy-evaluator", EvaluatorVersion = "1.0.0",
+            ControlArtifact = run.ControlArtifact, ControlSetDocument = PolicyDoc, Events = bundle.Artifacts,
+            Rules = rules, PolicyStatus = "unapproved", Engine = "cedar-policy@4.14.0", PrivateControlsReported = "reported",
+            Supersedes = new EvaluationReference(first.EvidenceId!, first.SignatureSha256!),
+        }, Clock());
+        prepared.Envelope["overall"]!.GetValue<string>().Should().Be("FAIL", "overall is derived from the rules");
+        var final = await ControlEvaluation.SealAsync(client, prepared, VerifierCert);
+
+        sealer.Cert = CertA; // the producer seals its own private-control results with the run's certificate
+        var attestedPrep = ControlEvaluation.PrepareAttested(new AttestedEvaluationRequest
+        {
+            CertificateId = VerifierCert, ProducerId = "urn:example:harness", ProducerVersion = "1.0.0",
+            ControlArtifact = run.ControlArtifact, RunEnd = bundle.Artifacts[^1], ControlSetDocument = PolicyDoc,
+            Controls = new[] { new ControlResult("no-card-numbers-in-replies", "PASS") },
+        }, Clock());
+        var attested = await ControlEvaluation.SealAsync(client, attestedPrep, VerifierCert);
+
+        var payloads = partial.Payloads.Concat(prepared.Payloads).Concat(attestedPrep.Payloads)
+            .GroupBy(kv => kv.Key).ToDictionary(g => g.Key, g => g.First().Value);
+        bundle = bundle.WithEvaluations(first, final, attested).WithPayloads(payloads);
+        var result = await AgentRunVerifier.VerifyAsync(AgentRunBundle.Parse(bundle.ToJsonString()), StubVerify);
+
+        result.Verdict.Should().Be("run_finalized", string.Join("\n", result.Findings));
+        result.Evaluations.Should().HaveCount(3);
+        foreach (var e in result.Evaluations) e.Valid.Should().BeTrue(string.Join(" | ", e.Findings));
+        result.Evaluations[0].Should().Match<AgentEvaluationVerdict>(e => e.Kind == "policy" && e.PolicyState == "partial" && !e.Current);
+        result.Evaluations[1].Should().Match<AgentEvaluationVerdict>(e => e.Kind == "policy" && e.FactsMatch == true
+            && e.PolicyDigestsMatch == true && e.Current && e.Overall == "FAIL" && !e.ResultsRecomputed);
+        result.Evaluations[2].Kind.Should().Be("attested");
+        payloads.Keys.Should().Contain(run.ControlArtifact.Envelope["objects"]!.AsArray()
+            .Select(o => o!["uri"]!.GetValue<string>()).Where(u => payloads.ContainsKey(u)), "the control set travels as a payload");
+    }
+
+    [Fact]
+    public void PreparePolicy_RefusesWhatWouldNotVerify()
+    {
+        var control = new AgentRunArtifact(new JsonObject(), new JsonObject(), new Dictionary<string, string>());
+        var request = new PolicyEvaluationRequest
+        {
+            CertificateId = VerifierCert, EvaluatorId = "e", EvaluatorVersion = "1", ControlArtifact = control,
+            ControlSetDocument = Encoding.UTF8.GetBytes("{}"), Events = Array.Empty<AgentRunArtifact>(),
+            Rules = Array.Empty<PolicyRuleResult>(), PolicyStatus = "unapproved", Engine = "cedar-policy@4.14.0",
+        };
+        FluentActions.Invoking(() => ControlEvaluation.PreparePolicy(request)).Should().Throw<ArgumentException>().WithMessage("*policy control set*");
+    }
+
+    [Fact]
     public async Task DisclosePolicy_UploadsTheControlArtifactAndDocument_Only()
     {
         var sealer = new StubSealer();
