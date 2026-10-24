@@ -411,8 +411,8 @@
         "signature": {
           "signatures": [
             {
-              "protected": "eyJhbGciOiJFUzI1NiIsInNpZ0QiOnsiY3R5cyI6WyJhcHBsaWNhdGlvbi92bmQuc2lnaWxsLmNvbnRyb2wtZXZhbHVhdGlvbitqc29uIiwiYXBwbGljYXRpb24vdm5kLnNpZ2lsbC5jb250cm9sLXNldCtqc29uIiwiYXBwbGljYXRpb24vanNvbiJdLCJoYXNoViI6WyJkcTRfX1JZMDFlX3ZJUWN0ZnF6T3FBS0Q0RGtaTlpSZ005VkVCWlVYMW00IiwidjVHN2RUVXAzbEpsQjFpQUtSdFlCTEhhVkp0NEJMaG9XM0N0bWFUa1FkRSIsIldMeU95YkJ4X0RvU3p1UkhscWVBNGQxMG9fQl9UbERzWUJRcXR4T05menMiXSwicGFycyI6WyJ1cm46c2lnaWxsOmVudmVsb3BlIiwidXJuOmV4YW1wbGU6b2JqOmNvbnRyb2wtc2V0IiwidXJuOmV4YW1wbGU6b2JqOmZhY3RzLTk1MCJdfSwic3JBdHMiOnsiY2xhaW1lZCI6W3siZW5jb2RpbmciOiJ1dGYtOCIsIm1lZGlhVHlwZSI6ImFwcGxpY2F0aW9uL3ZuZC5zaWdpbGwuc2VhbGVkLWZvcitqc29uIiwicVZhbHMiOlsidXJuOnNpZ2lsbDpyb2xlOnBvbGljeS1ldmFsdWF0b3IiXX1dfSwieDVjIjpbImMzUjFZaUJ6YVdkdWFXNW5JR05sY25ScFptbGpZWFJsSUZZZ0tIUm9aU0JsZG1Gc2RXRjBhVzVuSUhabGNtbG1hV1Z5S1E9PSJdLCJ4NXQjUzI1NiI6InotX0hHTlo3QnRNLWtINUNfdmJVTEp1LXcyYUdaNXVBSWVzdEY5dnYxV0kifQ",
-              "signature": "FYjCNuVpuNt7wZRNa3xcUUPdMKQrVYoImUp_pc7-8b0",
+              "protected": "eyJhbGciOiJFUzI1NiIsInNpZ0QiOnsiY3R5cyI6WyJhcHBsaWNhdGlvbi92bmQuc2lnaWxsLmNvbnRyb2wtZXZhbHVhdGlvbitqc29uIiwiYXBwbGljYXRpb24vdm5kLnNpZ2lsbC5jb250cm9sLXNldCtqc29uIiwiYXBwbGljYXRpb24vanNvbiJdLCJoYXNoViI6WyJkcTRfX1JZMDFlX3ZJUWN0ZnF6T3FBS0Q0RGtaTlpSZ005VkVCWlVYMW00IiwidjVHN2RUVXAzbEpsQjFpQUtSdFlCTEhhVkp0NEJMaG9XM0N0bWFUa1FkRSIsIldMeU95YkJ4X0RvU3p1UkhscWVBNGQxMG9fQl9UbERzWUJRcXR4T05menMiXSwicGFycyI6WyJ1cm46c2lnaWxsOmVudmVsb3BlIiwidXJuOmV4YW1wbGU6b2JqOmNvbnRyb2wtc2V0IiwidXJuOmV4YW1wbGU6b2JqOmZhY3RzLTk1MCJdfSwic3JBdHMiOnsiY2xhaW1lZCI6W3siZW5jb2RpbmciOiI4Yml0IiwibWVkaWFUeXBlIjoiYXBwbGljYXRpb24vdm5kLnNpZ2lsbC5zZWFsZWQtZm9yIiwicVZhbHMiOlsidXJuOnNpZ2lsbDpyb2xlOnBvbGljeS1ldmFsdWF0b3IiXX1dfSwieDVjIjpbImMzUjFZaUJ6YVdkdWFXNW5JR05sY25ScFptbGpZWFJsSUZZZ0tIUm9aU0JsZG1Gc2RXRjBhVzVuSUhabGNtbG1hV1Z5S1E9PSJdLCJ4NXQjUzI1NiI6InotX0hHTlo3QnRNLWtINUNfdmJVTEp1LXcyYUdaNXVBSWVzdEY5dnYxV0kifQ",
+              "signature": "5qPknz9BGKkRuEGr_QPEw3kjfAM-JO0C2w33flwpb9w",
               "header": {
                 "stubTimestamp": {
                   "genTime": "2026-10-01T09:40:01Z",
@@ -456,7 +456,7 @@
     },
     "binding": "bound",
     "missingSeqs": [],
-    "fingerprint": "35dc077ef7ed6625afe007d12b1bb5939c1d42507d23dfc1e13751db0e130158",
+    "fingerprint": "dc687a9f90db5806c192cacb8c40298e579877a2996a7eebd2d17c3186ce3004",
     "findingsContain": [],
     "warningsContain": [],
     "warningCount": 0,

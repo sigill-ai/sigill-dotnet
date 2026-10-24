@@ -407,8 +407,8 @@
         "signature": {
           "signatures": [
             {
-              "protected": "eyJhbGciOiJFUzI1NiIsInNpZ0QiOnsiY3R5cyI6WyJhcHBsaWNhdGlvbi92bmQuc2lnaWxsLmNvbnRyb2wtZXZhbHVhdGlvbitqc29uIiwiYXBwbGljYXRpb24vdm5kLnNpZ2lsbC5jb250cm9sLXNldCtqc29uIiwiYXBwbGljYXRpb24vanNvbiJdLCJoYXNoViI6WyJ4SGRIRjVEMnZzNHhYZUVhY0ZfUlJFbFk5S1poNEtYcjdWcGxTS2xzSGJZIiwidjVHN2RUVXAzbEpsQjFpQUtSdFlCTEhhVkp0NEJMaG9XM0N0bWFUa1FkRSIsIkIyR1JiUlp2WTFWYlNZdGoxTjdvcE1BeTlmVnZsRXl2ZENfeTR3eWpwa3MiXSwicGFycyI6WyJ1cm46c2lnaWxsOmVudmVsb3BlIiwidXJuOmV4YW1wbGU6b2JqOmNvbnRyb2wtc2V0IiwidXJuOmV4YW1wbGU6b2JqOmZhY3RzLTk1MCJdfSwic3JBdHMiOnsiY2xhaW1lZCI6W3siZW5jb2RpbmciOiJ1dGYtOCIsIm1lZGlhVHlwZSI6ImFwcGxpY2F0aW9uL3ZuZC5zaWdpbGwuc2VhbGVkLWZvcitqc29uIiwicVZhbHMiOlsidXJuOnNpZ2lsbDpyb2xlOnBvbGljeS1ldmFsdWF0b3IiXX1dfSwieDVjIjpbImMzUjFZaUJ6YVdkdWFXNW5JR05sY25ScFptbGpZWFJsSUZZZ0tIUm9aU0JsZG1Gc2RXRjBhVzVuSUhabGNtbG1hV1Z5S1E9PSJdLCJ4NXQjUzI1NiI6InotX0hHTlo3QnRNLWtINUNfdmJVTEp1LXcyYUdaNXVBSWVzdEY5dnYxV0kifQ",
-              "signature": "2Ccz3pp-nB7R0pCU92rgEXqa929IawsBgn9eebki6rs",
+              "protected": "eyJhbGciOiJFUzI1NiIsInNpZ0QiOnsiY3R5cyI6WyJhcHBsaWNhdGlvbi92bmQuc2lnaWxsLmNvbnRyb2wtZXZhbHVhdGlvbitqc29uIiwiYXBwbGljYXRpb24vdm5kLnNpZ2lsbC5jb250cm9sLXNldCtqc29uIiwiYXBwbGljYXRpb24vanNvbiJdLCJoYXNoViI6WyJ4SGRIRjVEMnZzNHhYZUVhY0ZfUlJFbFk5S1poNEtYcjdWcGxTS2xzSGJZIiwidjVHN2RUVXAzbEpsQjFpQUtSdFlCTEhhVkp0NEJMaG9XM0N0bWFUa1FkRSIsIkIyR1JiUlp2WTFWYlNZdGoxTjdvcE1BeTlmVnZsRXl2ZENfeTR3eWpwa3MiXSwicGFycyI6WyJ1cm46c2lnaWxsOmVudmVsb3BlIiwidXJuOmV4YW1wbGU6b2JqOmNvbnRyb2wtc2V0IiwidXJuOmV4YW1wbGU6b2JqOmZhY3RzLTk1MCJdfSwic3JBdHMiOnsiY2xhaW1lZCI6W3siZW5jb2RpbmciOiI4Yml0IiwibWVkaWFUeXBlIjoiYXBwbGljYXRpb24vdm5kLnNpZ2lsbC5zZWFsZWQtZm9yIiwicVZhbHMiOlsidXJuOnNpZ2lsbDpyb2xlOnBvbGljeS1ldmFsdWF0b3IiXX1dfSwieDVjIjpbImMzUjFZaUJ6YVdkdWFXNW5JR05sY25ScFptbGpZWFJsSUZZZ0tIUm9aU0JsZG1Gc2RXRjBhVzVuSUhabGNtbG1hV1Z5S1E9PSJdLCJ4NXQjUzI1NiI6InotX0hHTlo3QnRNLWtINUNfdmJVTEp1LXcyYUdaNXVBSWVzdEY5dnYxV0kifQ",
+              "signature": "VADTtUlYLHM7lPRy_sFeDSJu48hhB6qGpTHQKdyFnsE",
               "header": {
                 "stubTimestamp": {
                   "genTime": "2026-10-01T09:40:01Z",
@@ -452,7 +452,7 @@
     },
     "binding": "bound",
     "missingSeqs": [],
-    "fingerprint": "7a55c57164631675e4f39d09085302fa35003e24695df59f69ba320794188348",
+    "fingerprint": "d88a92e3378d0470e55014e9a8175c350a4d38decd0ec828b44090d17342da36",
     "findingsContain": [],
     "warningsContain": [],
     "warningCount": 0,

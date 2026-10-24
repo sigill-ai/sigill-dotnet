@@ -411,8 +411,8 @@
         "signature": {
           "signatures": [
             {
-              "protected": "eyJhbGciOiJFUzI1NiIsInNpZ0QiOnsiY3R5cyI6WyJhcHBsaWNhdGlvbi92bmQuc2lnaWxsLmNvbnRyb2wtZXZhbHVhdGlvbitqc29uIiwiYXBwbGljYXRpb24vdm5kLnNpZ2lsbC5jb250cm9sLXNldCtqc29uIiwiYXBwbGljYXRpb24vanNvbiJdLCJoYXNoViI6WyJjTWw0N3o2VDNJWV9MdVFocW84SUh6aTRwSDRaZTBsM1ota1pDejdnUldzIiwidjVHN2RUVXAzbEpsQjFpQUtSdFlCTEhhVkp0NEJMaG9XM0N0bWFUa1FkRSIsIkIyR1JiUlp2WTFWYlNZdGoxTjdvcE1BeTlmVnZsRXl2ZENfeTR3eWpwa3MiXSwicGFycyI6WyJ1cm46c2lnaWxsOmVudmVsb3BlIiwidXJuOmV4YW1wbGU6b2JqOmNvbnRyb2wtc2V0IiwidXJuOmV4YW1wbGU6b2JqOmZhY3RzLTk1MCJdfSwic3JBdHMiOnsiY2xhaW1lZCI6W3siZW5jb2RpbmciOiJ1dGYtOCIsIm1lZGlhVHlwZSI6ImFwcGxpY2F0aW9uL3ZuZC5zaWdpbGwuc2VhbGVkLWZvcitqc29uIiwicVZhbHMiOlsidXJuOnNpZ2lsbDpyb2xlOnBvbGljeS1ldmFsdWF0b3IiXX1dfSwieDVjIjpbImMzUjFZaUJ6YVdkdWFXNW5JR05sY25ScFptbGpZWFJsSUZZZ0tIUm9aU0JsZG1Gc2RXRjBhVzVuSUhabGNtbG1hV1Z5S1E9PSJdLCJ4NXQjUzI1NiI6InotX0hHTlo3QnRNLWtINUNfdmJVTEp1LXcyYUdaNXVBSWVzdEY5dnYxV0kifQ",
-              "signature": "D7CMqDm6AeZQjJYd_KMxfL6HgXBpgdi_afthJPOkFu4",
+              "protected": "eyJhbGciOiJFUzI1NiIsInNpZ0QiOnsiY3R5cyI6WyJhcHBsaWNhdGlvbi92bmQuc2lnaWxsLmNvbnRyb2wtZXZhbHVhdGlvbitqc29uIiwiYXBwbGljYXRpb24vdm5kLnNpZ2lsbC5jb250cm9sLXNldCtqc29uIiwiYXBwbGljYXRpb24vanNvbiJdLCJoYXNoViI6WyJjTWw0N3o2VDNJWV9MdVFocW84SUh6aTRwSDRaZTBsM1ota1pDejdnUldzIiwidjVHN2RUVXAzbEpsQjFpQUtSdFlCTEhhVkp0NEJMaG9XM0N0bWFUa1FkRSIsIkIyR1JiUlp2WTFWYlNZdGoxTjdvcE1BeTlmVnZsRXl2ZENfeTR3eWpwa3MiXSwicGFycyI6WyJ1cm46c2lnaWxsOmVudmVsb3BlIiwidXJuOmV4YW1wbGU6b2JqOmNvbnRyb2wtc2V0IiwidXJuOmV4YW1wbGU6b2JqOmZhY3RzLTk1MCJdfSwic3JBdHMiOnsiY2xhaW1lZCI6W3siZW5jb2RpbmciOiI4Yml0IiwibWVkaWFUeXBlIjoiYXBwbGljYXRpb24vdm5kLnNpZ2lsbC5zZWFsZWQtZm9yIiwicVZhbHMiOlsidXJuOnNpZ2lsbDpyb2xlOnBvbGljeS1ldmFsdWF0b3IiXX1dfSwieDVjIjpbImMzUjFZaUJ6YVdkdWFXNW5JR05sY25ScFptbGpZWFJsSUZZZ0tIUm9aU0JsZG1Gc2RXRjBhVzVuSUhabGNtbG1hV1Z5S1E9PSJdLCJ4NXQjUzI1NiI6InotX0hHTlo3QnRNLWtINUNfdmJVTEp1LXcyYUdaNXVBSWVzdEY5dnYxV0kifQ",
+              "signature": "DcM04MBD8iHDM_bbDWIqoCAK5AsEDFQe3Bx-tQpdu4Q",
               "header": {
                 "stubTimestamp": {
                   "genTime": "2026-10-01T09:40:01Z",
@@ -456,7 +456,7 @@
     },
     "binding": "bound",
     "missingSeqs": [],
-    "fingerprint": "befb13fed091c14739c7a4f53c042e7be7337e7e0823968b01e830ecc4b45439",
+    "fingerprint": "74d137b38fc068b75f70b47dda84fb74d4fbce4bbce70e13991563bca694ca3b",
     "findingsContain": [],
     "warningsContain": [],
     "warningCount": 0,

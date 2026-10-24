@@ -472,8 +472,8 @@
         "signature": {
           "signatures": [
             {
-              "protected": "eyJhbGciOiJFUzI1NiIsInNpZ0QiOnsiY3R5cyI6WyJhcHBsaWNhdGlvbi92bmQuc2lnaWxsLmNvbnRyb2wtZXZhbHVhdGlvbitqc29uIiwiYXBwbGljYXRpb24vdm5kLnNpZ2lsbC5jb250cm9sLXNldCtqc29uIiwiYXBwbGljYXRpb24vanNvbiJdLCJoYXNoViI6WyJzR0VLWDlIQUUwc004bmFEeE1NOXFycTdnRFFFU0l3Z3I5UHZhS081XzlrIiwidjVHN2RUVXAzbEpsQjFpQUtSdFlCTEhhVkp0NEJMaG9XM0N0bWFUa1FkRSIsImI4SzFoN3U0X3JXTUtaMnM1ZzdzclViYTZjQk95MW9LWkRPSk5BYXhUckEiXSwicGFycyI6WyJ1cm46c2lnaWxsOmVudmVsb3BlIiwidXJuOmV4YW1wbGU6b2JqOmNvbnRyb2wtc2V0IiwidXJuOmV4YW1wbGU6b2JqOmZhY3RzLTk1MCJdfSwic3JBdHMiOnsiY2xhaW1lZCI6W3siZW5jb2RpbmciOiJ1dGYtOCIsIm1lZGlhVHlwZSI6ImFwcGxpY2F0aW9uL3ZuZC5zaWdpbGwuc2VhbGVkLWZvcitqc29uIiwicVZhbHMiOlsidXJuOnNpZ2lsbDpyb2xlOnBvbGljeS1ldmFsdWF0b3IiXX1dfSwieDVjIjpbImMzUjFZaUJ6YVdkdWFXNW5JR05sY25ScFptbGpZWFJsSUZZZ0tIUm9aU0JsZG1Gc2RXRjBhVzVuSUhabGNtbG1hV1Z5S1E9PSJdLCJ4NXQjUzI1NiI6InotX0hHTlo3QnRNLWtINUNfdmJVTEp1LXcyYUdaNXVBSWVzdEY5dnYxV0kifQ",
-              "signature": "KLTi5d4e5C0NmvFVhGPGzWd3VezKbIHEAB4mmSVV7BM",
+              "protected": "eyJhbGciOiJFUzI1NiIsInNpZ0QiOnsiY3R5cyI6WyJhcHBsaWNhdGlvbi92bmQuc2lnaWxsLmNvbnRyb2wtZXZhbHVhdGlvbitqc29uIiwiYXBwbGljYXRpb24vdm5kLnNpZ2lsbC5jb250cm9sLXNldCtqc29uIiwiYXBwbGljYXRpb24vanNvbiJdLCJoYXNoViI6WyJzR0VLWDlIQUUwc004bmFEeE1NOXFycTdnRFFFU0l3Z3I5UHZhS081XzlrIiwidjVHN2RUVXAzbEpsQjFpQUtSdFlCTEhhVkp0NEJMaG9XM0N0bWFUa1FkRSIsImI4SzFoN3U0X3JXTUtaMnM1ZzdzclViYTZjQk95MW9LWkRPSk5BYXhUckEiXSwicGFycyI6WyJ1cm46c2lnaWxsOmVudmVsb3BlIiwidXJuOmV4YW1wbGU6b2JqOmNvbnRyb2wtc2V0IiwidXJuOmV4YW1wbGU6b2JqOmZhY3RzLTk1MCJdfSwic3JBdHMiOnsiY2xhaW1lZCI6W3siZW5jb2RpbmciOiI4Yml0IiwibWVkaWFUeXBlIjoiYXBwbGljYXRpb24vdm5kLnNpZ2lsbC5zZWFsZWQtZm9yIiwicVZhbHMiOlsidXJuOnNpZ2lsbDpyb2xlOnBvbGljeS1ldmFsdWF0b3IiXX1dfSwieDVjIjpbImMzUjFZaUJ6YVdkdWFXNW5JR05sY25ScFptbGpZWFJsSUZZZ0tIUm9aU0JsZG1Gc2RXRjBhVzVuSUhabGNtbG1hV1Z5S1E9PSJdLCJ4NXQjUzI1NiI6InotX0hHTlo3QnRNLWtINUNfdmJVTEp1LXcyYUdaNXVBSWVzdEY5dnYxV0kifQ",
+              "signature": "7cOx8E7x4J0kO-65OILs0EIdQXCxmDb_g3E0VjlVwAw",
               "header": {
                 "stubTimestamp": {
                   "genTime": "2026-10-01T09:40:01Z",
@@ -518,7 +518,7 @@
     },
     "binding": "bound",
     "missingSeqs": [],
-    "fingerprint": "30c17f67e32a4f1774174c0ec4b9a4ff5fbf85e7eab2b087669b2d7f7ffb282a",
+    "fingerprint": "3902059d7945e34947eef186fabf646715d2a8f862ca2103e0e443887a1c6f25",
     "findingsContain": [],
     "warningsContain": [],
     "warningCount": 0,

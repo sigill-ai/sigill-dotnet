@@ -215,10 +215,11 @@ with) is only attributable to the service operator when the JAdES protected head
 carries the operator's reserved role in `srAts.claimed` (ETSI TS 119 182-1 §5.2.6):
 
 ```json
-"srAts": { "claimed": [ { "mediaType": "application/vnd.sigill.sealed-for+json",
-                           "encoding": "utf-8", "qVals": ["urn:sigill:role:policy-evaluator"] } ] }
+"srAts": { "claimed": [ { "mediaType": "application/vnd.sigill.sealed-for",
+                           "encoding": "8bit", "qVals": ["urn:sigill:role:policy-evaluator"] } ] }
 ```
 
+`encoding` is a JSON Schema `contentEncoding` value (`8bit`: the value is the plain string).
 The operator MUST emit this value only for its own statements, never on a seal requested
 by a customer. A verifier MUST NOT attribute a `policy` evaluation to Sigill unless the
 seal carries it.

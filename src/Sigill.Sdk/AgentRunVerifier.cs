@@ -376,7 +376,7 @@ public static class AgentRunVerifier
     private static string NormalizeId(string id) =>
         (id.StartsWith("urn:uuid:", StringComparison.OrdinalIgnoreCase) ? id.Substring(9) : id).ToLowerInvariant();
 
-    private const string SealedForMediaType = "application/vnd.sigill.sealed-for+json";
+    private const string SealedForMediaType = "application/vnd.sigill.sealed-for";
 
     /// <summary>The "sealed for" role of the classical signature's protected header (CE v2 §8), or null.</summary>
     private static string? SealedForOf(JsonObject jws)

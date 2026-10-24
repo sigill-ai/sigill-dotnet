@@ -424,7 +424,7 @@ def standard(*, policy=POLICY, steps=STEPS, **kw):
 POLICY_DOC = (HERE.parent / "11-policy-control-set" / "control-set.json").read_bytes()
 POLICY_CT = "application/vnd.sigill.control-set+json"
 POLICY_ID = {"id": "acme-support-agent-controls", "version": "3"}
-SIGILL_ROLE = {"srAts": {"claimed": [{"mediaType": "application/vnd.sigill.sealed-for+json", "encoding": "utf-8",
+SIGILL_ROLE = {"srAts": {"claimed": [{"mediaType": "application/vnd.sigill.sealed-for", "encoding": "8bit",
                                       "qVals": ["urn:sigill:role:policy-evaluator"]}]}}
 POLICY_STEPS = [
     {"type": "tool_call", "minute": 1, "step": {"tool": {"name": "crm.read_customer", "operation": "read", "useId": "u1"}},

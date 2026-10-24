@@ -478,8 +478,8 @@
         "signature": {
           "signatures": [
             {
-              "protected": "eyJhbGciOiJFUzI1NiIsInNpZ0QiOnsiY3R5cyI6WyJhcHBsaWNhdGlvbi92bmQuc2lnaWxsLmNvbnRyb2wtZXZhbHVhdGlvbitqc29uIiwiYXBwbGljYXRpb24vdm5kLnNpZ2lsbC5jb250cm9sLXNldCtqc29uIiwiYXBwbGljYXRpb24vanNvbiIsImFwcGxpY2F0aW9uL3ZuZC5zaWdpbGwucG9saWN5LWFwcHJvdmFsK2pzb24iXSwiaGFzaFYiOlsiNnlvdFZVMGRDTUJYQnQ4QzlnZ0NzOXgtYjRUWjFqcld1UzN1TDBUQjltMCIsInY1RzdkVFVwM2xKbEIxaUFLUnRZQkxIYVZKdDRCTGhvVzNDdG1hVGtRZEUiLCJiOEsxaDd1NF9yV01LWjJzNWc3c3JVYmE2Y0JPeTFvS1pET0pOQWF4VHJBIiwibnVJc3VhRm1Kel9Xb1RMemhtQTVPc3dGSkpheXplaDV0ZXlXejhnR01jYyJdLCJwYXJzIjpbInVybjpzaWdpbGw6ZW52ZWxvcGUiLCJ1cm46ZXhhbXBsZTpvYmo6Y29udHJvbC1zZXQiLCJ1cm46ZXhhbXBsZTpvYmo6ZmFjdHMtOTUwIiwidXJuOmV4YW1wbGU6b2JqOmFwcHJvdmFsLTk1MCJdfSwic3JBdHMiOnsiY2xhaW1lZCI6W3siZW5jb2RpbmciOiJ1dGYtOCIsIm1lZGlhVHlwZSI6ImFwcGxpY2F0aW9uL3ZuZC5zaWdpbGwuc2VhbGVkLWZvcitqc29uIiwicVZhbHMiOlsidXJuOnNpZ2lsbDpyb2xlOnBvbGljeS1ldmFsdWF0b3IiXX1dfSwieDVjIjpbImMzUjFZaUJ6YVdkdWFXNW5JR05sY25ScFptbGpZWFJsSUZZZ0tIUm9aU0JsZG1Gc2RXRjBhVzVuSUhabGNtbG1hV1Z5S1E9PSJdLCJ4NXQjUzI1NiI6InotX0hHTlo3QnRNLWtINUNfdmJVTEp1LXcyYUdaNXVBSWVzdEY5dnYxV0kifQ",
-              "signature": "Zj6L3szrB_xmSfiw5YkXsP716mMdTsXV3dK8mgaOI1Y",
+              "protected": "eyJhbGciOiJFUzI1NiIsInNpZ0QiOnsiY3R5cyI6WyJhcHBsaWNhdGlvbi92bmQuc2lnaWxsLmNvbnRyb2wtZXZhbHVhdGlvbitqc29uIiwiYXBwbGljYXRpb24vdm5kLnNpZ2lsbC5jb250cm9sLXNldCtqc29uIiwiYXBwbGljYXRpb24vanNvbiIsImFwcGxpY2F0aW9uL3ZuZC5zaWdpbGwucG9saWN5LWFwcHJvdmFsK2pzb24iXSwiaGFzaFYiOlsiNnlvdFZVMGRDTUJYQnQ4QzlnZ0NzOXgtYjRUWjFqcld1UzN1TDBUQjltMCIsInY1RzdkVFVwM2xKbEIxaUFLUnRZQkxIYVZKdDRCTGhvVzNDdG1hVGtRZEUiLCJiOEsxaDd1NF9yV01LWjJzNWc3c3JVYmE2Y0JPeTFvS1pET0pOQWF4VHJBIiwibnVJc3VhRm1Kel9Xb1RMemhtQTVPc3dGSkpheXplaDV0ZXlXejhnR01jYyJdLCJwYXJzIjpbInVybjpzaWdpbGw6ZW52ZWxvcGUiLCJ1cm46ZXhhbXBsZTpvYmo6Y29udHJvbC1zZXQiLCJ1cm46ZXhhbXBsZTpvYmo6ZmFjdHMtOTUwIiwidXJuOmV4YW1wbGU6b2JqOmFwcHJvdmFsLTk1MCJdfSwic3JBdHMiOnsiY2xhaW1lZCI6W3siZW5jb2RpbmciOiI4Yml0IiwibWVkaWFUeXBlIjoiYXBwbGljYXRpb24vdm5kLnNpZ2lsbC5zZWFsZWQtZm9yIiwicVZhbHMiOlsidXJuOnNpZ2lsbDpyb2xlOnBvbGljeS1ldmFsdWF0b3IiXX1dfSwieDVjIjpbImMzUjFZaUJ6YVdkdWFXNW5JR05sY25ScFptbGpZWFJsSUZZZ0tIUm9aU0JsZG1Gc2RXRjBhVzVuSUhabGNtbG1hV1Z5S1E9PSJdLCJ4NXQjUzI1NiI6InotX0hHTlo3QnRNLWtINUNfdmJVTEp1LXcyYUdaNXVBSWVzdEY5dnYxV0kifQ",
+              "signature": "apQlWxcOGEGbGNPrwvCikTRW69Lv0Pv-U_DcRZxSXYU",
               "header": {
                 "stubTimestamp": {
                   "genTime": "2026-10-01T09:40:01Z",
@@ -526,7 +526,7 @@
     },
     "binding": "bound",
     "missingSeqs": [],
-    "fingerprint": "960e6e4e6ca753246b899331d9560b84b8ba7356257b01a8ed9450e66b154762",
+    "fingerprint": "704e369fa589db0a7d1903bdb123c65cc09adca947779601c2691d64ea7f67cc",
     "findingsContain": [],
     "warningsContain": [],
     "warningCount": 0,
