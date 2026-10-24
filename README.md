@@ -374,7 +374,7 @@ cover one controlled run:
 |---|---|---|
 | Before | [Control Artifact](spec/agent-control-artifact-v1.md) | configuration, control set, baseline, timestamp policy |
 | During | [Execution Evidence](spec/agent-execution-evidence-v1.md) | one artifact per event, chained by signature |
-| After | [Control Evaluation](spec/control-evaluation-v1.md) | what an independent verifier observed, and each control's result |
+| After | [Control Evaluation](spec/control-evaluation-v1.md), [v2 (draft)](spec/control-evaluation-v2.md) | what an independent verifier observed, and each control's result; v2 adds policy evaluations (reproducible from the run's facts) and the producer's own attested results |
 
 Conversations with hosted assistants recorded on the user's side (the Sigill browser
 extension) use the same profiles under the [client-observed conventions](spec/agent-client-observed-v1.md).
