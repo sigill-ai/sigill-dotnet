@@ -39,6 +39,12 @@ public static class AgentProfiles
     /// </summary>
     public const string ExecutionEvidenceSchemaV2 = "AgentExecutionEvidence/2";
 
+    /// <summary>
+    /// The schema key of <c>AgentExecutionEvidence</c> <c>schemaVersion "3"</c>: v2 plus model-call members on
+    /// <c>model_output</c> steps (<c>spec/agent-model-calls-v1.md</c>).
+    /// </summary>
+    public const string ExecutionEvidenceSchemaV3 = "AgentExecutionEvidence/3";
+
     /// <summary>Control Evaluation v2 (<c>spec/control-evaluation-v2.md</c>): state, policy or attested.</summary>
     public const string ControlEvaluationSchemaV2 = "ControlEvaluation/2";
 
@@ -46,9 +52,13 @@ public static class AgentProfiles
     internal static string EvaluationSchemaFor(JsonObject envelope) =>
         Str(envelope["schemaVersion"]) == "2" ? ControlEvaluationSchemaV2 : ControlEvaluationSchema;
 
-    /// <summary>The execution schema to validate against: v2 when the envelope says <c>schemaVersion "2"</c>, else v1.</summary>
-    internal static string ExecutionSchemaFor(JsonObject envelope) =>
-        Str(envelope["schemaVersion"]) == "2" ? ExecutionEvidenceSchemaV2 : ExecutionEvidenceSchema;
+    /// <summary>The execution schema to validate against, by the envelope's <c>schemaVersion</c> ("3", "2", else v1).</summary>
+    internal static string ExecutionSchemaFor(JsonObject envelope) => Str(envelope["schemaVersion"]) switch
+    {
+        "3" => ExecutionEvidenceSchemaV3,
+        "2" => ExecutionEvidenceSchemaV2,
+        _ => ExecutionEvidenceSchema,
+    };
 
     /// <summary>The Control Artifact's content type, signed as <c>sigD.ctys[0]</c>.</summary>
     public const string ControlArtifactContentType = "application/vnd.sigill.agent-control+json";

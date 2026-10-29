@@ -223,6 +223,13 @@ public sealed record AgentRunOptions
     public bool Delegating { get; init; }
 
     /// <summary>
+    /// The run records model calls with the provider's own identifiers (<see cref="AgentRun.RecordModelCallAsync"/>,
+    /// <c>spec/agent-model-calls-v1.md</c>). Uses <c>AgentExecutionEvidence</c> <c>schemaVersion "3"</c> for every
+    /// event — v3 contains v2, so such a run can also delegate. Decided at start: one run uses one version.
+    /// </summary>
+    public bool RecordsModelCalls { get; init; }
+
+    /// <summary>
     /// Called after each artifact is sealed — the Control Artifact first, then
     /// every event strictly in chain order (concurrent events wait their turn).
     /// Persist it here so a crash leaves a shorter prefix, never a hole. It runs
@@ -456,3 +463,25 @@ public sealed record PreparedEvaluation
     /// <summary>The approval requires qualified time (§4.7): the evaluation itself must be sealed with a qualified timestamp.</summary>
     public bool RequiresQualifiedTimestamp { get; init; }
 }
+
+/// <summary>
+/// One model call as the provider's response states it (Agent Model Calls v1): which model served it, the provider's
+/// own identifiers for the call, and the usage it reported. Take every value from the response, never from configuration
+/// (only <see cref="ModelInfo.Requested"/> comes from the request).
+/// </summary>
+public sealed record ModelCall
+{
+    public ModelInfo? Model { get; init; }
+    public IReadOnlyList<VendorRef> VendorRefs { get; init; } = Array.Empty<VendorRef>();
+    public ModelUsage? Usage { get; init; }
+}
+
+/// <summary>The model that served the call. <paramref name="Provider"/> is a lowercase identifier (e.g. <c>anthropic</c>, <c>openai</c>, <c>aws-bedrock</c>).</summary>
+public sealed record ModelInfo(string Provider, string Served, string? Requested = null, string? Deployment = null, string? Region = null);
+
+/// <summary>A provider's own identifier for the call. <paramref name="Kind"/>: <c>message</c>, <c>response</c>, <c>request</c>, <c>completion</c> or <c>trace</c>.</summary>
+public sealed record VendorRef(string Provider, string Kind, string Id);
+
+/// <summary>Token counts and the stop reason the provider reported.</summary>
+public sealed record ModelUsage(long? InputTokens = null, long? OutputTokens = null, long? CacheReadTokens = null, long? CacheWriteTokens = null,
+    string? StopReason = null);

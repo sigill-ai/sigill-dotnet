@@ -29,6 +29,7 @@ internal static class EnvelopeSchema
         [AgentProfiles.ControlArtifactSchema] = "Sigill.Sdk.agent-control-artifact-v1.schema.json",
         [AgentProfiles.ExecutionEvidenceSchema] = "Sigill.Sdk.agent-execution-evidence-v1.schema.json",
         [AgentProfiles.ExecutionEvidenceSchemaV2] = "Sigill.Sdk.agent-execution-evidence-v2.schema.json",
+        [AgentProfiles.ExecutionEvidenceSchemaV3] = "Sigill.Sdk.agent-execution-evidence-v3.schema.json",
         [AgentProfiles.ControlEvaluationSchema] = "Sigill.Sdk.control-evaluation-v1.schema.json",
         [AgentProfiles.ControlEvaluationSchemaV2] = "Sigill.Sdk.control-evaluation-v2.schema.json",
     };
