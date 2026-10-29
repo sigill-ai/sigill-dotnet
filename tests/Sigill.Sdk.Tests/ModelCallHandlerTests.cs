@@ -73,6 +73,35 @@ public partial class AgentRunTests
         b["vendorRefs"]![0]!["id"]!.GetValue<string>().Should().Be("4b0a8d3e-1f2c-4d5e-9a7b-0c1d2e3f4a5b");
     }
 
+    [Theory]
+    [InlineData("https://acme.openai.azure.com/openai/deployments/gpt-6-prod/chat/completions?api-version=2026-06-01")]
+    [InlineData("https://acme.cognitiveservices.azure.com/openai/deployments/gpt-6-prod/chat/completions?api-version=2026-06-01")]
+    [InlineData("https://acme.services.ai.azure.com/openai/deployments/gpt-6-prod/chat/completions?api-version=2026-06-01")]
+    public async Task Handler_RecordsAzureOpenAi_OnEveryAzureAiDomain(string url)
+    {
+        var (run, _, _) = await Through(url, "{}",
+            new Provider("""{"id":"chatcmpl-AZ1","model":"gpt-6-2026-09-01","choices":[{"finish_reason":"stop"}]}""", headers: ("apim-request-id", "6f1e2d3c-aaaa-bbbb-cccc-0123456789ab")));
+        var step = ModelStep(run)!;
+        (step["model"]!["provider"]!.GetValue<string>(), step["model"]!["deployment"]!.GetValue<string>()).Should().Be(("azure-openai", "gpt-6-prod"));
+        step["vendorRefs"]!.AsArray().Select(r => r!["kind"]!.GetValue<string>()).Should().Equal("completion", "request");
+    }
+
+    [Fact]
+    public async Task Handler_RecordsGoogleGenerateContent_OnTheGeminiApiAndVertex()
+    {
+        const string body = """{"responseId":"mT4xaKXyJ8-tz7IPq9GJ","modelVersion":"gemini-3.0-pro-001","candidates":[{"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":12,"candidatesTokenCount":4,"cachedContentTokenCount":8}}""";
+        var (gemini, _, _) = await Through("https://generativelanguage.googleapis.com/v1beta/models/gemini-3.0-pro:generateContent", "{}", new Provider(body));
+        var g = ModelStep(gemini)!;
+        (g["model"]!["provider"]!.GetValue<string>(), g["model"]!["served"]!.GetValue<string>(), g["model"]!["requested"]!.GetValue<string>())
+            .Should().Be(("google", "gemini-3.0-pro-001", "gemini-3.0-pro"));
+        (g["vendorRefs"]![0]!["kind"]!.GetValue<string>(), g["vendorRefs"]![0]!["id"]!.GetValue<string>()).Should().Be(("response", "mT4xaKXyJ8-tz7IPq9GJ"));
+        (g["usage"]!["cacheReadTokens"]!.GetValue<long>(), g["usage"]!["stopReason"]!.GetValue<string>()).Should().Be((8, "STOP"));
+
+        var (vertex, _, _) = await Through("https://europe-west4-aiplatform.googleapis.com/v1/projects/acme/locations/europe-west4/publishers/google/models/gemini-3.0-pro:generateContent", "{}", new Provider(body));
+        var v = ModelStep(vertex)!;
+        (v["model"]!["provider"]!.GetValue<string>(), v["model"]!["region"]!.GetValue<string>()).Should().Be(("google-vertex", "europe-west4"));
+    }
+
     [Fact]
     public async Task Handler_PassesOtherRequestsThrough_RecordsStreamsByHeader_AndNeverFailsTheCall()
     {

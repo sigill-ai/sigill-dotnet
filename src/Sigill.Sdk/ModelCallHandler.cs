@@ -19,8 +19,9 @@ namespace Sigill.Sdk;
 /// var http = new HttpClient(new ModelCallHandler(run, new HttpClientHandler()));
 /// var anthropic = new AnthropicClient(new() { HttpClient = http });   // or an OpenAI / Bedrock client
 /// </code>
-/// Recognised: the Anthropic Messages API, OpenAI Responses and Chat Completions (also via Azure OpenAI) and the
-/// Amazon Bedrock Runtime Converse / InvokeModel APIs. Other requests pass through unrecorded. The request and response
+/// Recognised: the Anthropic Messages API, OpenAI Responses and Chat Completions (also via Azure OpenAI), the
+/// Amazon Bedrock Runtime Converse / InvokeModel APIs and Google's generateContent (Gemini API and Vertex AI). For any
+/// other provider, or a gateway in front of one, call <see cref="AgentRun.RecordModelCallAsync"/> directly. Other requests pass through unrecorded. The request and response
 /// bodies are sealed as digests only; their content never leaves the process. A streamed response (server-sent events)
 /// is recorded with the identifiers in its headers only. The run must be started with
 /// <see cref="AgentRunOptions.RecordsModelCalls"/>. A failure to record never fails the model call: it is reported to
@@ -73,7 +74,7 @@ public sealed class ModelCallHandler : DelegatingHandler
         return response;
     }
 
-    internal enum Api { Anthropic, OpenAi, AzureOpenAi, Bedrock }
+    internal enum Api { Anthropic, OpenAi, AzureOpenAi, Bedrock, Gemini, Vertex }
 
     internal static Api? Classify(HttpRequestMessage request)
     {
@@ -83,7 +84,14 @@ public sealed class ModelCallHandler : DelegatingHandler
         var path = uri.AbsolutePath;
         if (host == "api.anthropic.com" && path.EndsWith("/messages", StringComparison.Ordinal)) return Api.Anthropic;
         if (host == "api.openai.com" && (path.EndsWith("/responses", StringComparison.Ordinal) || path.EndsWith("/chat/completions", StringComparison.Ordinal))) return Api.OpenAi;
-        if (host.EndsWith(".openai.azure.com", StringComparison.Ordinal) && path.Contains("/openai/", StringComparison.Ordinal)) return Api.AzureOpenAi;
+        // Azure OpenAI resources live under all three Azure AI domains; only the /openai/ API is OpenAI-shaped.
+        if ((host.EndsWith(".openai.azure.com", StringComparison.Ordinal) || host.EndsWith(".cognitiveservices.azure.com", StringComparison.Ordinal)
+             || host.EndsWith(".services.ai.azure.com", StringComparison.Ordinal)) && path.Contains("/openai/", StringComparison.Ordinal)) return Api.AzureOpenAi;
+        if (path.EndsWith(":generateContent", StringComparison.Ordinal))
+        {
+            if (host == "generativelanguage.googleapis.com") return Api.Gemini;
+            if (host == "aiplatform.googleapis.com" || host.EndsWith("-aiplatform.googleapis.com", StringComparison.Ordinal)) return Api.Vertex;
+        }
         if (host.StartsWith("bedrock-runtime.", StringComparison.Ordinal) && host.EndsWith(".amazonaws.com", StringComparison.Ordinal)
             && path.StartsWith("/model/", StringComparison.Ordinal)) return Api.Bedrock;
         return null;
@@ -147,6 +155,22 @@ internal static class ModelCallParser
                 return Build(served is null ? null : new ModelInfo("aws-bedrock", served, null, Fit(modelId, 255), region), refs,
                     new ModelUsage(Long(u?["inputTokens"] ?? u?["input_tokens"]), Long(u?["outputTokens"] ?? u?["output_tokens"]),
                         StopReason: Str(res?["stopReason"]) ?? Str(res?["stop_reason"])));
+            }
+            case ModelCallHandler.Api.Gemini:
+            case ModelCallHandler.Api.Vertex:
+            {
+                var provider = api == ModelCallHandler.Api.Gemini ? "google" : "google-vertex";
+                Ref(provider, "response", Str(res?["responseId"]));
+                // .../models/{model}:generateContent; Vertex also names the region: .../locations/{region}/...
+                var segments = request.RequestUri!.AbsolutePath.Split('/', StringSplitOptions.RemoveEmptyEntries);
+                int Index(string name) => Array.IndexOf(segments, name);
+                var requested = Index("models") is var m and >= 0 && m + 1 < segments.Length ? segments[m + 1].Split(':')[0] : null;
+                var region = api == ModelCallHandler.Api.Vertex && Index("locations") is var l and >= 0 && l + 1 < segments.Length ? segments[l + 1] : null;
+                var served = Str(res?["modelVersion"]);
+                var u = res?["usageMetadata"] as JsonObject;
+                var stop = res?["candidates"] is JsonArray { Count: > 0 } candidates ? Str((candidates[0] as JsonObject)?["finishReason"]) : null;
+                return Build(served is null ? null : new ModelInfo(provider, served, requested, Region: region), refs,
+                    new ModelUsage(Long(u?["promptTokenCount"]), Long(u?["candidatesTokenCount"]), Long(u?["cachedContentTokenCount"]), StopReason: stop));
             }
         }
         return null;
