@@ -45,7 +45,7 @@ public sealed class ModelCallHandler : DelegatingHandler
         byte[]? requestBody = null;
         if (request.Content is not null)
         {
-            requestBody = await request.Content.ReadAsByteArrayAsync(cancellationToken).ConfigureAwait(false);
+            requestBody = await request.Content.ReadAsByteArrayAsync().ConfigureAwait(false);
             var replay = new ByteArrayContent(requestBody);
             foreach (var h in request.Content.Headers) replay.Headers.TryAddWithoutValidation(h.Key, h.Value);
             request.Content = replay;
@@ -57,7 +57,7 @@ public sealed class ModelCallHandler : DelegatingHandler
             byte[]? responseBody = null;
             if (!streamed)
             {
-                responseBody = await response.Content.ReadAsByteArrayAsync(cancellationToken).ConfigureAwait(false);
+                responseBody = await response.Content.ReadAsByteArrayAsync().ConfigureAwait(false);
                 var replay = new ByteArrayContent(responseBody);
                 foreach (var h in response.Content.Headers) replay.Headers.TryAddWithoutValidation(h.Key, h.Value);
                 response.Content = replay;

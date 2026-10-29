@@ -339,7 +339,7 @@ public sealed class AgentRun
         string requestContentType = "application/json", string responseContentType = "application/json",
         bool consequential = false, CancellationToken cancellationToken = default)
     {
-        ArgumentNullException.ThrowIfNull(call);
+        if (call is null) throw new ArgumentNullException(nameof(call));
         if (_schemaVersion != "3")
             throw new InvalidOperationException("This run was not started with RecordsModelCalls = true; model calls use schemaVersion 3 throughout.");
         var step = new JsonObject();
