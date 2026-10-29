@@ -31,6 +31,7 @@
     <EmbeddedResource Include="../../spec/agent-control-artifact-v1.schema.json" LogicalName="Sigill.Sdk.agent-control-artifact-v1.schema.json" />
     <EmbeddedResource Include="../../spec/agent-execution-evidence-v1.schema.json" LogicalName="Sigill.Sdk.agent-execution-evidence-v1.schema.json" />
     <EmbeddedResource Include="../../spec/agent-execution-evidence-v2.schema.json" LogicalName="Sigill.Sdk.agent-execution-evidence-v2.schema.json" />
+    <EmbeddedResource Include="../../spec/agent-execution-evidence-v3.schema.json" LogicalName="Sigill.Sdk.agent-execution-evidence-v3.schema.json" />
     <EmbeddedResource Include="../../spec/control-evaluation-v1.schema.json" LogicalName="Sigill.Sdk.control-evaluation-v1.schema.json" />
     <EmbeddedResource Include="../../spec/control-evaluation-v2.schema.json" LogicalName="Sigill.Sdk.control-evaluation-v2.schema.json" />
   </ItemGroup>

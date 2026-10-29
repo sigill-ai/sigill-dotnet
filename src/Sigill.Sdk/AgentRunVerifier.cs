@@ -277,6 +277,15 @@ public sealed record AgentRunVerificationResult
     /// <summary>No timestamped event claims an eventTime later than its own seal time (with allowance). Null when nothing is comparable.</summary>
     public bool? EventTimesPlausible { get; init; }
 
+    /// <summary>Number of <c>model_output</c> steps in the run (Agent Model Calls v1 §5).</summary>
+    public int ModelCalls { get; init; }
+
+    /// <summary>
+    /// How many of them carry the provider's own identifiers (<c>step.vendorRefs</c>). Shape only: that an identifier is
+    /// genuine is confirmed by the provider, never by the verifier.
+    /// </summary>
+    public int ModelCallsWithVendorRefs { get; init; }
+
     /// <summary>What a verdict does and does not establish. Show it next to the verdict.</summary>
     public string Scope => AgentRunVerifier.Scope;
 
@@ -1362,6 +1371,9 @@ public static class AgentRunVerifier
             Signer = runSigner,
             ControlSealedBeforeRun = sealedBeforeRun,
             EventTimesPlausible = plausible,
+            ModelCalls = good.Count(g => AgentProfiles.Str((g.Env["step"] as JsonObject)?["type"]) == "model_output"),
+            ModelCallsWithVendorRefs = good.Count(g => AgentProfiles.Str((g.Env["step"] as JsonObject)?["type"]) == "model_output"
+                && (g.Env["step"] as JsonObject)?["vendorRefs"] is JsonArray { Count: > 0 }),
         };
     }
 

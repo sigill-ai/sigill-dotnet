@@ -127,7 +127,7 @@ public partial class AgentRunTests
 
     [Fact]
     public void RunVectors_AreAllPresent() =>
-        RunVectors().Should().HaveCount(98);
+        RunVectors().Should().HaveCount(104);
 
     [Theory]
     [InlineData("01-finalized-digests-only.json", "7 of 7 artifact(s)")]
@@ -191,6 +191,8 @@ public partial class AgentRunTests
         result.Warnings.Should().HaveCount(expected["warningCount"]!.GetValue<int>(), warnings);
         result.ControlSealedBeforeRun.Should().Be(expected["controlSealedBeforeRun"]?.GetValue<bool>());
         result.EventTimesPlausible.Should().Be(expected["eventTimesPlausible"]?.GetValue<bool>());
+        if (expected["modelCalls"] is { } mc)   // Agent Model Calls v1 vectors pin the counts
+            (result.ModelCalls, result.ModelCallsWithVendorRefs).Should().Be((mc.GetValue<int>(), expected["modelCallsWithVendorRefs"]!.GetValue<int>()));
 
         var evals = expected["evaluations"]!.AsArray();
         result.Evaluations.Should().HaveCount(evals.Count);

@@ -43,7 +43,7 @@ public sealed class AgentRun
     private static readonly HashSet<string> ReservedStepFields = new(StringComparer.Ordinal)
     {
         "type", "eventTime", "consequential", "timestamp", "finalSeq", "finalPrevSignatureSha256", "runDisposition",
-        "delegation",
+        "delegation", "model", "vendorRefs", "usage",
     };
 
     private readonly ISigillAiEvidenceClient _client;
@@ -100,7 +100,7 @@ public sealed class AgentRun
         _options = options;
         _clock = clock;
         _parent = parent;
-        _schemaVersion = options.Delegating || parent is not null ? "2" : "1";
+        _schemaVersion = options.RecordsModelCalls ? "3" : options.Delegating || parent is not null ? "2" : "1";
         CorrelationId = parent?.ChildCorrelationId ?? options.CorrelationId ?? "urn:uuid:" + Guid.NewGuid();
         _coverage = new AgentProfiles.TimestampCoverage(options.TimestampPolicy);
     }
@@ -247,6 +247,13 @@ public sealed class AgentRun
         var reserved = fields?.Select(kv => kv.Key).Where(ReservedStepFields.Contains).OrderBy(k => k, StringComparer.Ordinal).ToList();
         if (reserved is { Count: > 0 })
             throw new ArgumentException("fields uses reserved step member(s): " + string.Join(", ", reserved), nameof(fields));
+        return await RecordInternalAsync(stepType, objects, fields, consequential, cancellationToken, requireTimestamp).ConfigureAwait(false);
+    }
+
+    /// <summary>Seals one event whose step members are already checked (reserved members only from this class).</summary>
+    private async Task<AgentRunArtifact> RecordInternalAsync(string stepType, IReadOnlyList<AgentRunObject>? objects, JsonObject? fields,
+        bool consequential, CancellationToken cancellationToken, bool requireTimestamp = false)
+    {
         AgentRunArtifact artifact;
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
@@ -320,6 +327,46 @@ public sealed class AgentRun
         if (receipt is not null) objects.Add(Obj("approval-receipt", receipt, receiptContentType));
         if (identityAssertion is not null) objects.Add(Obj("identity-assertion", identityAssertion, identityAssertionContentType));
         return RecordAsync("human_approval", objects, Detail(fields, detail), cancellationToken: cancellationToken);
+    }
+
+    /// <summary>
+    /// One model call with the provider's own identifiers (Agent Model Calls v1): a <c>model_output</c> step carrying
+    /// <c>model</c>, <c>vendorRefs</c> and <c>usage</c>, with the request and response as digest-only objects (their
+    /// content never leaves the producer). Requires <see cref="AgentRunOptions.RecordsModelCalls"/>.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">The run was not started with <see cref="AgentRunOptions.RecordsModelCalls"/>.</exception>
+    public Task<AgentRunArtifact> RecordModelCallAsync(ModelCall call, byte[]? request = null, byte[]? response = null,
+        string requestContentType = "application/json", string responseContentType = "application/json",
+        bool consequential = false, CancellationToken cancellationToken = default)
+    {
+        if (call is null) throw new ArgumentNullException(nameof(call));
+        if (_schemaVersion != "3")
+            throw new InvalidOperationException("This run was not started with RecordsModelCalls = true; model calls use schemaVersion 3 throughout.");
+        var step = new JsonObject();
+        if (call.Model is { } m)
+        {
+            var model = new JsonObject { ["provider"] = m.Provider, ["served"] = m.Served };
+            if (m.Requested is not null) model["requested"] = m.Requested;
+            if (m.Deployment is not null) model["deployment"] = m.Deployment;
+            if (m.Region is not null) model["region"] = m.Region;
+            step["model"] = model;
+        }
+        if (call.VendorRefs.Count > 0)
+            step["vendorRefs"] = new JsonArray(call.VendorRefs.Select(r => (JsonNode?)new JsonObject { ["provider"] = r.Provider, ["kind"] = r.Kind, ["id"] = r.Id }).ToArray());
+        if (call.Usage is { } u)
+        {
+            var usage = new JsonObject();
+            if (u.InputTokens is { } i) usage["inputTokens"] = i;
+            if (u.OutputTokens is { } o) usage["outputTokens"] = o;
+            if (u.CacheReadTokens is { } cr) usage["cacheReadTokens"] = cr;
+            if (u.CacheWriteTokens is { } cw) usage["cacheWriteTokens"] = cw;
+            if (u.StopReason is not null) usage["stopReason"] = u.StopReason;
+            if (usage.Count > 0) step["usage"] = usage;
+        }
+        var objects = new List<AgentRunObject>();
+        if (request is not null) objects.Add(Obj("model-input", request, requestContentType));
+        if (response is not null) objects.Add(Obj("model-output", response, responseContentType));
+        return RecordInternalAsync("model_output", objects, step, consequential, cancellationToken);
     }
 
     /// <summary>What the model produced.</summary>
@@ -397,8 +444,8 @@ public sealed class AgentRun
         bool consequential = false, string? childCorrelationId = null, CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrEmpty(childAgentId)) throw new ArgumentException("childAgentId is required.", nameof(childAgentId));
-        if (_schemaVersion != "2")
-            throw new InvalidOperationException("This run was not started with Delegating = true; a run that delegates uses schemaVersion 2 throughout.");
+        if (_schemaVersion is not ("2" or "3"))
+            throw new InvalidOperationException("This run was not started with Delegating = true; a run that delegates uses schemaVersion 2 (or 3) throughout.");
         var child = childCorrelationId ?? "urn:uuid:" + Guid.NewGuid();
         if (child.Length == 0 || child == CorrelationId)
             throw new ArgumentException("A run cannot delegate to itself.", nameof(childCorrelationId));
