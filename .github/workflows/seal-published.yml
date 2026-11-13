@@ -38,11 +38,18 @@ jobs:
             fi
             lid=$(echo "$id" | tr '[:upper:]' '[:lower:]')
             url="https://api.nuget.org/v3-flatcontainer/$lid/$v/$lid.$v.nupkg"
+            # Download beside the sealed folder and move in only a complete transfer: a failed curl can leave a
+            # partial file, which must never be sealed as "the package nuget.org serves".
+            part=$(mktemp)
+            ok=
             for i in $(seq 1 60); do
-              curl -fsSL "$url" -o "nuget.org/$id.$v.nupkg" && break
+              if curl -fsSL "$url" -o "$part"; then ok=1; break; fi
+              : > "$part"
               echo "$id not on nuget.org yet ($i/60)"; sleep 30
             done
-            test -s "nuget.org/$id.$v.nupkg"
+            if [ -z "$ok" ]; then echo "::error::$id $v could not be downloaded from nuget.org"; exit 1; fi
+            unzip -tq "$part" >/dev/null   # a .nupkg is a zip: refuse a truncated or damaged one
+            mv "$part" "nuget.org/$id.$v.nupkg"
             sha256sum "nuget.org/$id.$v.nupkg"
           done
       - uses: sigill-ai/evidence-action@29c7582a2072557734f1d566abeaf292462ce46b # v1.1.0
