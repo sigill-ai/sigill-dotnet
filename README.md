@@ -566,12 +566,12 @@ byte[] result = await ReadCustomerAsync(argsJson);
 await call.CompleteAsync(result);      // same tool and useId; a second completion is refused
 ```
 
-Bind an approval to the call it is for: its tool and the digest of its exact arguments,
+Bind an approval to the call it is for with `RecordBoundApprovalAsync`: its tool and the digest of its exact arguments,
 optionally its `useId` and an expiry. One approval binds at most one call, and a
 rejection is sticky for the run:
 
 ```csharp
-await run.RecordHumanApprovalAsync("approved", approver: "urn:example:approver:42",
+await run.RecordBoundApprovalAsync("approved", approver: "urn:example:approver:42",
     covers: ApprovalCovers.ForArguments("payments.refund", refundArgs, expiresAt: DateTimeOffset.UtcNow.AddMinutes(15)));
 ToolCall refund = await run.BeginToolCallAsync("payments.refund", refundArgs, consequential: true);
 // Or covers: call.Covers() for one sealed call exactly, including its useId.
@@ -645,7 +645,7 @@ try
 catch (PolicyDeniedException denied)   // denied.Reason, .Rules, .Tool, .UseId, .Seq, .Record, .Halted
 {
     // The tool did not run. A retry is a new call (a new use id): e.g. after a human approves exactly this call
-    // with RecordHumanApprovalAsync(..., covers: ApprovalCovers.ForArguments("payments.refund", argsJson)).
+    // with RecordBoundApprovalAsync(..., covers: ApprovalCovers.ForArguments("payments.refund", argsJson)).
 }
 ```
 

@@ -179,7 +179,7 @@ public partial class AgentRunTests
                     case "human_approval":
                         var cv = a["covers"]!;
                         var expires = cv["expiresAt"]?.GetValue<string>() is { } x ? DateTimeOffset.Parse(x, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal) : (DateTimeOffset?)null;
-                        await run.RecordHumanApprovalAsync(a["decision"]!.GetValue<string>(), receipt: Utf8("{}"), approver: "urn:example:approver:1",
+                        await run.RecordBoundApprovalAsync(a["decision"]!.GetValue<string>(), receipt: Utf8("{}"), approver: "urn:example:approver:1",
                             covers: new ApprovalCovers(cv["tool"]!.GetValue<string>(), EnvelopeHashing.HashHex(Utf8(args[cv["args"]!.GetValue<string>()]!.GetValue<string>())),
                                 cv["useId"]?.GetValue<string>(), expires));
                         break;
@@ -384,7 +384,7 @@ public partial class AgentRunTests
             new JsonObject { ["tool"] = new JsonObject { ["name"] = "payments.refund", ["useId"] = "refund-1" } })).Should().ThrowAsync<ArgumentException>();
         sealer.Requests.Should().HaveCount(before);
 
-        await run.RecordHumanApprovalAsync("approved", approver: "urn:example:approver:7", covers: ApprovalCovers.ForArguments("payments.refund", RefundArgs));
+        await run.RecordBoundApprovalAsync("approved", approver: "urn:example:approver:7", covers: ApprovalCovers.ForArguments("payments.refund", RefundArgs));
         (await run.InvokeToolAsync("payments.refund", RefundArgs, Refund, consequential: true)).Should().Equal(Utf8("""{"ok":true}"""));
         ran.Should().Be(1);
         run.IsHalted.Should().BeFalse();

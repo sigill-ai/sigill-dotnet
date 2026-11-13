@@ -441,7 +441,7 @@ public partial class AgentRunTests
             },
         });
         using var owned = client;
-        var approval = await run.RecordHumanApprovalAsync("approved", approver: "urn:example:approver:1",
+        var approval = await run.RecordBoundApprovalAsync("approved", approver: "urn:example:approver:1",
             covers: ApprovalCovers.ForArguments("payments.refund", one));
         if (where == "returned") { seen = approval; original = Forge(approval); }
 

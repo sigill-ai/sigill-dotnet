@@ -289,8 +289,8 @@ public partial class AgentRunTests
         // A bound approval: rejected by use id for the first refund, approved by tool and arguments for the retry.
         var refund = await run.BeginToolCallAsync("payments.refund", RefundArgs, consequential: true);
         var expires = new DateTimeOffset(2030, 1, 1, 0, 0, 0, TimeSpan.Zero).AddTicks(12_345);
-        var rejection = await run.RecordHumanApprovalAsync("rejected", approver: "urn:example:approver:1", covers: refund.Covers());
-        var approval = await run.RecordHumanApprovalAsync("approved", approver: "urn:example:approver:1",
+        var rejection = await run.RecordBoundApprovalAsync("rejected", approver: "urn:example:approver:1", covers: refund.Covers());
+        var approval = await run.RecordBoundApprovalAsync("approved", approver: "urn:example:approver:1",
             covers: ApprovalCovers.ForArguments("payments.refund", RefundArgs, expires));
         rejection.Envelope["step"]!["covers"]!.ToJsonString().Should().Be(new JsonObject
         {
@@ -320,7 +320,7 @@ public partial class AgentRunTests
     {
         using var client = Client(new StubSealer());
         var run = await Start(client, PolicyV2Options());
-        await run.RecordHumanApprovalAsync("approved", covers: ApprovalCovers.ForArguments("payments.refund", RefundArgs));
+        await run.RecordBoundApprovalAsync("approved", covers: ApprovalCovers.ForArguments("payments.refund", RefundArgs));
         var first = await run.BeginToolCallAsync("payments.refund", RefundArgs);
         var second = await run.BeginToolCallAsync("payments.refund", RefundArgs);
         var bundle = await run.FinishAsync("aborted");
@@ -357,7 +357,7 @@ public partial class AgentRunTests
         var sealedBefore = sealer.Requests.Count;
         await FluentActions.Awaiting(() => run.BeginToolCallAsync("lookup_ticket", Encoding.UTF8.GetBytes("{}"), definition: new byte[] { 1 }))
             .Should().ThrowAsync<InvalidOperationException>();
-        await FluentActions.Awaiting(() => run.RecordHumanApprovalAsync("approved", covers: call.Covers()))
+        await FluentActions.Awaiting(() => run.RecordBoundApprovalAsync("approved", covers: call.Covers()))
             .Should().ThrowAsync<InvalidOperationException>();
         sealer.Requests.Should().HaveCount(sealedBefore);
         var bundle = await run.FinishAsync();
@@ -728,6 +728,24 @@ public partial class AgentRunTests
         v.Verdict.Should().Be("run_finalized", string.Join("\n", v.Findings));
         AgentPolicy.BuildFactsV2(run["agentId"]!.GetValue<string>(), run["correlationId"]!.GetValue<string>(), bundle.Artifacts, DocV2)
             .RunLevel.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task RecordHumanApprovalAsync_The0130CallShapes_StillCompile_AndBindNothing()
+    {
+        // Each of these is a 0.13.0 caller's shape. With an overload taking ApprovalCovers they were ambiguous on C# 12
+        // (null, default) — and a method group with two overloads has no natural type in any C# version.
+        using var client = Client(new StubSealer());
+        var run = await Start(client, PolicyV2Options());
+        await run.RecordHumanApprovalAsync("approved", null);
+        await run.RecordHumanApprovalAsync("approved", default);
+        await run.RecordHumanApprovalAsync("approved", null, null);
+        await run.RecordHumanApprovalAsync("approved", null, cancellationToken: default);
+        var asDelegate = run.RecordHumanApprovalAsync;
+        await asDelegate("rejected", null, null, null, null, "application/json", "application/jwt", default);
+        run.Artifacts.Where(a => a.StepType == "human_approval").Should().HaveCount(5)
+            .And.OnlyContain(a => !a.Envelope["step"]!.AsObject().ContainsKey("covers"));
+        typeof(AgentRun).GetMethods().Count(m => m.Name == nameof(AgentRun.RecordHumanApprovalAsync)).Should().Be(1);
     }
 
     [Fact]

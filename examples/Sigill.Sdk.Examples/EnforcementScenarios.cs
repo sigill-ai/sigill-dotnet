@@ -122,7 +122,7 @@ public static class EnforcementScenarios
             var refund = Utf8("""{"amount":120,"order":"o-1"}""");
             try { await run.InvokeToolAsync("payments.refund", refund, _ => Tool("""{"refunded":true}"""), consequential: true); }
             catch (PolicyDeniedException e) { output.WriteLine($"  refund denied ({e.Reason}: {string.Join(", ", e.Rules)}); asking a human"); }
-            await run.RecordHumanApprovalAsync("approved", approver: "urn:example:approver:1",
+            await run.RecordBoundApprovalAsync("approved", approver: "urn:example:approver:1",
                 covers: ApprovalCovers.ForArguments("payments.refund", refund));
             var result = await run.InvokeToolAsync("payments.refund", refund, _ => Tool("""{"refunded":true}"""), consequential: true);
             output.WriteLine($"  retry allowed: {Encoding.UTF8.GetString(result)}");

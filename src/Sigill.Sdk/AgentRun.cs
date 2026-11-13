@@ -432,8 +432,6 @@ public sealed class AgentRun
     /// and an identity assertion (e.g. an IdP token) are bound as detached
     /// objects; their bytes stay local.
     /// </summary>
-    // C# 13+: RecordHumanApprovalAsync("approved", null) keeps meaning this overload (null receipt), not the covers one.
-    [System.Runtime.CompilerServices.OverloadResolutionPriority(1)]
     public Task<AgentRunArtifact> RecordHumanApprovalAsync(string decision, byte[]? receipt = null,
         byte[]? identityAssertion = null, string? approver = null, string? detail = null,
         string receiptContentType = "application/json", string identityAssertionContentType = "application/jwt",
@@ -442,13 +440,14 @@ public sealed class AgentRun
             identityAssertionContentType, cancellationToken);
 
     /// <summary>
-    /// A human approval or rejection of one call: <paramref name="covers"/> names the call it is for
+    /// A human approval or rejection bound to one call: <paramref name="covers"/> names the call it is for
     /// (<c>spec/agent-enforcement-v1.md</c> §3.5; build it with <see cref="ToolCall.Covers"/> or
     /// <see cref="ApprovalCovers.ForArguments"/>). Only a <c>schemaVersion "4"</c> run can carry it. The other parameters
-    /// are those of the overload without <paramref name="covers"/>.
+    /// are those of <see cref="RecordHumanApprovalAsync"/>. (Its own name, not an overload: <c>RecordHumanApprovalAsync("approved", null)</c>
+    /// must stay unambiguous for every C# version.)
     /// </summary>
     /// <exception cref="InvalidOperationException">The run is not <c>schemaVersion "4"</c>.</exception>
-    public Task<AgentRunArtifact> RecordHumanApprovalAsync(string decision, ApprovalCovers covers, byte[]? receipt = null,
+    public Task<AgentRunArtifact> RecordBoundApprovalAsync(string decision, ApprovalCovers covers, byte[]? receipt = null,
         byte[]? identityAssertion = null, string? approver = null, string? detail = null,
         string receiptContentType = "application/json", string identityAssertionContentType = "application/jwt",
         CancellationToken cancellationToken = default) =>
