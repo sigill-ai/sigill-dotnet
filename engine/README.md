@@ -44,13 +44,19 @@ A Rust panic inside the module traps the instance; discard it and instantiate ag
 
 ## Build and check
 
-Both scripts run everything in Docker, one container at a time, and leave no containers or volumes behind. Cargo's
+The scripts run everything in Docker, one container at a time, and leave no containers or volumes behind. Cargo's
 registry, `target/` and the check's work files go to `$SIGILL_CEDAR_CACHE` (a directory outside the repository).
 
 ```sh
 SIGILL_CEDAR_CACHE=$HOME/.cache/sigill-cedar ./build.sh   # -> dist/sigill_cedar.wasm, dist/sigill_cedar.wasm.sha256
 SIGILL_CEDAR_CACHE=$HOME/.cache/sigill-cedar ./check.sh   # exits non-zero on any mismatch
+SIGILL_CEDAR_CACHE=$HOME/.cache/sigill-cedar ./notices.sh # -> ../THIRD-PARTY-NOTICES.md
 ```
+
+`notices.sh` regenerates [`THIRD-PARTY-NOTICES.md`](../THIRD-PARTY-NOTICES.md) (sorted, byte-stable): the crates
+compiled into the module for `wasm32-wasip1` (normal dependencies; proc-macros and build scripts run on the build host
+and are not in it), their licence texts and NOTICE files. It stops on any licence that is not permissive. Both SDKs
+ship that file with the module: run it after any change to `Cargo.lock`, and copy the file to the Python SDK as well.
 
 `check.sh` runs the cases in `check/cases.json` (67 authorize, 10 strict validate: the policy-evaluation test vectors,
 `Long` overflow, entity hierarchy with `resource in ToolGroup::"…"`, a rejected request, accepted and rejected policy

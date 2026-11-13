@@ -45,7 +45,9 @@ jobs:
             9.0.x
             10.0.x
       - name: Pack
-        run: dotnet pack src/Sigill.Sdk/Sigill.Sdk.csproj --configuration Release -p:Version="${GITHUB_REF_NAME#v}" --output ./artifacts
+        run: |
+          dotnet pack src/Sigill.Sdk/Sigill.Sdk.csproj --configuration Release -p:Version="${GITHUB_REF_NAME#v}" --output ./artifacts
+          dotnet pack src/Sigill.Sdk.Policy/Sigill.Sdk.Policy.csproj --configuration Release -p:Version="${GITHUB_REF_NAME#v}" --output ./artifacts
       - name: Seal with Sigill
         uses: sigill-ai/evidence-action@29c7582a2072557734f1d566abeaf292462ce46b # v1.1.0
         with:
@@ -56,9 +58,13 @@ jobs:
           pqc: true
           qualified: true
       - name: Push
+        # Sigill.Sdk first: Sigill.Sdk.Policy depends on it at the same version.
         run: |
-          dotnet nuget push ./artifacts/*.nupkg --api-key ${{ secrets.NUGET_ORG }} --source https://api.nuget.org/v3/index.json --skip-duplicate
-          dotnet nuget push ./artifacts/*.snupkg --api-key ${{ secrets.NUGET_ORG }} --source https://api.nuget.org/v3/index.json --skip-duplicate
+          v="${GITHUB_REF_NAME#v}"
+          for id in Sigill.Sdk Sigill.Sdk.Policy; do
+            dotnet nuget push "./artifacts/$id.$v.nupkg" --api-key ${{ secrets.NUGET_ORG }} --source https://api.nuget.org/v3/index.json --skip-duplicate
+            dotnet nuget push "./artifacts/$id.$v.snupkg" --api-key ${{ secrets.NUGET_ORG }} --source https://api.nuget.org/v3/index.json --skip-duplicate
+          done
       - name: GitHub release with the packages and their seals
         env:
           GH_TOKEN: ${{ github.token }}
@@ -67,7 +73,7 @@ jobs:
           gh release upload "$GITHUB_REF_NAME" artifacts/*.nupkg artifacts/*.snupkg artifacts/*.p7s --clobber
 
   seal-published:
-    name: Seal the package nuget.org serves
+    name: Seal the packages nuget.org serves
     needs: publish
     permissions:
       id-token: write

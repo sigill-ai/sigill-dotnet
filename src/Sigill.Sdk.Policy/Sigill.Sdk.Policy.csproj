@@ -19,6 +19,8 @@
 
   <ItemGroup>
     <None Include="../../README.md" Pack="true" PackagePath="\" />
+    <!-- Licences and notices of the third-party code compiled into the engine (engine/notices.sh). -->
+    <None Include="../../THIRD-PARTY-NOTICES.md" Pack="true" PackagePath="\" />
     <!-- The engine (engine/README.md); its sha256 is checked on load. -->
     <EmbeddedResource Include="sigill_cedar.wasm" LogicalName="Sigill.Sdk.Policy.sigill_cedar.wasm" />
   </ItemGroup>

@@ -590,7 +590,8 @@ policy core, `cedar-policy` 4.14.0, compiled to one WebAssembly module (sha256
 [`engine/`](engine/README.md)) and run in-process with [Wasmtime](https://wasmtime.dev). The module is
 embedded in the package and refused if its digest differs; it has no filesystem, network, clock or
 environment, and at most 256 MiB of memory. `Sigill.Sdk` itself has no dependency on it: the methods
-below take any `IPolicyEngine`.
+below take any `IPolicyEngine`. The licences and notices of Cedar and the other Rust crates compiled into
+the module are in [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md), which the package also carries.
 
 ```sh
 dotnet add package Sigill.Sdk.Policy
