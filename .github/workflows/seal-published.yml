@@ -30,6 +30,11 @@ jobs:
         run: |
           set -euo pipefail
           v="${VERSION#v}"
+          # The version is part of the download path and the file names: canonical only (as publish.yml releases).
+          if ! printf '%s' "$v" | grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9a-z]+(\.[0-9a-z]+)*)?$'; then
+            echo "::error::$VERSION is not a canonical version: MAJOR.MINOR.PATCH, optionally -prerelease in lower case, no build metadata"
+            exit 1
+          fi
           mkdir -p nuget.org
           for id in Sigill.Sdk Sigill.Sdk.Policy; do
             # Sigill.Sdk.Policy is published from 0.14.0 on; an older release has only Sigill.Sdk.

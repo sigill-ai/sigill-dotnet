@@ -13,6 +13,16 @@ jobs:
     name: Test
     runs-on: ubuntu-latest
     steps:
+      # The tag becomes the package version and part of the file names that are pushed and sealed. NuGet
+      # normalises versions (drops build metadata, ignores case), so only a canonical version is released:
+      # the files packed are then exactly the files named below. Checked before anything is built.
+      - name: Check the tag is a canonical version
+        run: |
+          v="${GITHUB_REF_NAME#v}"
+          if ! printf '%s' "$v" | grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9a-z]+(\.[0-9a-z]+)*)?$'; then
+            echo "::error::Tag $GITHUB_REF_NAME is not a canonical version: vMAJOR.MINOR.PATCH, optionally -prerelease in lower case, no build metadata"
+            exit 1
+          fi
       - uses: actions/checkout@v4
       - uses: actions/setup-dotnet@v4
         with:
@@ -63,7 +73,7 @@ jobs:
         id: nuget-login
         uses: NuGet/login@8d196754b4036150537f80ac539e15c2f1028841 # v1.2.0
         with:
-          user: sigill-ai   # the nuget.org profile that owns the packages
+          user: sigill-ai   # the nuget.org account that created the trusted publishing policy (it also owns the packages)
       - name: Push
         # Sigill.Sdk first: Sigill.Sdk.Policy depends on it at the same version.
         env:
