@@ -254,6 +254,70 @@ public sealed record AgentDelegation(
     public AgentRunArtifact? Artifact { get; init; }
 }
 
+/// <summary>
+/// A sealed <c>tool_call</c> (<see cref="AgentRun.BeginToolCallAsync"/>) and the one <c>tool_result</c> it takes: complete it
+/// with <see cref="CompleteAsync"/> once the tool returns. Nothing is sealed implicitly: a call never completed has no result.
+/// </summary>
+public sealed class ToolCall
+{
+    private readonly AgentRun _run;
+
+    internal ToolCall(AgentRun run, string tool, string useId, AgentRunArtifact artifact)
+    {
+        _run = run;
+        Tool = tool;
+        UseId = useId;
+        Artifact = artifact;
+    }
+
+    /// <summary>The call's <c>step.tool.useId</c>; its result carries the same.</summary>
+    public string UseId { get; }
+
+    /// <summary>The call's <c>step.tool.name</c>.</summary>
+    public string Tool { get; }
+
+    /// <summary>The sealed <c>tool_call</c>.</summary>
+    public AgentRunArtifact Artifact { get; }
+
+    /// <summary>Set under the run's sealing lock once the result is sealed.</summary>
+    internal bool Completed { get; set; }
+
+    /// <summary>
+    /// Seals the call's <c>tool_result</c> with the same tool name and <c>useId</c> and returns it. A second completion is
+    /// refused before sealing (<see cref="InvalidOperationException"/>).
+    /// </summary>
+    public Task<AgentRunArtifact> CompleteAsync(byte[] result, string contentType = "application/json", CancellationToken cancellationToken = default) =>
+        _run.CompleteToolCallAsync(this, result, contentType, cancellationToken);
+
+    /// <summary>What a <c>human_approval</c> for exactly this call names: its tool, its signed <c>tool-arguments</c> digest and its <c>useId</c>.</summary>
+    public ApprovalCovers Covers(DateTimeOffset? expiresAt = null)
+    {
+        var uri = (Artifact.Envelope["objects"] as JsonArray)?.OfType<JsonObject>()
+            .Where(o => AgentProfiles.Str(o["role"]) == "tool-arguments").Select(o => AgentProfiles.Str(o["uri"])).FirstOrDefault();
+        return new ApprovalCovers(Tool, Artifact.ObjectDigests[uri!], UseId, expiresAt);
+    }
+}
+
+/// <summary>
+/// The call a <c>human_approval</c> is for (<c>spec/agent-enforcement-v1.md</c> §3.5): the tool, the SHA-256 of the call's
+/// <c>tool-arguments</c> bytes and, optionally, its <c>useId</c>. An approval binds at most one call; <see cref="ExpiresAt"/>
+/// (sealed at millisecond precision, UTC) ends it, and a rejection ignores it. Never put arguments or names here.
+/// </summary>
+public sealed record ApprovalCovers(string Tool, string ArgumentsSha256, string? UseId = null, DateTimeOffset? ExpiresAt = null)
+{
+    /// <summary>Covers a call of <paramref name="tool"/> with exactly these argument bytes, under any <c>useId</c>: the approval a retry is bound by.</summary>
+    public static ApprovalCovers ForArguments(string tool, byte[] arguments, DateTimeOffset? expiresAt = null) =>
+        new(tool, EnvelopeHashing.HashHex(arguments ?? throw new ArgumentNullException(nameof(arguments))), null, expiresAt);
+
+    internal JsonObject ToJson()
+    {
+        var covers = new JsonObject { ["tool"] = Tool, ["argumentsSha256"] = ArgumentsSha256 };
+        if (UseId is not null) covers["useId"] = UseId;
+        if (ExpiresAt is { } at) covers["expiresAt"] = AgentProfiles.FormatTime(AgentProfiles.Truncate(at));
+        return covers;
+    }
+}
+
 /// <summary>Artifacts that get a qualified timestamp (<see cref="AgentRunOptions.QualifiedFor"/>).</summary>
 [Flags]
 public enum QualifiedArtifacts

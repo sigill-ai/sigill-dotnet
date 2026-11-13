@@ -43,7 +43,7 @@ public sealed class AgentRun
     private static readonly HashSet<string> ReservedStepFields = new(StringComparer.Ordinal)
     {
         "type", "eventTime", "consequential", "timestamp", "finalSeq", "finalPrevSignatureSha256", "runDisposition",
-        "delegation", "model", "vendorRefs", "usage",
+        "delegation", "model", "vendorRefs", "usage", "covers", "enforcer", "rules",
     };
 
     private readonly ISigillAiEvidenceClient _client;
@@ -64,6 +64,9 @@ public sealed class AgentRun
     // delegation §4: open delegations (child correlationId → delegation seq) and those already resolved.
     private readonly Dictionary<string, int> _outstanding = new(StringComparer.Ordinal);
     private readonly HashSet<string> _resolved = new(StringComparer.Ordinal);
+    // Agent Enforcement v1 §3.2: in a v4 run every tool_call has its own useId and at most one result (the guard adds "denied").
+    private enum ToolCallState { Open, HasResult }
+    private readonly Dictionary<string, (ToolCallState State, string? Tool)> _toolCalls = new(StringComparer.Ordinal);
 
     /// <summary>The run identifier (<c>activity.correlationId</c>).</summary>
     public string CorrelationId { get; }
@@ -100,7 +103,9 @@ public sealed class AgentRun
         _options = options;
         _clock = clock;
         _parent = parent;
-        _schemaVersion = options.RecordsModelCalls ? "3" : options.Delegating || parent is not null ? "2" : "1";
+        // Control Set v2 §1: a run under a v2 policy control set records schemaVersion 4 throughout (v4 contains v2 and v3).
+        _schemaVersion = IsPolicyV2(options.ControlSet) ? "4"
+            : options.RecordsModelCalls ? "3" : options.Delegating || parent is not null ? "2" : "1";
         CorrelationId = parent?.ChildCorrelationId ?? options.CorrelationId ?? "urn:uuid:" + Guid.NewGuid();
         _coverage = new AgentProfiles.TimestampCoverage(options.TimestampPolicy);
     }
@@ -250,15 +255,20 @@ public sealed class AgentRun
         return await RecordInternalAsync(stepType, objects, fields, consequential, cancellationToken, requireTimestamp).ConfigureAwait(false);
     }
 
-    /// <summary>Seals one event whose step members are already checked (reserved members only from this class).</summary>
+    /// <summary>
+    /// Seals one event whose step members are already checked (reserved members only from this class). With
+    /// <paramref name="completes"/>, the event is that call's one <c>tool_result</c>: checked and marked under the gate.
+    /// </summary>
     private async Task<AgentRunArtifact> RecordInternalAsync(string stepType, IReadOnlyList<AgentRunObject>? objects, JsonObject? fields,
-        bool consequential, CancellationToken cancellationToken, bool requireTimestamp = false)
+        bool consequential, CancellationToken cancellationToken, bool requireTimestamp = false, ToolCall? completes = null)
     {
         AgentRunArtifact artifact;
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
             EnsureOpen();
+            if (completes is { Completed: true })
+                throw new InvalidOperationException($"Tool call '{completes.UseId}' already has its result.");
             // Keep the last slot for run_end, and one per open delegation for its result (delegation §4 rule 6),
             // so a bundle always fits AgentRunBundle.MaxArtifacts and can finish.
             lock (_artifacts)
@@ -269,6 +279,7 @@ public sealed class AgentRun
             var step = (JsonObject?)fields?.DeepClone() ?? new JsonObject();
             if (requireTimestamp) step["timestamp"] = "required";
             artifact = await SealEventAsync(stepType, objects ?? Array.Empty<AgentRunObject>(), step, consequential, cancellationToken).ConfigureAwait(false);
+            if (completes is not null) completes.Completed = true;
         }
         finally { _gate.Release(); }
         await NotifyAsync(artifact, artifact.Seq!.Value, cancellationToken).ConfigureAwait(false);
@@ -285,19 +296,67 @@ public sealed class AgentRun
     /// A tool call the agent decided to make. <paramref name="operation"/>
     /// classifies it (e.g. <c>read</c>, <c>update</c>); mark write-class calls
     /// <paramref name="consequential"/>. <paramref name="useId"/> correlates the
-    /// call with its result.
+    /// call with its result; in a <c>schemaVersion "4"</c> run (a v2 policy control set) one is generated when
+    /// omitted, and a <paramref name="useId"/> already used by a call of the run is refused before sealing.
+    /// Prefer <see cref="BeginToolCallAsync"/>, which pairs the call with its result.
     /// </summary>
     public Task<AgentRunArtifact> RecordToolCallAsync(string tool, byte[] arguments, string? operation = null,
         bool consequential = false, string contentType = "application/json", string? useId = null,
         CancellationToken cancellationToken = default) =>
-        RecordAsync("tool_call", new[] { Obj("tool-arguments", arguments, contentType) },
-            new JsonObject { ["tool"] = ToolBlock(tool, operation, useId) }, consequential, cancellationToken: cancellationToken);
+        SealToolCallAsync(tool, arguments, operation, consequential, contentType,
+            useId ?? (_schemaVersion == "4" ? Guid.NewGuid().ToString() : null), null, cancellationToken);
 
-    /// <summary>The result a tool returned — context for the model's next turn.</summary>
+    /// <summary>
+    /// Seals a <c>tool_call</c> and returns it as a <see cref="ToolCall"/>; seal its result with
+    /// <see cref="ToolCall.CompleteAsync"/>, which names the same tool and <c>useId</c>. A <c>useId</c> (a UUID) is
+    /// generated when <paramref name="useId"/> is omitted. <paramref name="definition"/> is the tool's definition as your
+    /// runtime holds it (e.g. its tool-manifest entry), bound by digest as the <c>tool-definition</c> object
+    /// (<c>spec/agent-enforcement-v1.md</c> §3.3); only a <c>schemaVersion "4"</c> run can carry it. This release records the
+    /// call; it does not decide it.
+    /// </summary>
+    /// <exception cref="InvalidOperationException"><paramref name="definition"/> in a run that is not <c>schemaVersion "4"</c>.</exception>
+    /// <exception cref="ArgumentException">The call would not verify, or its useId is already used; nothing was sealed and the run stays usable.</exception>
+    public async Task<ToolCall> BeginToolCallAsync(string tool, byte[] arguments, string? operation = null, bool consequential = false,
+        string contentType = "application/json", string? useId = null, byte[]? definition = null, CancellationToken cancellationToken = default)
+    {
+        if (definition is not null && _schemaVersion != "4")
+            throw new InvalidOperationException("A tool-definition object needs a schemaVersion 4 run (a v2 policy control set).");
+        var id = useId ?? Guid.NewGuid().ToString();
+        var artifact = await SealToolCallAsync(tool, arguments, operation, consequential, contentType, id, definition, cancellationToken)
+            .ConfigureAwait(false);
+        return new ToolCall(this, tool, id, artifact);
+    }
+
+    /// <summary>
+    /// The typed tool calls (<see cref="RecordToolCallAsync"/>, <see cref="BeginToolCallAsync"/>) are sealed here.
+    /// <see cref="RecordAsync"/>("tool_call") does not pass through it; the useId checks every path needs are in SealEventAsync.
+    /// </summary>
+    private Task<AgentRunArtifact> SealToolCallAsync(string tool, byte[] arguments, string? operation, bool consequential,
+        string contentType, string? useId, byte[]? definition, CancellationToken cancellationToken)
+    {
+        var objects = new List<AgentRunObject> { Obj("tool-arguments", arguments, contentType) };
+        if (definition is not null) objects.Add(Obj("tool-definition", definition, "application/json"));
+        return RecordAsync("tool_call", objects, new JsonObject { ["tool"] = ToolBlock(tool, operation, useId) }, consequential,
+            cancellationToken: cancellationToken);
+    }
+
+    /// <summary>
+    /// The result a tool returned — context for the model's next turn. In a <c>schemaVersion "4"</c> run
+    /// <paramref name="useId"/> is required: the result names its call.
+    /// </summary>
     public Task<AgentRunArtifact> RecordToolResultAsync(string tool, byte[] result,
-        string contentType = "application/json", string? useId = null, CancellationToken cancellationToken = default) =>
-        RecordAsync("tool_result", new[] { Obj("tool-result", result, contentType) },
+        string contentType = "application/json", string? useId = null, CancellationToken cancellationToken = default)
+    {
+        if (useId is null && _schemaVersion == "4")
+            throw new ArgumentException("A tool_result of a schemaVersion 4 run names its call: useId is required.", nameof(useId));
+        return RecordAsync("tool_result", new[] { Obj("tool-result", result, contentType) },
             new JsonObject { ["tool"] = ToolBlock(tool, null, useId) }, cancellationToken: cancellationToken);
+    }
+
+    /// <summary>Seals the one <c>tool_result</c> of <paramref name="call"/> (<see cref="ToolCall.CompleteAsync"/>).</summary>
+    internal Task<AgentRunArtifact> CompleteToolCallAsync(ToolCall call, byte[] result, string contentType, CancellationToken cancellationToken) =>
+        RecordInternalAsync("tool_result", new[] { Obj("tool-result", result, contentType) },
+            new JsonObject { ["tool"] = ToolBlock(call.Tool, null, call.UseId) }, false, cancellationToken, completes: call);
 
     /// <summary>A policy decision taken before an action, e.g. "this write needs approval".</summary>
     public Task<AgentRunArtifact> RecordAuthorizationAsync(AgentAuthorization authorization,
@@ -316,17 +375,43 @@ public sealed class AgentRun
     /// and an identity assertion (e.g. an IdP token) are bound as detached
     /// objects; their bytes stay local.
     /// </summary>
+    // C# 13+: RecordHumanApprovalAsync("approved", null) keeps meaning this overload (null receipt), not the covers one.
+    [System.Runtime.CompilerServices.OverloadResolutionPriority(1)]
     public Task<AgentRunArtifact> RecordHumanApprovalAsync(string decision, byte[]? receipt = null,
         byte[]? identityAssertion = null, string? approver = null, string? detail = null,
         string receiptContentType = "application/json", string identityAssertionContentType = "application/jwt",
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        RecordHumanApprovalCoreAsync(decision, null, receipt, identityAssertion, approver, detail, receiptContentType,
+            identityAssertionContentType, cancellationToken);
+
+    /// <summary>
+    /// A human approval or rejection of one call: <paramref name="covers"/> names the call it is for
+    /// (<c>spec/agent-enforcement-v1.md</c> §3.5; build it with <see cref="ToolCall.Covers"/> or
+    /// <see cref="ApprovalCovers.ForArguments"/>). Only a <c>schemaVersion "4"</c> run can carry it. The other parameters
+    /// are those of the overload without <paramref name="covers"/>.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">The run is not <c>schemaVersion "4"</c>.</exception>
+    public Task<AgentRunArtifact> RecordHumanApprovalAsync(string decision, ApprovalCovers covers, byte[]? receipt = null,
+        byte[]? identityAssertion = null, string? approver = null, string? detail = null,
+        string receiptContentType = "application/json", string identityAssertionContentType = "application/jwt",
+        CancellationToken cancellationToken = default) =>
+        RecordHumanApprovalCoreAsync(decision, covers ?? throw new ArgumentNullException(nameof(covers)), receipt, identityAssertion,
+            approver, detail, receiptContentType, identityAssertionContentType, cancellationToken);
+
+    private Task<AgentRunArtifact> RecordHumanApprovalCoreAsync(string decision, ApprovalCovers? covers, byte[]? receipt,
+        byte[]? identityAssertion, string? approver, string? detail, string receiptContentType, string identityAssertionContentType,
+        CancellationToken cancellationToken)
     {
+        if (covers is not null && _schemaVersion != "4")
+            throw new InvalidOperationException("covers needs a schemaVersion 4 run (a v2 policy control set).");
         var fields = new JsonObject { ["decision"] = decision };
         if (approver is not null) fields["approver"] = approver;
+        if (covers is not null) fields["covers"] = covers.ToJson();
         var objects = new List<AgentRunObject>();
         if (receipt is not null) objects.Add(Obj("approval-receipt", receipt, receiptContentType));
         if (identityAssertion is not null) objects.Add(Obj("identity-assertion", identityAssertion, identityAssertionContentType));
-        return RecordAsync("human_approval", objects, Detail(fields, detail), cancellationToken: cancellationToken);
+        // Not through RecordAsync: covers is reserved there, so only this method writes it.
+        return RecordInternalAsync("human_approval", objects, Detail(fields, detail), false, cancellationToken);
     }
 
     /// <summary>
@@ -340,7 +425,7 @@ public sealed class AgentRun
         bool consequential = false, CancellationToken cancellationToken = default)
     {
         if (call is null) throw new ArgumentNullException(nameof(call));
-        if (_schemaVersion != "3")
+        if (_schemaVersion is not ("3" or "4"))
             throw new InvalidOperationException("This run was not started with RecordsModelCalls = true; model calls use schemaVersion 3 throughout.");
         var step = new JsonObject();
         if (call.Model is { } m)
@@ -444,7 +529,7 @@ public sealed class AgentRun
         bool consequential = false, string? childCorrelationId = null, CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrEmpty(childAgentId)) throw new ArgumentException("childAgentId is required.", nameof(childAgentId));
-        if (_schemaVersion is not ("2" or "3"))
+        if (_schemaVersion is not ("2" or "3" or "4"))
             throw new InvalidOperationException("This run was not started with Delegating = true; a run that delegates uses schemaVersion 2 (or 3) throughout.");
         var child = childCorrelationId ?? "urn:uuid:" + Guid.NewGuid();
         if (child.Length == 0 || child == CorrelationId)
@@ -498,7 +583,8 @@ public sealed class AgentRun
         string childCorrelationId, string childRunEndSignatureSha256, string childDisposition,
         CancellationToken cancellationToken = default)
     {
-        if (childDisposition is not ("completed" or "failed" or "aborted"))
+        // Enforcement §3.6: only a v4 parent can record a child its guard halted.
+        if (childDisposition is not ("completed" or "failed" or "aborted") && !(childDisposition == "halted" && _schemaVersion == "4"))
             throw new ArgumentException("childDisposition must be completed, failed or aborted.", nameof(childDisposition));
         AgentRunArtifact artifact;
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
@@ -586,6 +672,26 @@ public sealed class AgentRun
         envelope["objects"] = ObjectsBlock(objects);
         var digests = Digests(objects);
         CheckUriReuse(digests);
+        // Agent Enforcement v1 §3.2, §5: in a v4 run a retry is a new tool_call with a new useId, and every tool_result answers
+        // one earlier call once — refused here rather than sealed and reported (duplicate_use_id, orphan_result, conflicting_result).
+        var useId = _schemaVersion == "4" && stepType is "tool_call" or "tool_result" ? AgentProfiles.Str((step["tool"] as JsonObject)?["useId"]) : null;
+        var toolName = AgentProfiles.Str((step["tool"] as JsonObject)?["name"]);
+        lock (_artifacts)
+            if (useId is not null)
+            {
+                var known = _toolCalls.TryGetValue(useId, out var call);
+                var state = call.State;
+                if (stepType == "tool_call" && known)
+                    throw new ArgumentException($"use_id '{useId}' is already used by a tool_call of this run; a retry is a new call with a new use id (enforcement §3.2).");
+                // Texts identical to the Python port's (hence use_id).
+                if (stepType == "tool_result" && !known)
+                    throw new ArgumentException($"No tool_call of this run with use_id '{useId}' awaits a result.");
+                if (stepType == "tool_result" && state == ToolCallState.HasResult)
+                    throw new ArgumentException($"The tool_call with use_id '{useId}' already has its result.");
+                // §3.2: a tool_result carries the same tool.name as the call it answers.
+                if (stepType == "tool_result" && toolName != call.Tool)
+                    throw new ArgumentException($"The tool_call with use_id '{useId}' was made to tool '{call.Tool}'; its result cannot name another tool.");
+            }
         AgentRunVerifier.Prevalidate(envelope, AgentProfiles.ExecutionSchemaFor(envelope)); // throws before anything is sealed
 
         try
@@ -609,6 +715,8 @@ public sealed class AgentRun
             lock (_artifacts)
             {
                 _artifacts.Add(artifact);
+                if (useId is not null)
+                    _toolCalls[useId] = stepType == "tool_call" ? (ToolCallState.Open, toolName) : (ToolCallState.HasResult, _toolCalls[useId].Tool);
                 if (stepType == "run_end") _finished = true; // committed with the append, before any caller code runs
                 if (_options.RetainPayloads)
                     foreach (var o in objects) _payloads[o.Uri] = o.Bytes;
@@ -753,6 +861,10 @@ public sealed class AgentRun
             throw new ArgumentException("ControlSet.Id and Version must equal the document's id and version.", nameof(o));
     }
 
+    private static bool IsPolicyV2(AgentControlSet controlSet) =>
+        controlSet.ContentType == AgentPolicy.ControlSetContentType
+        && AgentProfiles.Str(JsonNode.Parse(controlSet.Content)?["schemaVersion"]) == "2";
+
     private static JsonObject ToolBlock(string name, string? operation, string? useId)
     {
         if (string.IsNullOrEmpty(name)) throw new ArgumentException("tool name is required.", nameof(name));
@@ -887,6 +999,9 @@ public static class ControlEvaluation
         var problems = AgentPolicy.Validate(doc);
         if (problems.Count > 0) throw new ArgumentException("Invalid policy control set: " + string.Join("; ", problems), nameof(request));
         var policyDoc = (JsonObject)JsonNode.Parse(doc)!;
+        // Agent Enforcement v1 §8: evaluations of a v2 control set (facts v2) are specified in a later round.
+        if (policyDoc.ContainsKey("schemaVersion"))
+            throw new ArgumentException("Policy evaluations of a v2 control set are not specified yet (Control Evaluation v2 fixes factsVersion 1).", nameof(request));
         if (policyDoc["cedar"] is not JsonObject cedar) throw new ArgumentException("The control set carries no Cedar rules.", nameof(request));
         var (csUri, csNode) = ControlSetObject(control, doc, request);
         if (AgentProfiles.Str(csNode["contentType"]) != AgentPolicy.ControlSetContentType)

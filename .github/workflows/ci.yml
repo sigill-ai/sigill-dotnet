@@ -64,3 +64,40 @@ jobs:
             git diff -- spec/test-vectors
             exit 1
           fi
+      - name: Check vectors 11-14 (digests and schemas; their generators need Node and Cedar)
+        run: |
+          python - <<'EOF'
+          import hashlib, json, pathlib, jcs
+          from jsonschema import Draft202012Validator
+          spec = pathlib.Path("spec"); tv = spec / "test-vectors"
+          sha = lambda b: hashlib.sha256(b).hexdigest()
+          load = lambda p: json.loads(pathlib.Path(p).read_text(encoding="utf-8"))
+          digest = lambda v: sha(jcs.canonicalize(v))
+          scope = lambda d: {k: v for k, v in d.items() if k not in ("id", "version")}
+          # 11, 13: object digest, cedarDigest, approvalScopeDigest, schemaSha256
+          for vec, schema in [("11-policy-control-set", "agent-policy-cedar-schema-v1.json"), ("13-policy-control-set-v2", "agent-policy-cedar-schema-v2.json")]:
+              raw = (tv / vec / "control-set.json").read_bytes(); doc = json.loads(raw); exp = load(tv / vec / "expected.json")
+              assert sha(raw) == exp["objectSha256"], vec
+              assert digest(doc["cedar"]) == exp["cedarDigest"], vec
+              assert digest(scope(doc)) == exp["approvalScopeDigest"], vec
+              assert digest(load(spec / schema)) == exp["schemaSha256"] == doc["cedar"]["schemaSha256"], vec
+          assert digest(scope(load(tv / "11-policy-control-set/control-set-version-only.json"))) == load(tv / "11-policy-control-set/expected.json")["versionOnlyApprovalScopeDigest"]
+          # 12: the facts are JCS bytes with the stated digest
+          for f in sorted((tv / "12-policy-evaluation/expected").glob("*.facts.json")):
+              raw = f.read_bytes(); res = load(str(f).replace(".facts.json", ".results.json"))
+              assert jcs.canonicalize(json.loads(raw)) == raw and sha(raw) == res["factsSha256"], f.name
+          # 14: every envelope against the execution schema of its version; each case's approvalScopeDigest
+          schemas = {v: Draft202012Validator(load(spec / f"agent-execution-evidence-v{v}.schema.json")) for v in "1234"}
+          ok = lambda env: schemas[env["schemaVersion"]].is_valid(env)
+          base = load(tv / "13-policy-control-set-v2/control-set.json"); v14 = tv / "14-policy-enforcement"
+          for f in sorted((v14 / "runs").glob("*.json")):
+              run = load(f); exp = load(v14 / "expected" / f.name)
+              assert all(ok(e["envelope"]) for e in run["events"]), f.name
+              assert digest(scope({**base, "enforcement": run["enforcement"]})) == exp["approvalScopeDigest"], f.name
+          for f in sorted((v14 / "findings").glob("*.json")):
+              assert all(ok(e["envelope"]) for e in load(f)["events"]), f.name
+          env = load(v14 / "envelopes.json")
+          for c in env["valid"]: assert ok(c["envelope"]), c["name"]
+          for c in env["invalid"]: assert not ok(c["envelope"]), c["name"]
+          print("vectors 11-14: digests and schemas ok")
+          EOF

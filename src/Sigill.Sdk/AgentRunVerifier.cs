@@ -234,13 +234,35 @@ public sealed record AgentEvaluationVerdict
     public bool Current { get; init; } = true;
 }
 
+/// <summary>One finding of the <c>enforcement</c> check (<c>spec/agent-enforcement-v1.md</c> §5).</summary>
+public sealed class EnforcementFinding
+{
+    public EnforcementFinding(string code, IReadOnlyList<int> seqs)
+    {
+        Code = code;
+        Seqs = seqs;
+    }
+
+    /// <summary>
+    /// orphan_result | conflicting_result | executed_after_denial | duplicate_use_id | misplaced_decision |
+    /// unrecorded_halt | continued_after_halt | evidence_version_mismatch.
+    /// </summary>
+    public string Code { get; }
+
+    /// <summary>The seqs involved.</summary>
+    public IReadOnlyList<int> Seqs { get; }
+}
+
 /// <summary>The run-level result (common rules §8).</summary>
 public sealed record AgentRunVerificationResult
 {
     /// <summary>run_finalized | run_open | run_invalid.</summary>
     public required string Verdict { get; init; }
 
-    /// <summary>The nine checks (correlation, sequence, chain, envelope, signatures, timestamps, objects, finalization, control): ok | warn | bad.</summary>
+    /// <summary>
+    /// The nine checks (correlation, sequence, chain, envelope, signatures, timestamps, objects, finalization, control): ok | warn | bad.
+    /// A <c>schemaVersion "4"</c> run, or a run whose supplied control set is a v2 policy, adds <c>enforcement</c> (Agent Enforcement v1 §5).
+    /// </summary>
     public required IReadOnlyDictionary<string, string> Checks { get; init; }
 
     /// <summary>bound | run_only | control_only | unbound.</summary>
@@ -285,6 +307,12 @@ public sealed record AgentRunVerificationResult
     /// genuine is confirmed by the provider, never by the verifier.
     /// </summary>
     public int ModelCallsWithVendorRefs { get; init; }
+
+    /// <summary>
+    /// The <c>enforcement</c> check's findings, in the order of Agent Enforcement v1 §5 (each also in <see cref="Findings"/>).
+    /// A verifier does not evaluate the policy: a guard that skipped a due denial or halt is not found here.
+    /// </summary>
+    public IReadOnlyList<EnforcementFinding> EnforcementFindings { get; init; } = Array.Empty<EnforcementFinding>();
 
     /// <summary>What a verdict does and does not establish. Show it next to the verdict.</summary>
     public string Scope => AgentRunVerifier.Scope;
@@ -531,6 +559,7 @@ public static class AgentRunVerifier
         if (sa.Objects.FirstOrDefault(o => o.Role == "control-set")?.ContentType != AgentPolicy.ControlSetContentType)
             bad("its control set is not a policy control set");
         if (AgentPolicy.Validate(csBytes).Count > 0 || cs["cedar"] is not JsonObject cedar) { bad("its control set is not a valid policy control set with Cedar rules"); return; }
+        if (cs.ContainsKey("schemaVersion")) { bad("policy evaluations of a v2 control set are not specified yet (Control Evaluation v2 fixes factsVersion 1)"); return; }
 
         var digests = AgentPolicy.ComputeDigests(csBytes);
         r.DigestsMatch = digests.ApprovalScopeDigest == AgentProfiles.Str(policy?["approvalScopeDigest"])
@@ -618,6 +647,83 @@ public static class AgentRunVerifier
         if (AgentProfiles.Str(approval["agentId"]) != AgentProfiles.Str(ctl?.Env["agent"]?["id"]))
             bad("the approval record is for another agent");
     }
+
+    /// <summary>
+    /// Agent Enforcement v1 §5: the findings of a run's events (typed fields only), in the order of the spec's table, each
+    /// with the seqs involved. "Previous" and "next" are seq − 1 and seq + 1. <c>evidence_version_mismatch</c> is checked
+    /// only when the control-set bytes are given. A verifier does not evaluate the policy (§5).
+    /// </summary>
+    internal static List<EnforcementFinding> EnforcementFindings(IReadOnlyList<JsonObject> events, string? controlSetContentType, byte[]? controlSet)
+    {
+        var found = new List<EnforcementFinding>();
+        void Add(string code, params int[] seqs) => found.Add(new EnforcementFinding(code, seqs));
+        // Stable sort: of two events with the same seq, the first in bundle order is the event at that seq.
+        var evs = events.Select(e => (Seq: AgentProfiles.Int((e["chain"] as JsonObject)?["seq"]), Step: e["step"] as JsonObject ?? new JsonObject(), Env: e))
+            .Where(x => x.Seq is not null).Select(x => (Seq: x.Seq!.Value, x.Step, x.Env)).OrderBy(x => x.Seq).ToList();
+        // A missing or non-string member, or a tool that is not an object, is absent; an absent value equals nothing.
+        static string? Type(JsonObject s) => AgentProfiles.Str(s["type"]);
+        static JsonObject? Tool(JsonObject s) => s["tool"] as JsonObject;
+        static string? UseId(JsonObject s) => AgentProfiles.Str(Tool(s)?["useId"]);
+        static string? Name(JsonObject s) => AgentProfiles.Str(Tool(s)?["name"]);
+        static bool Same(string? a, string? b) => a is not null && a == b;
+        static bool IsRecord(JsonObject? s) => s is not null && Type(s) == "authorization" && s.ContainsKey("enforcer");
+        static bool Halted(JsonObject? s) => s is not null && Type(s) == "run_end" && AgentProfiles.Str(s["runDisposition"]) == "halted";
+        JsonObject? At(int seq) => evs.FirstOrDefault(x => x.Seq == seq).Step;
+
+        // The structural findings are those of a run whose events are all v4; any other run can only show evidence_version_mismatch.
+        var notV4 = evs.Where(x => AgentProfiles.Str(x.Env["schemaVersion"]) != "4").Select(x => x.Seq).ToArray();
+        if (evs.Count > 0 && notV4.Length == 0)
+        {
+            var calls = evs.Where(x => Type(x.Step) == "tool_call").ToList();
+            var results = evs.Where(x => Type(x.Step) == "tool_result").ToList();
+            var records = evs.Where(x => IsRecord(x.Step)).ToList();
+            foreach (var r in results)
+                if (!calls.Any(c => c.Seq < r.Seq && Same(UseId(c.Step), UseId(r.Step)))) Add("orphan_result", r.Seq);
+            var firstResult = new Dictionary<string, int>(StringComparer.Ordinal);
+            foreach (var r in results)
+            {
+                if (UseId(r.Step) is not { } u) continue;
+                if (firstResult.TryGetValue(u, out var earlier)) Add("conflicting_result", earlier, r.Seq);
+                else firstResult[u] = r.Seq;
+            }
+            foreach (var r in results)
+                if (records.FirstOrDefault(d => Tool(d.Step) is not null && Same(UseId(d.Step), UseId(r.Step))) is { Step: not null } denial)
+                    Add("executed_after_denial", Math.Min(denial.Seq, r.Seq), Math.Max(denial.Seq, r.Seq));
+            foreach (var g in calls.Where(c => UseId(c.Step) is not null).GroupBy(c => UseId(c.Step)!, StringComparer.Ordinal).Where(g => g.Count() > 1))
+                Add("duplicate_use_id", g.Select(c => c.Seq).ToArray());
+            foreach (var r in records)
+            {
+                var prev = At(r.Seq - 1);
+                var placed = Tool(r.Step) is not null
+                    ? prev is not null && Type(prev) == "tool_call" && Same(Name(prev), Name(r.Step)) && Same(UseId(prev), UseId(r.Step))
+                    : prev is null || Type(prev) != "tool_call";
+                if (IsRecord(prev) || !placed) Add("misplaced_decision", r.Seq);
+            }
+            foreach (var e in evs.Where(x => Halted(x.Step)))
+                if (!IsRecord(At(e.Seq - 1))) Add("unrecorded_halt", e.Seq);
+            // Every record without tool is a halt, and so is every unavailable record.
+            foreach (var r in records.Where(x => AgentProfiles.Str((x.Step["enforcer"] as JsonObject)?["reason"]) == "unavailable" || Tool(x.Step) is null))
+                if (!Halted(At(r.Seq + 1))) Add("continued_after_halt", r.Seq);
+        }
+        // Fails closed (§5): a mismatch unless the bytes parse strictly as an object without schemaVersion (a v1 control set).
+        if (controlSetContentType == AgentPolicy.ControlSetContentType && controlSet is not null && notV4.Length > 0
+            && !(AgentPolicy.Parse(controlSet, out _) is { } doc && !doc.ContainsKey("schemaVersion")))
+            Add("evidence_version_mismatch", notV4);
+        return found;
+    }
+
+    /// <summary>What each <see cref="EnforcementFinding"/> code means, as a run finding says it.</summary>
+    private static readonly Dictionary<string, string> EnforcementText = new(StringComparer.Ordinal)
+    {
+        ["orphan_result"] = "a tool_result whose useId no earlier tool_call used",
+        ["conflicting_result"] = "a second tool_result for the same useId",
+        ["executed_after_denial"] = "a tool_result for a call an enforcement record denied",
+        ["duplicate_use_id"] = "tool_calls share a useId",
+        ["misplaced_decision"] = "an enforcement record that does not directly follow the event it decides",
+        ["unrecorded_halt"] = "a halted run_end that does not directly follow an enforcement record",
+        ["continued_after_halt"] = "the run continued after an enforcement record that halts it",
+        ["evidence_version_mismatch"] = "the policy control set does not parse strictly as a v1 document, but the events are not all schemaVersion 4",
+    };
 
     /// <summary>§6.4: never seal an envelope the verifier would reject. Throws ArgumentException.</summary>
     internal static void Prevalidate(JsonObject envelope, string schemaName)
@@ -1118,12 +1224,31 @@ public static class AgentRunVerifier
         }
         checks["control"] = controlOk ? "ok" : "bad";
 
+        // ── enforcement (Agent Enforcement v1 §5): a v4 run, or a run whose control-set bytes are supplied (only signed bytes count)
+        byte[]? csBytes = null;
+        string? csType = null;
+        var csObjects = ctl is not null && ctlCheck is not null ? ctl.Objects.Where(o => o.Role == "control-set").ToList() : new List<SignedObject>();
+        if (csObjects.Count == 1 && bundle.Payloads.TryGetValue(csObjects[0].Uri, out var supplied)
+            && ctlCheck!.SignedDigest(csObjects[0].Uri) == EnvelopeHashing.HashHex(supplied))
+        {
+            csBytes = supplied;
+            csType = csObjects[0].ContentType;
+        }
+        var enforcement = EnforcementFindings(good.Select(g => g.Env).ToList(), csType, csBytes);
+        if ((versions.Count == 1 && versions[0] == "4") || enforcement.Count > 0)
+        {
+            checks["enforcement"] = enforcement.Count == 0 ? "ok" : "bad";
+            foreach (var f in enforcement)
+                findings.Add($"enforcement: {EnforcementText[f.Code]} ({f.Code}; seq {string.Join(", ", f.Seqs)}).");
+        }
+
         // ── seal time, defence in depth (§8): warnings only
         var ctlAt = ctlCheck is { TimestampOk: true } ? Time(ctlCheck.GenTime) : null;
         bool? sealedBeforeRun = null;
         if (ctlAt is { } controlTime && timeline.FirstOrDefault(t => t.SealedAt is not null) is { SealedAt: { } firstAt } first)
         {
-            sealedBeforeRun = controlTime <= firstAt + TimeSpan.FromSeconds(1); // TSAs state up to 1 s accuracy
+            // TSAs state up to 1 s accuracy. Differences, never shifted instants: those overflow near years 1 and 9999.
+            sealedBeforeRun = controlTime - firstAt <= TimeSpan.FromSeconds(1);
             if (sealedBeforeRun == false)
                 warnings.Add($"The Control Artifact's timestamp is later than the run's first timestamp (seq {first.Seq}): the control basis may not have been sealed before the run.");
         }
@@ -1138,12 +1263,12 @@ public static class AgentRunVerifier
             if (ctlAt is { } lower)
             {
                 plausible ??= true;
-                if (claimed < lower - SealTimeAllowance) early.Add(timeline[i].Seq);
+                if (lower - claimed > SealTimeAllowance) early.Add(timeline[i].Seq);
             }
             if (timeline.Skip(i).Select(t => t.SealedAt).FirstOrDefault(t => t is not null) is { } upper)
             {
                 plausible ??= true;
-                if (claimed > upper + SealTimeAllowance) late.Add(timeline[i].Seq);
+                if (claimed - upper > SealTimeAllowance) late.Add(timeline[i].Seq);
             }
         }
         if (early.Count > 0 || late.Count > 0) plausible = false;
@@ -1195,7 +1320,9 @@ public static class AgentRunVerifier
             }
             var endStep = end.Env["step"] as JsonObject;
             disposition = AgentProfiles.Str(endStep?["runDisposition"]);
-            if (disposition is null || !Dispositions.Contains(disposition))
+            // Enforcement §3.6: a v4 run may end halted (the guard stopped it).
+            if (disposition is null || !(Dispositions.Contains(disposition)
+                    || (disposition == "halted" && AgentProfiles.Str(end.Env["schemaVersion"]) == "4")))
             {
                 finOk = false;
                 findings.Add($"run_end carries no valid runDisposition (got '{disposition ?? "none"}').");
@@ -1352,6 +1479,7 @@ public static class AgentRunVerifier
         return new AgentRunVerificationResult
         {
             Notes = notes,
+            EnforcementFindings = enforcement,
             Verdict = verdict,
             Checks = checks,
             Binding = binding,

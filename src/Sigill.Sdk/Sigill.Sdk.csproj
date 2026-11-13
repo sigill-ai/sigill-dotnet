@@ -32,6 +32,9 @@
     <EmbeddedResource Include="../../spec/agent-execution-evidence-v1.schema.json" LogicalName="Sigill.Sdk.agent-execution-evidence-v1.schema.json" />
     <EmbeddedResource Include="../../spec/agent-execution-evidence-v2.schema.json" LogicalName="Sigill.Sdk.agent-execution-evidence-v2.schema.json" />
     <EmbeddedResource Include="../../spec/agent-execution-evidence-v3.schema.json" LogicalName="Sigill.Sdk.agent-execution-evidence-v3.schema.json" />
+    <EmbeddedResource Include="../../spec/agent-execution-evidence-v4.schema.json" LogicalName="Sigill.Sdk.agent-execution-evidence-v4.schema.json" />
+    <!-- Control Set v2 §4 rule 5: cedar.schemaSha256 must be the digest of this schema. -->
+    <EmbeddedResource Include="../../spec/agent-policy-cedar-schema-v2.json" LogicalName="Sigill.Sdk.agent-policy-cedar-schema-v2.json" />
     <EmbeddedResource Include="../../spec/control-evaluation-v1.schema.json" LogicalName="Sigill.Sdk.control-evaluation-v1.schema.json" />
     <EmbeddedResource Include="../../spec/control-evaluation-v2.schema.json" LogicalName="Sigill.Sdk.control-evaluation-v2.schema.json" />
   </ItemGroup>

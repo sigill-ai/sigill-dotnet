@@ -545,6 +545,45 @@ var result = await client.VerifyAgentRunTreeAsync(tree);
   what you expected; without them a shared certificate proves consistency, not
   who ran each sub-agent.
 
+### Policy enforcement (draft): tool calls and bound approvals
+
+A run whose control set is a [policy control set v2](spec/agent-policy-control-set-v2.md)
+(`AgentPolicy.ControlSetFromDocument`, with `"schemaVersion": "2"`) is recorded as
+execution `schemaVersion "4"` ([Agent Enforcement v1](spec/agent-enforcement-v1.md)): every
+tool call has a `useId` and every result names its call. **This release records and
+verifies v4; it does not enforce yet** — nothing is denied or halted. The recorder offers
+no way to write an enforcement record or a halted `run_end`; a producer that signs one by
+other means is caught by recomputing the decisions from the control set and the signed
+events, not by this API — except a record with reason `unavailable` (the engine failed),
+which cannot be recomputed ([Agent Enforcement §6](spec/agent-enforcement-v1.md)). The verifier adds the `enforcement` check for v4 runs (results
+without a call, a second result, reused use ids, misplaced or unrecorded decisions), and
+reports `evidence_version_mismatch` when a run under a v2 policy control set is not v4.
+
+Record a call and its result as one lifecycle:
+
+```csharp
+ToolCall call = await run.BeginToolCallAsync("crm.read_customer", argsJson, operation: "read",
+    definition: toolManifestEntry);   // optional: binds the tool's definition by digest
+byte[] result = await ReadCustomerAsync(argsJson);
+await call.CompleteAsync(result);      // same tool and useId; a second completion is refused
+```
+
+Bind an approval to the call it is for: its tool and the digest of its exact arguments,
+optionally its `useId` and an expiry. One approval binds at most one call, and a
+rejection is sticky for the run:
+
+```csharp
+await run.RecordHumanApprovalAsync("approved", approver: "urn:example:approver:42",
+    covers: ApprovalCovers.ForArguments("payments.refund", refundArgs, expiresAt: DateTimeOffset.UtcNow.AddMinutes(15)));
+ToolCall refund = await run.BeginToolCallAsync("payments.refund", refundArgs, consequential: true);
+// Or covers: call.Covers() for one sealed call exactly, including its useId.
+```
+
+`AgentPolicy.Validate` checks a v2 document (entities, enforcement settings, annotations,
+the schema v2 digest; strict Cedar validation needs a Cedar engine), `AgentPolicy.Enforcement`
+gives its effective settings and each rule's effect, and `AgentPolicy.BuildFactsV2` builds
+the facts v2 a guard and an evaluator evaluate.
+
 ## Error handling
 
 Producer-time errors throw; verification errors are collected. This split is
