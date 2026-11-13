@@ -63,7 +63,7 @@ public class PolicyControlSetV2VectorTests
     public void Validate_RejectsEveryInvalidVector_WithoutThrowing()
     {
         var v = JsonNode.Parse(File.ReadAllText(Path.Combine(Dir13, "invalid.json")))!;
-        v["cases"]!.AsArray().Should().HaveCount(33);
+        v["cases"]!.AsArray().Should().HaveCount(35);
         v["cases"]!.AsArray().Select(c => c!["name"]!.GetValue<string>()).Should().Contain(new[] { "cedar-unknown-member", "utf16le", "nested-deeper-than-64" });
         foreach (var c in v["cases"]!.AsArray())
         {

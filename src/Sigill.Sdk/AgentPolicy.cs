@@ -78,13 +78,24 @@ public static class AgentPolicy
     /// <summary>SHA-256 of JCS(<c>agent-policy-cedar-schema-v2.json</c>): the <c>cedar.schemaSha256</c> of every v2 document (v2 §4).</summary>
     internal static string CedarSchemaV2Sha256 => SchemaV2Digest.Value;
 
-    private static readonly Lazy<string> SchemaV2Digest = new(() =>
+    private static readonly Lazy<string> SchemaV2Digest = new(() => EnvelopeHashing.HashHex(AgentProfiles.Canonical(CedarSchema(v2: true))));
+    private static readonly Lazy<string> SchemaV1Digest = new(() => EnvelopeHashing.HashHex(AgentProfiles.Canonical(CedarSchema(v2: false))));
+    private static readonly Lazy<string> CedarSchemaV1Text = new(() => LoadSchema("agent-policy-cedar-schema-v1.json"));
+    private static readonly Lazy<string> CedarSchemaV2Text = new(() => LoadSchema("agent-policy-cedar-schema-v2.json"));
+
+    private static string LoadSchema(string name)
     {
-        using var stream = typeof(AgentPolicy).Assembly.GetManifestResourceStream("Sigill.Sdk.agent-policy-cedar-schema-v2.json")
-            ?? throw new InvalidOperationException("Embedded schema 'agent-policy-cedar-schema-v2.json' is missing.");
+        using var stream = typeof(AgentPolicy).Assembly.GetManifestResourceStream("Sigill.Sdk." + name)
+            ?? throw new InvalidOperationException($"Embedded schema '{name}' is missing.");
         using var reader = new System.IO.StreamReader(stream);
-        return EnvelopeHashing.HashHex(AgentProfiles.Canonical(JsonNode.Parse(reader.ReadToEnd())!));
-    });
+        return reader.ReadToEnd();
+    }
+
+    /// <summary>The Cedar schema of a document's version (v1 §4 rule 5, v2 §4), a fresh node per call (nodes are not shareable).</summary>
+    private static JsonNode CedarSchema(bool v2) => JsonNode.Parse((v2 ? CedarSchemaV2Text : CedarSchemaV1Text).Value)!;
+
+    // v1 §4 rule 1: the evaluator's baseline permit, keyed outside the rule-id alphabet.
+    private const string BaselinePermit = "sigill:baseline-permit";
     // I-JSON also covers §4 rule 4: integers beyond ±2^53-1 are refused anywhere in the document.
     private const string NotIJson = "the document is not an I-JSON object (no repeated names, integers within ±2^53-1, no lone surrogates)";
     private const string NotUtf8 = "the document is not UTF-8 without a byte-order mark";
@@ -129,8 +140,8 @@ public static class AgentPolicy
 
     /// <summary>
     /// Structural checks of §2 and §4 rules 1–4 (rule 4 through I-JSON). Strict validation against the Cedar schema (rule 5) needs a
-    /// Cedar engine and is not done here. An empty list means valid. A document with <c>schemaVersion</c> is checked as a v2 control
-    /// set (<c>spec/agent-policy-control-set-v2.md</c> §1–§6): annotations, the policy cap, <c>cedar.entities</c>,
+    /// Cedar engine: <see cref="ValidateStrict"/>. An empty list means valid. A document with <c>schemaVersion</c> is checked as a v2
+    /// control set (<c>spec/agent-policy-control-set-v2.md</c> §1–§6): annotations, the policy cap, <c>cedar.entities</c>,
     /// <c>enforcement</c> and the schema v2 digest; strict Cedar validation of policies and entities is not done here either.
     /// </summary>
     public static IReadOnlyList<string> Validate(byte[] document)
@@ -329,6 +340,155 @@ public static class AgentPolicy
             OnRuleError = Setting("onRuleError", "deny"), RuleEffects = effects,
             HaltAfterDenials = e?["haltAfterDenials"] is JsonValue hv && hv.TryGetValue<long>(out var n) ? n : 0,
         };
+    }
+
+    /// <summary>
+    /// Everything <see cref="Validate"/> checks, plus what needs the Cedar core: the policies validate in Cedar's strict mode
+    /// (no validation errors; warnings are not problems) against the schema of the document's version (v1 §4 rule 5, v2 §4),
+    /// a v1 <c>cedar.schemaSha256</c> names schema v1, and a v2 document's <c>cedar.entities</c> conform to schema v2 (v2 §5).
+    /// An empty list means valid.
+    /// </summary>
+    /// <exception cref="PolicyEngineException">The engine could not be loaded or could not answer.</exception>
+    public static IReadOnlyList<string> ValidateStrict(byte[] document, IPolicyEngine engine)
+    {
+        if (engine is null) throw new ArgumentNullException(nameof(engine));
+        var errors = (List<string>)Validate(document);
+        // The engine checks run whenever the parts they read are there, so their findings show next to the structural ones.
+        if (Parse(document) is not { } doc || doc["cedar"] is not JsonObject cedar) return errors;
+        var v2 = doc.ContainsKey("schemaVersion");
+        var schema = v2 ? "v2" : "v1";
+        if (!v2 && AgentProfiles.Str(cedar["schemaSha256"]) is { } sha && Hex64.IsMatch(sha) && sha != SchemaV1Digest.Value)
+            errors.Add("cedar.schemaSha256 must be the SHA-256 of JCS(agent-policy-cedar-schema-v1.json)");
+        if (cedar["policies"] is JsonObject policies)
+        {
+            var answer = engine.Validate(new JsonObject
+            {
+                ["validationSettings"] = new JsonObject { ["mode"] = "strict" },
+                ["schema"] = CedarSchema(v2),
+                ["policies"] = policies.DeepClone(),
+            });
+            if (AgentProfiles.Str(answer["type"]) != "success")
+                errors.Add($"cedar.policies cannot be validated against Cedar schema {schema}: {FailureMessages(answer)}");
+            else
+                // The core's order of validation errors is not stable between instances.
+                errors.AddRange((answer["validationErrors"] as JsonArray ?? new JsonArray()).OfType<JsonObject>()
+                    .Select(e => $"policy '{AgentProfiles.Str(e["policyId"])}' does not validate against Cedar schema {schema} in strict mode: {AgentProfiles.Str(e["error"]?["message"])}")
+                    .OrderBy(e => e, StringComparer.Ordinal));
+        }
+        if (v2 && (cedar["entities"] ?? new JsonArray()) is JsonArray entities)
+        {
+            // The core checks entities against the schema when it reads them for a request; no policies, so a failure can only
+            // come from the entities.
+            var context = Context(false, "", 0, "none", false, 0, 0, 0);
+            context["toolCallsSoFar"] = 0;
+            context["callsOfThisTool"] = 0;
+            context["denialsSoFar"] = 0;
+            var check = engine.Authorize(new JsonObject
+            {
+                ["principal"] = new JsonObject { ["type"] = "Agent", ["id"] = "strict-validation" },
+                ["action"] = new JsonObject { ["type"] = "Action", ["id"] = "run_start" },
+                ["resource"] = new JsonObject { ["type"] = "Step", ["id"] = "0" },
+                ["context"] = context,
+                ["schema"] = CedarSchema(v2: true),
+                ["validateRequest"] = true,
+                ["policies"] = new JsonObject { ["staticPolicies"] = new JsonObject() },
+                ["entities"] = entities.DeepClone(),
+            });
+            if (AgentProfiles.Str(check["type"]) != "success")
+                errors.Add($"cedar.entities do not conform to Cedar schema v2: {FailureMessages(check)}");
+        }
+        return errors;
+    }
+
+    private static readonly Dictionary<string, int> ResultRank = new(StringComparer.Ordinal) { ["PASS"] = 0, ["INDETERMINATE"] = 1, ["FAIL"] = 2 };
+
+    /// <summary>
+    /// Runs every request of a facts document through <paramref name="engine"/> with the evaluator's baseline permit (v1 §4
+    /// rule 1) and derives each rule's result (v1 §6, v2 §9): FAIL where Cedar names it in <c>reason</c>, INDETERMINATE in
+    /// <c>errors</c>, otherwise PASS. A v1 document takes facts v1 and Cedar schema v1; a v2 document facts v2 and schema v2,
+    /// with the control set's <c>cedar.entities</c> (v2 §8), which the facts must carry unchanged. A request the engine refuses
+    /// (<c>type: failure</c>) fails the whole evaluation, as with the reference evaluator: there are no results then, and the
+    /// exception's <see cref="PolicyEngineException.Refused"/> is true.
+    /// </summary>
+    /// <param name="document">The policy control set, exact bytes.</param>
+    /// <param name="facts">The facts document (<see cref="PolicyFacts.Bytes"/>, or a sealed <c>evaluation-facts</c> object).</param>
+    /// <param name="engine">The Cedar engine.</param>
+    /// <exception cref="ArgumentException">The document is not a valid policy control set with Cedar rules, or the facts are not a facts document of its version (each request's <c>seq</c> an integer or <c>run</c>; v2: the control set's entities).</exception>
+    /// <exception cref="PolicyEngineException">The engine could not be loaded or answer, or refused a request.</exception>
+    public static PolicyEvaluationResult Evaluate(byte[] document, byte[] facts, IPolicyEngine engine)
+    {
+        if (engine is null) throw new ArgumentNullException(nameof(engine));
+        var errors = Validate(document);
+        if (errors.Count > 0) throw new ArgumentException("Invalid policy control set: " + string.Join("; ", errors), nameof(document));
+        var doc = Parse(document)!;
+        if (doc["cedar"]?["policies"]?["staticPolicies"] is not JsonObject rules)
+            throw new ArgumentException("The control set carries no Cedar rules.", nameof(document));
+        var v2 = doc.ContainsKey("schemaVersion");
+        JsonObject? f;
+        try { f = JsonNode.Parse(facts ?? throw new ArgumentNullException(nameof(facts))) as JsonObject; }
+        catch (JsonException) { f = null; }
+        var version = v2 ? "2" : FactsVersion;
+        // C4: a seq is an integer token or "run", so both ports name a request the same way.
+        static string? Seq(JsonNode? seq) => seq is JsonValue v && v.GetValueKind() == JsonValueKind.Number && v.TryGetValue<long>(out var n)
+            ? n.ToString(System.Globalization.CultureInfo.InvariantCulture) : AgentProfiles.Str(seq) == "run" ? "run" : null;
+        if (f?["requests"] is not JsonArray requests || AgentProfiles.Str(f["factsVersion"]) != version
+            || requests.Any(r => r is not JsonObject o || Seq(o["seq"]) is null))
+            throw new ArgumentException($"The facts are not a factsVersion {version} document (a v{version} control set).", nameof(facts));
+        var entities = doc["cedar"]?["entities"] ?? new JsonArray();
+        if (v2 && !JsonNode.DeepEquals(f["entities"], entities))
+            throw new ArgumentException("The facts carry other entities than the control set.", nameof(facts));
+
+        var policies = (JsonObject)rules.DeepClone();
+        policies[BaselinePermit] = new JsonObject
+        {
+            ["effect"] = "permit", ["principal"] = new JsonObject { ["op"] = "All" }, ["action"] = new JsonObject { ["op"] = "All" },
+            ["resource"] = new JsonObject { ["op"] = "All" }, ["conditions"] = new JsonArray(),
+        };
+        var call = new JsonObject
+        {
+            ["schema"] = CedarSchema(v2), ["validateRequest"] = true, ["policies"] = new JsonObject { ["staticPolicies"] = policies },
+            ["entities"] = v2 ? entities.DeepClone() : new JsonArray(),
+        };
+        var ids = rules.Select(kv => kv.Key).ToList();
+        var results = ids.ToDictionary(id => id, _ => (Result: "PASS", Where: new List<string>()), StringComparer.Ordinal);
+        void Mark(string id, string result, string where)
+        {
+            if (!results.TryGetValue(id, out var x)) return;
+            x.Where.Add(where);
+            if (ResultRank[result] > ResultRank[x.Result]) results[id] = (result, x.Where);
+        }
+        var answered = new List<PolicyRequestResult>();
+        foreach (var request in requests)
+        {
+            var seq = Seq(request!["seq"])!;
+            foreach (var member in new[] { "principal", "action", "resource", "context" }) call[member] = request?[member]?.DeepClone();
+            var answer = engine.Authorize(call);
+            if (AgentProfiles.Str(answer["type"]) == "failure")
+                throw new PolicyEngineException($"The policy engine refused request {seq}: {FailureMessages(answer)}", refused: true);
+            // Anything else that is not a well-formed success is the engine's fault, not a refusal.
+            if (AgentProfiles.Str(answer["type"]) != "success" || answer["response"]?["diagnostics"] is not JsonObject { } diagnostics
+                || diagnostics["reason"] is not JsonArray reasonIds || diagnostics["errors"] is not JsonArray errorList
+                || reasonIds.Any(id => AgentProfiles.Str(id) is null) || errorList.Any(e => AgentProfiles.Str((e as JsonObject)?["policyId"]) is null))
+                throw new PolicyEngineException("The policy engine's answer is not an isAuthorized answer.");
+            var reason = reasonIds.Select(id => AgentProfiles.Str(id)!)
+                .Where(id => id != BaselinePermit).OrderBy(id => id, StringComparer.Ordinal).ToList();
+            var erring = errorList.Select(e => AgentProfiles.Str(e!["policyId"])!)
+                .OrderBy(id => id, StringComparer.Ordinal).ToList();
+            foreach (var id in erring) Mark(id, "INDETERMINATE", seq);
+            foreach (var id in reason) Mark(id, "FAIL", seq);
+            answered.Add(new PolicyRequestResult(seq, reason.AsReadOnly(), erring.AsReadOnly()));
+        }
+        var controls = ids.Select(id => results[id].Result == "PASS" ? new PolicyRuleResult(id, "PASS")
+            : new PolicyRuleResult(id, results[id].Result, results[id].Where.AsReadOnly())).ToList();
+        var overall = controls.Select(c => c.Result).Aggregate("PASS", (a, b) => ResultRank[b] > ResultRank[a] ? b : a);
+        return new PolicyEvaluationResult("cedar-policy@" + engine.Version, controls.AsReadOnly(), overall, answered.AsReadOnly());
+    }
+
+    /// <summary>The messages of a <c>type: failure</c> answer (or of anything that is not a success).</summary>
+    private static string FailureMessages(JsonObject answer)
+    {
+        var messages = (answer["errors"] as JsonArray ?? new JsonArray()).Select(e => AgentProfiles.Str(e?["message"])).OfType<string>().ToList();
+        return messages.Count > 0 ? string.Join("; ", messages) : "no message";
     }
 
     /// <summary>The facts version this SDK builds (<c>spec/agent-policy-control-set-v1.md</c> §5).</summary>

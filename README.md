@@ -493,8 +493,9 @@ What to know:
   each timestamp's TSA trust; until it reports `trusted_chain` or `qualified`,
   the result carries a "TSA trust not established" warning.
 - **Evaluations never change the run verdict.** They are reported on their
-  own, and the SDK never evaluates controls: `Overall` is the named
-  verifier's claim. Read it only when `Valid` is true — the evaluation is then
+  own, and the SDK evaluates no controls: `Overall` is the named verifier's
+  claim (a policy evaluation's rules can be recomputed: see
+  [Policy engine](#policy-engine)). Read it only when `Valid` is true — the evaluation is then
   signed over its own envelope, timestamped, intact, and bound to this run's
   `run_end`, Control Artifact and pre-sealed control set.
 - **Persist as you go.** `OnArtifactSealed` runs after each artifact is sealed,
@@ -580,9 +581,48 @@ ToolCall refund = await run.BeginToolCallAsync("payments.refund", refundArgs, co
 ```
 
 `AgentPolicy.Validate` checks a v2 document (entities, enforcement settings, annotations,
-the schema v2 digest; strict Cedar validation needs a Cedar engine), `AgentPolicy.Enforcement`
+the schema v2 digest; strict Cedar validation needs a Cedar engine, below), `AgentPolicy.Enforcement`
 gives its effective settings and each rule's effect, and `AgentPolicy.BuildFactsV2` builds
 the facts v2 a guard and an evaluator evaluate.
+
+### Policy engine
+
+The package `Sigill.Sdk.Policy` adds `CedarEngine`: the official [Cedar](https://github.com/cedar-policy/cedar)
+policy core, `cedar-policy` 4.14.0, compiled to one WebAssembly module (sha256
+`a0cd395067e77a157116f6b25bcdb612d34c61d1a4446918d75da1a07c80d1f3`, built reproducibly from
+[`engine/`](engine/README.md)) and run in-process with [Wasmtime](https://wasmtime.dev). The module is
+embedded in the package and refused if its digest differs; it has no filesystem, network, clock or
+environment, and at most 256 MiB of memory. `Sigill.Sdk` itself has no dependency on it: the methods
+below take any `IPolicyEngine`.
+
+```sh
+dotnet add package Sigill.Sdk.Policy
+```
+
+```csharp
+using Sigill.Sdk.Policy;
+
+var engine = new CedarEngine();   // loads on first use; share one instance between threads
+
+// Everything Validate checks, plus Cedar's strict validation of the rules against the schema of the
+// document's version (and, for v2, of cedar.entities against schema v2).
+IReadOnlyList<string> problems = AgentPolicy.ValidateStrict(controlSetBytes, engine);
+
+// Per-rule results over a run's facts: PASS / FAIL / INDETERMINATE with where, overall, the engine id
+// ("cedar-policy@4.14.0") and per request the rules that matched or errored.
+PolicyFacts facts = AgentPolicy.BuildFacts(agentId, correlationId, events);
+PolicyEvaluationResult evaluated = AgentPolicy.Evaluate(controlSetBytes, facts.Bytes, engine);
+
+// Verify a run and recompute each policy evaluation of a v1 control set from its sealed facts:
+// ResultsRecomputed is true when they match; results that differ make the evaluation invalid.
+var result = await client.VerifyAgentRunWithEngineAsync(bundle, engine);
+```
+
+An evaluation made with another Cedar version, or beyond the verification's recomputation budget, is
+not recomputed (a note says so); a request the engine refuses makes the evaluation invalid. A failure
+inside the engine is a `PolicyEngineException`, and never makes the verifier throw. **This release still does not enforce**: nothing is decided
+before a tool call, and nothing is denied or halted. The engine runs where Wasmtime ships native
+libraries: Linux (glibc), macOS and Windows on x64 and arm64.
 
 ## Error handling
 

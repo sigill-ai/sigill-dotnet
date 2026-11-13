@@ -14,6 +14,26 @@ public class SigillException : Exception
 }
 
 /// <summary>
+/// A policy engine (<see cref="IPolicyEngine"/>) could not be loaded, or could not answer a call (for example a trap
+/// inside the engine, or its memory limit reached). A call the engine answers with <c>"type": "failure"</c> is an answer,
+/// not this exception, except that <see cref="AgentPolicy.Evaluate"/> raises it for one, with <see cref="Refused"/> set.
+/// </summary>
+public sealed class PolicyEngineException : SigillException
+{
+    public PolicyEngineException(string message) : base(message) { }
+    public PolicyEngineException(string message, Exception inner) : base(message, inner) { }
+
+    /// <summary>A request refused by the engine: <see cref="Refused"/> is true.</summary>
+    public PolicyEngineException(string message, bool refused) : base(message) => Refused = refused;
+
+    /// <summary>
+    /// True when the engine answered and refused a request (<c>type: failure</c>, raised by <see cref="AgentPolicy.Evaluate"/>):
+    /// the policy or request cannot be evaluated at all. False for a trap, a load failure or any other failure of the engine.
+    /// </summary>
+    public bool Refused { get; }
+}
+
+/// <summary>
 /// The envelope cannot be canonicalized. Typical causes: input contains values
 /// JCS rejects (NaN, Infinity), the top-level value is not an object, or the
 /// JSON is malformed.

@@ -425,6 +425,22 @@ public sealed record ControlEvaluationRequest
 /// <param name="Where">For FAIL and INDETERMINATE: the requests that produced it (seq as a decimal string, or <c>run</c>).</param>
 public sealed record PolicyRuleResult(string Id, string Result, IReadOnlyList<string>? Where = null, string? Detail = null);
 
+/// <summary>What the engine answered for one request of the facts (<see cref="AgentPolicy.Evaluate"/>).</summary>
+/// <param name="Seq">The request's seq as a decimal string, or <c>run</c>.</param>
+/// <param name="Reason">Rule ids that matched (Cedar's <c>diagnostics.reason</c> without the baseline permit), sorted.</param>
+/// <param name="Errors">Rule ids that errored (<c>diagnostics.errors</c>), sorted.</param>
+public sealed record PolicyRequestResult(string Seq, IReadOnlyList<string> Reason, IReadOnlyList<string> Errors);
+
+/// <summary>
+/// The results of a policy control set's Cedar rules over a facts document (Control Set v1 §6, v2 §9), from
+/// <see cref="AgentPolicy.Evaluate"/>. <see cref="Rules"/> can be passed as <see cref="PolicyEvaluationRequest.Rules"/>.
+/// </summary>
+/// <param name="Engine">The engine that evaluated, <c>cedar-policy@&lt;version&gt;</c>.</param>
+/// <param name="Rules">One result per rule, in the document's order; <c>Where</c> is null for PASS.</param>
+/// <param name="Overall">FAIL &gt; INDETERMINATE &gt; PASS over the rules.</param>
+/// <param name="Requests">Per request of the facts, in order.</param>
+public sealed record PolicyEvaluationResult(string Engine, IReadOnlyList<PolicyRuleResult> Rules, string Overall, IReadOnlyList<PolicyRequestResult> Requests);
+
 /// <summary>An earlier evaluation this one supersedes (<c>spec/control-evaluation-v2.md</c> §6).</summary>
 public sealed record EvaluationReference(string EvidenceId, string SignatureSha256);
 
