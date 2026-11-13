@@ -348,7 +348,8 @@ public static class AgentPolicy
     /// a v1 <c>cedar.schemaSha256</c> names schema v1, and a v2 document's <c>cedar.entities</c> conform to schema v2 (v2 §5).
     /// An empty list means valid.
     /// </summary>
-    /// <exception cref="PolicyEngineException">The engine could not be loaded or could not answer.</exception>
+    /// <exception cref="PolicyEngineException">The engine could not be loaded or could not answer, or its answer is not a validate (or, for
+    /// the entities, an isAuthorized) answer.</exception>
     public static IReadOnlyList<string> ValidateStrict(byte[] document, IPolicyEngine engine)
     {
         if (engine is null) throw new ArgumentNullException(nameof(engine));
@@ -367,11 +368,16 @@ public static class AgentPolicy
                 ["schema"] = CedarSchema(v2),
                 ["policies"] = policies.DeepClone(),
             });
-            if (AgentProfiles.Str(answer["type"]) != "success")
-                errors.Add($"cedar.policies cannot be validated against Cedar schema {schema}: {FailureMessages(answer)}");
+            // Fail closed: only a refusal or a well-formed success is an answer (a broken engine must not pass as "no errors").
+            var type = AgentProfiles.Str(answer?["type"]);
+            if (type == "failure")
+                errors.Add($"cedar.policies cannot be validated against Cedar schema {schema}: {FailureMessages(answer!)}");
+            else if (type != "success" || answer!["validationErrors"] is not JsonArray found
+                || found.Any(e => e is not JsonObject o || AgentProfiles.Str(o["policyId"]) is null || AgentProfiles.Str((o["error"] as JsonObject)?["message"]) is null))
+                throw new PolicyEngineException("The policy engine's answer is not a validate answer.");
             else
                 // The core's order of validation errors is not stable between instances.
-                errors.AddRange((answer["validationErrors"] as JsonArray ?? new JsonArray()).OfType<JsonObject>()
+                errors.AddRange(found.OfType<JsonObject>()
                     .Select(e => $"policy '{AgentProfiles.Str(e["policyId"])}' does not validate against Cedar schema {schema} in strict mode: {AgentProfiles.Str(e["error"]?["message"])}")
                     .OrderBy(e => e, StringComparer.Ordinal));
         }
@@ -394,8 +400,15 @@ public static class AgentPolicy
                 ["policies"] = new JsonObject { ["staticPolicies"] = new JsonObject() },
                 ["entities"] = entities.DeepClone(),
             });
-            if (AgentProfiles.Str(check["type"]) != "success")
-                errors.Add($"cedar.entities do not conform to Cedar schema v2: {FailureMessages(check)}");
+            var type = AgentProfiles.Str(check?["type"]);
+            if (type == "failure")
+                errors.Add($"cedar.entities do not conform to Cedar schema v2: {FailureMessages(check!)}");
+            // The probe has no policies: a success names none, in reason or errors.
+            else if (type != "success" || check!["response"] is not JsonObject response
+                || AgentProfiles.Str(response["decision"]) is not ("allow" or "deny")
+                || response["diagnostics"] is not JsonObject diagnostics
+                || diagnostics["reason"] is not JsonArray { Count: 0 } || diagnostics["errors"] is not JsonArray { Count: 0 })
+                throw new PolicyEngineException("The policy engine's answer is not an isAuthorized answer.");
         }
         return errors;
     }
@@ -456,7 +469,7 @@ public static class AgentPolicy
             if (AgentProfiles.Str(answer?["type"]) == "failure")
                 throw new PolicyEngineException($"The policy engine refused request {seq}: {FailureMessages(answer!)}", refused: true);
             // Anything else that is not a well-formed success is the engine's fault, not a refusal.
-            if (!TryDiagnostics(answer, out var reason, out var erring))
+            if (!TryDiagnostics(answer, call, out var reason, out var erring))
                 throw new PolicyEngineException("The policy engine's answer is not an isAuthorized answer.");
             foreach (var id in erring) Mark(id, "INDETERMINATE", seq);
             foreach (var id in reason) Mark(id, "FAIL", seq);
@@ -491,9 +504,10 @@ public static class AgentPolicy
     /// <summary>
     /// The rules of a well-formed <c>isAuthorized</c> success: <paramref name="reason"/> without the baseline permit and
     /// <paramref name="errors"/>, each sorted by code unit. False for a refusal (<c>type: failure</c>) or anything else, including a
-    /// <c>decision</c> other than <c>deny</c> exactly when a rule matched and <c>allow</c> otherwise (the baseline permit is in every call).
+    /// <c>decision</c> other than <c>deny</c> exactly when a rule matched and <c>allow</c> otherwise (the baseline permit is in every call),
+    /// and an id in <c>reason</c> or <c>errors[].policyId</c> that is not a policy of <paramref name="call"/> (Control Set v2 §7.5).
     /// </summary>
-    internal static bool TryDiagnostics(JsonObject? answer, out List<string> reason, out List<string> errors)
+    internal static bool TryDiagnostics(JsonObject? answer, JsonObject call, out List<string> reason, out List<string> errors)
     {
         reason = errors = new List<string>();
         if (AgentProfiles.Str(answer?["type"]) != "success" || (answer!["response"] as JsonObject)?["diagnostics"] is not JsonObject { } diagnostics
@@ -502,6 +516,8 @@ public static class AgentPolicy
             return false;
         reason = reasonIds.Select(id => AgentProfiles.Str(id)!).Where(id => id != BaselinePermit).OrderBy(id => id, StringComparer.Ordinal).ToList();
         errors = errorList.Select(e => AgentProfiles.Str(e!["policyId"])!).OrderBy(id => id, StringComparer.Ordinal).ToList();
+        var policies = call["policies"]?["staticPolicies"] as JsonObject;
+        if (reason.Concat(errors).Any(id => policies?.ContainsKey(id) != true)) return false; // reason holds no baseline permit here
         return AgentProfiles.Str(answer["response"]!["decision"]) == (reason.Count > 0 ? "deny" : "allow");
     }
 

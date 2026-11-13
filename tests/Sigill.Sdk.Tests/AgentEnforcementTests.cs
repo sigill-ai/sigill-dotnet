@@ -145,7 +145,7 @@ public class PolicyEnforcementVectorTests
     public void Vector_IsComplete()
     {
         Runs().Should().HaveCount(35);
-        FindingsRuns().Should().HaveCount(14);
+        FindingsRuns().Should().HaveCount(15);
     }
 
     [Theory]
@@ -603,7 +603,7 @@ public partial class AgentRunTests
     public async Task FindingText_IsThePortsCommonWording()
     {
         var result = await AgentRunVerifier.VerifyAsync(SignedVectorBundle(LoadV14("findings/f2-orphan-result.json"), null), StubVerify);
-        result.Findings.Should().Contain("enforcement: a tool_result whose useId no earlier tool_call used (orphan_result; seq 1).");
+        result.Findings.Should().Contain("enforcement: a tool_result with no earlier tool_call of the same useId and tool name (orphan_result; seq 1).");
         var f9 = LoadV14("findings/f9-evidence-version-mismatch.json");
         result = await AgentRunVerifier.VerifyAsync(SignedVectorBundle(f9, (PolicyCt, PolicyEnforcementVectorTests.SuppliedControlSet(f9)!)), StubVerify);
         result.Findings.Should().Contain("enforcement: the policy control set does not parse strictly as a v1 document, but the events are not all schemaVersion 4 (evidence_version_mismatch; seq 0, 1, 2, 3).");

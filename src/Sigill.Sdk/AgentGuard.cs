@@ -172,7 +172,7 @@ internal sealed class AgentGuard
         {
             // A refusal (type failure) or an answer that is not an isAuthorized answer is a failure too.
             // The engine gets its own copy: one that changes its input cannot change a later decision.
-            if (!AgentPolicy.TryDiagnostics(_engine.Authorize((JsonObject)_call.DeepClone()), out var reason, out var errors)) return null;
+            if (!AgentPolicy.TryDiagnostics(_engine.Authorize((JsonObject)_call.DeepClone()), _call, out var reason, out var errors)) return null;
             return new Diagnostics(reason.Distinct().ToList(), errors.Distinct().ToList());
         }
         catch (Exception) { return null; } // §7.5: the engine raised or trapped

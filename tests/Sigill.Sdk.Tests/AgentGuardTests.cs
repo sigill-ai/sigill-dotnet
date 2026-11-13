@@ -97,6 +97,7 @@ public partial class AgentRunTests
         public JsonObject Authorize(JsonObject call)
         {
             var matched = matches(call).ToList();
+            if (call["policies"]!["staticPolicies"]!.AsObject().Count == 0) return ProbeAnswer(); // strict validation's entities probe
             return new JsonObject
             {
                 ["type"] = "success",
@@ -111,6 +112,10 @@ public partial class AgentRunTests
             };
         }
     }
+
+    /// <summary>What the Cedar core answers the entities probe of strict validation (no policies): deny, nothing named.</summary>
+    private static JsonObject ProbeAnswer() =>
+        JsonNode.Parse("""{"type":"success","response":{"decision":"deny","diagnostics":{"reason":[],"errors":[]}}}""")!.AsObject();
 
     // ── Vector 14, end to end through the recorder ──
 

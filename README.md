@@ -659,8 +659,10 @@ catch (PolicyDeniedException denied)   // denied.Reason, .Rules, .Tool, .UseId, 
   `PolicyDeniedException` after the call and its record (and the halt, when it halts) are sealed. No `ToolCall`
   is returned, and a result for that use id is refused.
 - **A halt.** A `halt` rule, `haltAfterDenials`, or an engine that fails halts the run. The recording call that
-  caused it raises `RunHaltedException`; so does every later recording call, and `ModelCallHandler` sends no
-  further model call. `IsHalted` is true and `HaltedToken` is cancelled: pass it to the agent's other work.
+  caused it raises `RunHaltedException`; so does every later recording call (a call allowed just before the halt is
+  not started: `BeginToolCallAsync`, `RecordToolCallAsync` and `InvokeToolAsync` raise it too), and `ModelCallHandler` sends no
+  further model call. In an enforced run `ModelCallHandler` also raises a failure to record a model call (after `onError`)
+  and sends nothing once the run is broken or finished. `IsHalted` is true and `HaltedToken` is cancelled: pass it to the agent's other work.
   `FinishAsync` returns the halted run's bundle without sealing anything. A `halt` rule on `delegation` hands out
   no delegation at all.
 - **A refused start.** A locked configuration that differs, or an engine that cannot load, refuses the start:
@@ -692,6 +694,10 @@ SIGILL_API_KEY=… SIGILL_CERTIFICATE_ID=… dotnet run --project examples/Sigil
   and that no result was recorded for it.
 - Anyone with the control set and the signed events can recompute each decision with the Cedar core named in
   the record — except a record with reason `unavailable` (the engine failed), which cannot be recomputed.
+- A tool that is already executing when another event halts the run is not stopped by the SDK; its result is not sealed.
+- Model calls the SDK cannot recognise or parse are not recorded, so no rule sees them.
+- The run's state is checked once more after the call's callbacks have run and, in `InvokeToolAsync`, immediately before
+  the function is called; a halt sealed by another thread after that check does not stop the function.
 - An engine that does not answer holds the run: there is no timeout on a decision.
 - A child run is refused after its parent halted only when it is started from the delegation object the parent
   returned in the same process.

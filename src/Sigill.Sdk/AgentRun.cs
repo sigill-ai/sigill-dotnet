@@ -272,7 +272,11 @@ public sealed class AgentRun
         var reserved = fields?.Select(kv => kv.Key).Where(ReservedStepFields.Contains).OrderBy(k => k, StringComparer.Ordinal).ToList();
         if (reserved is { Count: > 0 })
             throw new ArgumentException("fields uses reserved step member(s): " + string.Join(", ", reserved), nameof(fields));
-        return await RecordInternalAsync(stepType, objects, fields, consequential, cancellationToken, requireTimestamp).ConfigureAwait(false);
+        var artifact = await RecordInternalAsync(stepType, objects, fields, consequential, cancellationToken, requireTimestamp).ConfigureAwait(false);
+        // Agent Enforcement v1 §4 rule 2: an allowed call is not started once the run is halted (e.g. by an event recorded from its
+        // callback), broken or finished meanwhile. Every typed tool call passes here. Only with a guard: a run without one behaves as before.
+        if (stepType == "tool_call" && _guard is not null) EnsureOpen();
+        return artifact;
     }
 
     /// <summary>
@@ -324,6 +328,8 @@ public sealed class AgentRun
     /// call with its result; in a <c>schemaVersion "4"</c> run (a v2 policy control set) one is generated when
     /// omitted, and a <paramref name="useId"/> already used by a call of the run is refused before sealing.
     /// Prefer <see cref="BeginToolCallAsync"/>, which pairs the call with its result.
+    /// The run's state is checked once more after the call's callbacks have run and, in <c>InvokeToolAsync</c>, immediately before the
+    /// function is called; a halt sealed by another thread after that check does not stop the function.
     /// </summary>
     public Task<AgentRunArtifact> RecordToolCallAsync(string tool, byte[] arguments, string? operation = null,
         bool consequential = false, string contentType = "application/json", string? useId = null,
@@ -339,6 +345,8 @@ public sealed class AgentRun
     /// (<c>spec/agent-enforcement-v1.md</c> §3.3); only a <c>schemaVersion "4"</c> run can carry it. In an enforced run the
     /// guard decides the sealed call before this returns: a denied call raises <see cref="PolicyDeniedException"/> and has no
     /// <see cref="ToolCall"/>, so its tool must not run.
+    /// The run's state is checked once more after the call's callbacks have run and, in <c>InvokeToolAsync</c>, immediately before the
+    /// function is called; a halt sealed by another thread after that check does not stop the function.
     /// </summary>
     /// <exception cref="InvalidOperationException"><paramref name="definition"/> in a run that is not <c>schemaVersion "4"</c>.</exception>
     /// <exception cref="ArgumentException">The call would not verify, or its useId is already used; nothing was sealed and the run stays usable.</exception>
@@ -360,6 +368,8 @@ public sealed class AgentRun
     /// if the call is allowed, seals its result and returns the result bytes. <paramref name="contentType"/> is that of the
     /// arguments and the result. A denied call raises <see cref="PolicyDeniedException"/> and <paramref name="func"/> never runs;
     /// when <paramref name="func"/> throws, the call stays without a result.
+    /// The run's state is checked once more after the call's callbacks have run and, in <c>InvokeToolAsync</c>, immediately before the
+    /// function is called; a halt sealed by another thread after that check does not stop the function.
     /// </summary>
     public async Task<byte[]> InvokeToolAsync(string tool, byte[] arguments, Func<CancellationToken, Task<byte[]>> func, string? operation = null,
         bool consequential = false, string contentType = "application/json", string? useId = null, byte[]? definition = null,
@@ -367,6 +377,7 @@ public sealed class AgentRun
     {
         if (func is null) throw new ArgumentNullException(nameof(func));
         var call = await BeginToolCallAsync(tool, arguments, operation, consequential, contentType, useId, definition, cancellationToken).ConfigureAwait(false);
+        EnsureOpen(); // halted (or broken) since the call was allowed: the tool is not started
         var result = await func(cancellationToken).ConfigureAwait(false);
         await call.CompleteAsync(result, contentType, cancellationToken).ConfigureAwait(false);
         return result;
@@ -995,6 +1006,12 @@ public sealed class AgentRun
     }
 
     private bool Enforcing => _guard is { Enforcing: true };
+
+    /// <summary>The run's guard enforces (a v2 policy control set in <c>enforce</c> mode).</summary>
+    internal bool IsEnforced => Enforcing;
+
+    /// <summary>What a recording call raises when the run takes no more events (halted, broken, finished; in that order).</summary>
+    internal void EnsureRecordable() => EnsureOpen();
 
     /// <summary>The run that returned each delegation (outside the record's state, so equality is unchanged); weak on both.</summary>
     private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<AgentDelegation, AgentRun> Delegators = new();

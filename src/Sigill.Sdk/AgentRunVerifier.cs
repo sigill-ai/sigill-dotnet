@@ -762,7 +762,7 @@ public static class AgentRunVerifier
             var results = evs.Where(x => Type(x.Step) == "tool_result").ToList();
             var records = evs.Where(x => IsRecord(x.Step)).ToList();
             foreach (var r in results)
-                if (!calls.Any(c => c.Seq < r.Seq && Same(UseId(c.Step), UseId(r.Step)))) Add("orphan_result", r.Seq);
+                if (!calls.Any(c => c.Seq < r.Seq && Same(UseId(c.Step), UseId(r.Step)) && Same(Name(c.Step), Name(r.Step)))) Add("orphan_result", r.Seq);
             var firstResult = new Dictionary<string, int>(StringComparer.Ordinal);
             foreach (var r in results)
             {
@@ -799,7 +799,7 @@ public static class AgentRunVerifier
     /// <summary>What each <see cref="EnforcementFinding"/> code means, as a run finding says it.</summary>
     private static readonly Dictionary<string, string> EnforcementText = new(StringComparer.Ordinal)
     {
-        ["orphan_result"] = "a tool_result whose useId no earlier tool_call used",
+        ["orphan_result"] = "a tool_result with no earlier tool_call of the same useId and tool name",
         ["conflicting_result"] = "a second tool_result for the same useId",
         ["executed_after_denial"] = "a tool_result for a call an enforcement record denied",
         ["duplicate_use_id"] = "tool_calls share a useId",
