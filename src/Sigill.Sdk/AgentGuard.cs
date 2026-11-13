@@ -156,7 +156,8 @@ internal sealed class AgentGuard
     private Decision Deny(string reason, List<string>? rules, (string? Name, string? UseId) call, bool halt)
     {
         _records++;
-        return new Decision(halt ? "halted" : "denied", reason, (IReadOnlyList<string>?)rules ?? Array.Empty<string>(), call.Name, call.UseId);
+        // Read-only: the rules reach callers (exceptions, events) and are repeated by every later RunHaltedException.
+        return new Decision(halt ? "halted" : "denied", reason, (IReadOnlyList<string>?)rules?.AsReadOnly() ?? Array.Empty<string>(), call.Name, call.UseId);
     }
 
     private static Decision? Observed(IReadOnlyList<string> reason, (string? Name, string? UseId) call = default) =>
@@ -173,7 +174,7 @@ internal sealed class AgentGuard
             // A refusal (type failure) or an answer that is not an isAuthorized answer is a failure too.
             // The engine gets its own copy: one that changes its input cannot change a later decision.
             if (!AgentPolicy.TryDiagnostics(_engine.Authorize((JsonObject)_call.DeepClone()), _call, out var reason, out var errors)) return null;
-            return new Diagnostics(reason.Distinct().ToList(), errors.Distinct().ToList());
+            return new Diagnostics(reason.Distinct().ToList().AsReadOnly(), errors.Distinct().ToList().AsReadOnly());
         }
         catch (Exception) { return null; } // §7.5: the engine raised or trapped
     }

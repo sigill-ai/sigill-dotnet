@@ -414,6 +414,100 @@ public partial class AgentRunTests
         (await VerifyGuarded(run)).Findings.Should().BeEmpty();
     }
 
+    // ── R7: the guard's state is its own ──
+
+    [Theory]
+    [InlineData("returned")]
+    [InlineData("callback")]
+    public async Task EditingAnApprovalsArtifact_ChangesNoDecision(string where)
+    {
+        var one = Utf8("""{"amount":1}""");
+        var thousand = Utf8("""{"amount":1000}""");
+        string Forge(AgentRunArtifact a)
+        {
+            var covers = a.Envelope["step"]!["covers"]!;
+            var sealedDigest = covers["argumentsSha256"]!.GetValue<string>();
+            covers["argumentsSha256"] = EnvelopeHashing.HashHex(thousand);
+            return sealedDigest;
+        }
+        string? original = null;
+        AgentRunArtifact? seen = null;
+        var (run, _, client) = await StartGuarded(with: o => o with
+        {
+            OnArtifactSealed = (a, _) =>
+            {
+                if (where == "callback" && a.StepType == "human_approval") { seen = a; original = Forge(a); }
+                return Task.CompletedTask;
+            },
+        });
+        using var owned = client;
+        var approval = await run.RecordHumanApprovalAsync("approved", approver: "urn:example:approver:1",
+            covers: ApprovalCovers.ForArguments("payments.refund", one));
+        if (where == "returned") { seen = approval; original = Forge(approval); }
+
+        var ran = false;
+        var denied = (await FluentActions.Awaiting(() => run.InvokeToolAsync("payments.refund", thousand,
+                _ => { ran = true; return Task.FromResult(Utf8("{}")); }, consequential: true))
+            .Should().ThrowAsync<PolicyDeniedException>()).Which;
+        (denied.Reason, ran).Should().Be(("rule", false));
+        denied.Rules.Should().Equal("restricted-needs-bound-approval");
+
+        // Restoring the artifact changes nothing either: the sealed approval still binds the call it covers.
+        seen!.Envelope["step"]!["covers"]!["argumentsSha256"] = original;
+        await run.InvokeToolAsync("payments.refund", one, _ => { ran = true; return Task.FromResult(Utf8("{}")); }, consequential: true);
+        ran.Should().BeTrue();
+        await run.FinishAsync();
+        (await VerifyGuarded(run)).Verdict.Should().Be("run_finalized");
+    }
+
+    [Fact]
+    public async Task EditingTheSealedEventWhileItIsDecided_ChangesNoDecision()
+    {
+        var (run, _, client) = await StartGuarded();
+        using var owned = client;
+        // The artifact is reachable through Artifacts from the moment it is appended; the guard decides on its own copy.
+        run.Guard!.Fault = seq =>
+        {
+            var objects = run.Artifacts[seq].Envelope["objects"]!.AsArray();
+            if (objects.Count > 1) objects.RemoveAt(1);   // the tool-definition object: tool_changed if the guard read it
+        };
+        var call = await run.BeginToolCallAsync("crm.update_address", Utf8("{}"), definition: Utf8("crm.update_address definition"));
+        call.Artifact.Envelope["objects"]!.AsArray().Should().HaveCount(1, "the caller's artifact was edited");
+        run.Artifacts.Should().NotContain(a => a.StepType == "authorization");
+    }
+
+    [Fact]
+    public async Task TheRulesOfADecision_CannotBeChangedByTheirReader()
+    {
+        var reported = new List<EnforcementEvent>();
+        var (run, _, client) = await StartGuarded(WithEnforcement(e => e["haltAfterDenials"] = 1), onEvent: reported.Add);
+        using var owned = client;
+        var denied = (await FluentActions.Awaiting(() => run.BeginToolCallAsync("search.web", Utf8("{}"))).Should().ThrowAsync<PolicyDeniedException>()).Which;
+        FluentActions.Invoking(() => ((IList<string>)denied.Rules)[0] = "forged").Should().Throw<NotSupportedException>();
+        FluentActions.Invoking(() => ((IList<string>)reported[0].Rules).Clear()).Should().Throw<NotSupportedException>();
+        denied.Rules.Should().NotBeAssignableTo<string[]>().And.NotBeAssignableTo<List<string>>();
+        (await FluentActions.Awaiting(() => run.RecordModelOutputAsync(Utf8("x"))).Should().ThrowAsync<RunHaltedException>())
+            .Which.Rules.Should().Equal("no-web-search");
+    }
+
+    [Fact]
+    public async Task EditingAChildsRunEndArtifact_ChangesNotWhatTheParentSeals()
+    {
+        using var client = Client(new StubSealer());
+        var parent = await Start(client, Options() with { Delegating = true });
+        var d = await parent.DelegateAsync("urn:example:agent:child");
+        var child = await AgentRun.StartCoreAsync(client, Agent() with { AgentId = "urn:example:agent:child" }, Options(), Clock(), CancellationToken.None, d);
+        await child.FinishAsync("completed");
+        var end = child.Artifacts[^1];
+        var trueHash = end.SignatureSha256!;
+        end.Envelope["step"]!["runDisposition"] = "failed";
+        end.Signature["signatures"]![0]!["signature"] = "forged";
+        end.SignatureSha256.Should().NotBe(trueHash);
+        var result = await parent.CompleteDelegationAsync(child);
+        var block = result.Envelope["step"]!["delegation"]!;
+        (block["childDisposition"]!.GetValue<string>(), block["childRunEndSignatureSha256"]!.GetValue<string>()).Should().Be(("completed", trueHash));
+    }
+
     // ── Parity tests (T1–T3) ──
 
     [Fact]

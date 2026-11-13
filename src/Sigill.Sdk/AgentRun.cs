@@ -60,6 +60,7 @@ public sealed class AgentRun
     private string? _signer;
     private bool _broken;
     private bool _finished;
+    private (string SignatureSha256, string Disposition)? _runEnd; // the sealed run_end's, for a parent's delegation_result
     private readonly string _schemaVersion;
     private readonly AgentDelegation? _parent;
     // delegation §4: open delegations (child correlationId → delegation seq) and those already resolved.
@@ -632,9 +633,9 @@ public sealed class AgentRun
     {
         if (child is null) throw new ArgumentNullException(nameof(child));
         if (!child.IsFinished) throw new InvalidOperationException("The child run is not finished: seal its run_end first (§4 rule 3).");
-        var end = child.Artifacts[^1];
-        var disposition = AgentProfiles.Str(end.Envelope["step"]?["runDisposition"])!;
-        return CompleteDelegationAsync(child.CorrelationId, end.SignatureSha256!, disposition, cancellationToken);
+        // What the child sealed, kept privately at its run_end: not its artifact, which caller code can edit.
+        var (signature, disposition) = child._runEnd!.Value;
+        return CompleteDelegationAsync(child.CorrelationId, signature, disposition, cancellationToken);
     }
 
     /// <summary>
@@ -760,6 +761,9 @@ public sealed class AgentRun
                     throw new ArgumentException($"The tool_call with use_id '{useId}' was made to tool '{call.Tool}'; its result cannot name another tool.");
             }
         AgentRunVerifier.Prevalidate(envelope, AgentProfiles.ExecutionSchemaFor(envelope)); // throws before anything is sealed
+        // The guard decides on its own copy, taken before the artifact is reachable by caller code (Artifacts, callbacks).
+        var guardEnvelope = _guard is null ? null : (JsonObject)envelope.DeepClone();
+        var guardDigests = _guard is null ? null : digests.ToDictionary(kv => kv.Key, kv => kv.Value, StringComparer.Ordinal);
 
         AgentRunArtifact artifact;
         try
@@ -785,7 +789,11 @@ public sealed class AgentRun
                 _artifacts.Add(artifact);
                 if (useId is not null)
                     _toolCalls[useId] = stepType == "tool_call" ? (ToolCallState.Open, toolName) : (ToolCallState.HasResult, _toolCalls[useId].Tool);
-                if (stepType == "run_end") _finished = true; // committed with the append, before any caller code runs
+                if (stepType == "run_end")
+                {
+                    _finished = true; // committed with the append, before any caller code runs
+                    _runEnd = (_prevSignatureSha256!, AgentProfiles.Str(step["runDisposition"])!);
+                }
                 if (_options.RetainPayloads)
                     foreach (var o in objects) _payloads[o.Uri] = o.Bytes;
             }
@@ -797,7 +805,7 @@ public sealed class AgentRun
         }
 
         AgentGuard.Decision? decision;
-        try { decision = _guard?.Decide(seq, envelope, digests, byGuard, ControlArtifact); }
+        try { decision = _guard?.Decide(seq, guardEnvelope!, guardDigests!, byGuard, ControlArtifact); }
         catch (Exception)
         {
             _broken = true; // a sealed event the guard could not decide is never continued

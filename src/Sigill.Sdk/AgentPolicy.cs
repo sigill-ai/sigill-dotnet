@@ -710,7 +710,7 @@ public static class AgentPolicy
             if (type == "human_approval")
             {
                 _sawApproval = true;
-                if (v2) _approvals.Add((seq, step!));
+                if (v2) _approvals.Add((seq, (JsonObject)step!.DeepClone())); // its own copy: a caller's artifact can change, the state cannot
             }
             return new JsonObject
             {
