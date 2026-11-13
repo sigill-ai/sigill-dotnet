@@ -1,0 +1,32 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFrameworks>net8.0;net9.0;net10.0;netstandard2.1</TargetFrameworks>
+    <RootNamespace>Sigill.Sdk.Policy</RootNamespace>
+    <AssemblyName>Sigill.Sdk.Policy</AssemblyName>
+    <PackageId>Sigill.Sdk.Policy</PackageId>
+    <Title>Sigill SDK — Cedar policy engine</Title>
+    <Description>The official Cedar policy core (cedar-policy 4.14.0) as one pinned WebAssembly module, hosted in-process with Wasmtime: strict validation and evaluation of Sigill policy control sets, and offline recomputation of policy evaluations when verifying agent runs.</Description>
+    <PackageTags>ai;agents;policy;cedar;wasm;wasmtime;evidence;audit;compliance;sigill</PackageTags>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../Sigill.Sdk/Sigill.Sdk.csproj" />
+    <!-- Exact pin: the engine module was checked against Cedar's reference answers with this Wasmtime version. -->
+    <PackageReference Include="Wasmtime" Version="[50.0.1]" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="../../README.md" Pack="true" PackagePath="\" />
+    <!-- Licences and notices of the third-party code compiled into the engine (engine/notices.sh). -->
+    <None Include="../../THIRD-PARTY-NOTICES.md" Pack="true" PackagePath="\" />
+    <!-- The engine (engine/README.md); its sha256 is checked on load. -->
+    <EmbeddedResource Include="sigill_cedar.wasm" LogicalName="Sigill.Sdk.Policy.sigill_cedar.wasm" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="Sigill.Sdk.Tests" />
+  </ItemGroup>
+
+</Project>

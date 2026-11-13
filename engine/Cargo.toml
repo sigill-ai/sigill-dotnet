@@ -1,0 +1,21 @@
+[package]
+name = "sigill-cedar"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# Exactly the core @cedar-policy/cedar-wasm@4.14.0 is built from (features "wasm" + "partial-eval" + defaults;
+# "wasm" only adds JS binding derives, so it is left out).
+cedar-policy = { version = "=4.14.0", features = ["partial-eval"] }
+serde_json = "1"
+
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = "s"
+strip = true

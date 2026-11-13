@@ -45,6 +45,12 @@ public static class AgentProfiles
     /// </summary>
     public const string ExecutionEvidenceSchemaV3 = "AgentExecutionEvidence/3";
 
+    /// <summary>
+    /// The schema key of <c>AgentExecutionEvidence</c> <c>schemaVersion "4"</c>: v3 plus policy enforcement
+    /// (<c>spec/agent-enforcement-v1.md</c>): required <c>useId</c>, approval coverage, enforcement records.
+    /// </summary>
+    public const string ExecutionEvidenceSchemaV4 = "AgentExecutionEvidence/4";
+
     /// <summary>Control Evaluation v2 (<c>spec/control-evaluation-v2.md</c>): state, policy or attested.</summary>
     public const string ControlEvaluationSchemaV2 = "ControlEvaluation/2";
 
@@ -52,9 +58,10 @@ public static class AgentProfiles
     internal static string EvaluationSchemaFor(JsonObject envelope) =>
         Str(envelope["schemaVersion"]) == "2" ? ControlEvaluationSchemaV2 : ControlEvaluationSchema;
 
-    /// <summary>The execution schema to validate against, by the envelope's <c>schemaVersion</c> ("3", "2", else v1).</summary>
+    /// <summary>The execution schema to validate against, by the envelope's <c>schemaVersion</c> ("4", "3", "2", else v1).</summary>
     internal static string ExecutionSchemaFor(JsonObject envelope) => Str(envelope["schemaVersion"]) switch
     {
+        "4" => ExecutionEvidenceSchemaV4,
         "3" => ExecutionEvidenceSchemaV3,
         "2" => ExecutionEvidenceSchemaV2,
         _ => ExecutionEvidenceSchema,
@@ -209,26 +216,30 @@ public static class AgentProfiles
 
     internal static byte[] Canonical(JsonNode node) => JsonCanonicalizer.Canonicalize(node.ToJsonString());
 
-    /// <summary>No integers beyond ±2^53 and no lone surrogates (§1). Never throws: unreadable is not I-JSON.</summary>
-    internal static bool IsIJson(JsonNode? node)
+    /// <summary>
+    /// No integers beyond ±2^53 and no lone surrogates (§1). Never throws: unreadable is not I-JSON. With
+    /// <paramref name="safeIntegers"/>, integral numbers stay within ±(2^53 − 1) however they are written (a policy control
+    /// set, Control Set v1 §4 rule 4): <c>9007199254740993.0</c> would reach the Cedar core as another value.
+    /// </summary>
+    internal static bool IsIJson(JsonNode? node, bool safeIntegers = false)
     {
-        try { return IsIJsonCore(node); }
+        try { return IsIJsonCore(node, safeIntegers ? IJsonMaxInt - 1 : IJsonMaxInt, safeIntegers); }
         catch (Exception ex) when (ex is InvalidOperationException or ArgumentException)
         {
             return false; // a lone surrogate the reader refuses to decode, or a duplicate name JsonObject refuses to hold
         }
     }
 
-    private static bool IsIJsonCore(JsonNode? node)
+    private static bool IsIJsonCore(JsonNode? node, BigInteger max, bool anySpelling)
     {
         switch (node)
         {
             case null: return true;
             case JsonObject o:
-                foreach (var kv in o) if (!IsIJsonString(kv.Key) || !IsIJsonCore(kv.Value)) return false;
+                foreach (var kv in o) if (!IsIJsonString(kv.Key) || !IsIJsonCore(kv.Value, max, anySpelling)) return false;
                 return true;
             case JsonArray a:
-                foreach (var x in a) if (!IsIJsonCore(x)) return false;
+                foreach (var x in a) if (!IsIJsonCore(x, max, anySpelling)) return false;
                 return true;
         }
         var v = (JsonValue)node;
@@ -236,23 +247,45 @@ public static class AgentProfiles
             return el.ValueKind switch
             {
                 JsonValueKind.String => IsIJsonString(el.GetString()!),
-                JsonValueKind.Number => IsIJsonNumber(el.GetRawText()),
+                JsonValueKind.Number => IsIJsonNumber(el.GetRawText(), max, anySpelling),
                 _ => true,
             };
         if (v.TryGetValue<string>(out var s)) return IsIJsonString(s);
         if (v.TryGetValue<double>(out var d)) return !double.IsNaN(d) && !double.IsInfinity(d);
         if (v.TryGetValue<float>(out var f)) return !float.IsNaN(f) && !float.IsInfinity(f);
-        if (v.TryGetValue<long>(out var l)) return BigInteger.Abs(l) <= IJsonMaxInt;
-        if (v.TryGetValue<ulong>(out var ul)) return ul <= (ulong)IJsonMaxInt;
-        if (v.TryGetValue<decimal>(out var m)) return m != decimal.Floor(m) || BigInteger.Abs(new BigInteger(m)) <= IJsonMaxInt;
+        if (v.TryGetValue<long>(out var l)) return BigInteger.Abs(l) <= max;
+        if (v.TryGetValue<ulong>(out var ul)) return ul <= (ulong)max;
+        if (v.TryGetValue<decimal>(out var m)) return m != decimal.Floor(m) || BigInteger.Abs(new BigInteger(m)) <= max;
         return true;
     }
 
-    private static bool IsIJsonNumber(string raw)
+    private static bool IsIJsonNumber(string raw, BigInteger max, bool anySpelling)
     {
-        if (raw.IndexOfAny(new[] { '.', 'e', 'E' }) >= 0) return true; // a fraction or exponent: not an integer literal
-        return BigInteger.TryParse(raw, NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture, out var n)
-            && BigInteger.Abs(n) <= IJsonMaxInt;
+        if (raw.IndexOfAny(new[] { '.', 'e', 'E' }) < 0)
+            return BigInteger.TryParse(raw, NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture, out var n) && BigInteger.Abs(n) <= max;
+        return !anySpelling || !IsIntegralBeyond(raw, max);
+    }
+
+    /// <summary>
+    /// A JSON number token with a fraction or exponent whose value is an integer beyond ±<paramref name="max"/>, decided
+    /// exactly on the decimal text (a double would round 9007199254740993.0 first). Non-integral values are not this rule's.
+    /// </summary>
+    private static bool IsIntegralBeyond(string raw, BigInteger max)
+    {
+        // On the text: nothing larger than the document is ever built (1e999999999 is decided by counting digits).
+        var e = raw.IndexOfAny(new[] { 'e', 'E' });
+        var mantissa = (e < 0 ? raw : raw.Substring(0, e)).TrimStart('-');
+        var exponent = e < 0 ? BigInteger.Zero : BigInteger.Parse(raw.Substring(e + 1).TrimStart('+'), NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture);
+        var dot = mantissa.IndexOf('.');
+        if (dot >= 0) exponent -= mantissa.Length - dot - 1;
+        var digits = (dot < 0 ? mantissa : mantissa.Remove(dot, 1)).TrimStart('0'); // value = digits × 10^exponent
+        if (digits.Length == 0) return false; // zero
+        var significant = digits.TrimEnd('0');
+        exponent += digits.Length - significant.Length;
+        if (exponent < 0) return false; // not an integer: not this rule's business
+        // 2^53 − 1 has 16 digits: more integer digits is beyond the range whatever they are.
+        if (significant.Length + exponent > 16) return true;
+        return BigInteger.Parse(significant, CultureInfo.InvariantCulture) * BigInteger.Pow(10, (int)exponent) > max;
     }
 
     private static bool IsIJsonString(string s)

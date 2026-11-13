@@ -25,7 +25,10 @@ namespace Sigill.Sdk;
 /// bodies are sealed as digests only; their content never leaves the process. A streamed response (server-sent events)
 /// is recorded with the identifiers in its headers only. The run must be started with
 /// <see cref="AgentRunOptions.RecordsModelCalls"/>. A failure to record never fails the model call: it is reported to
-/// <c>onError</c>.
+/// <c>onError</c>. A halt is not such a failure: when the guard halts the run on a recorded call, or the run is halted already,
+/// the call raises <see cref="RunHaltedException"/> (in the second case without being sent). In an enforced run (a v2 policy control
+/// set in <c>enforce</c> mode) a failure to record is raised too, after <c>onError</c>, and no request is sent once the run is broken
+/// or finished. A call that cannot be read or parsed is never recorded, and so no rule sees it; that stays reported to <c>onError</c>.
 /// </summary>
 public sealed class ModelCallHandler : DelegatingHandler
 {
@@ -42,6 +45,10 @@ public sealed class ModelCallHandler : DelegatingHandler
     {
         var api = Classify(request);
         if (api is null) return await base.SendAsync(request, cancellationToken).ConfigureAwait(false);
+        // A halted run's agent makes no more model calls; in an enforced run neither does one whose chain is broken or closed
+        // (Control Set v2 §7.5). Nothing is sent to the provider.
+        if (_run.IsEnforced) _run.EnsureRecordable();
+        else _run.ThrowIfHalted();
 
         byte[]? requestBody = null;
         if (request.Content is not null)
@@ -52,10 +59,11 @@ public sealed class ModelCallHandler : DelegatingHandler
             request.Content = replay;
         }
         var response = await base.SendAsync(request, cancellationToken).ConfigureAwait(false);
+        ModelCall? call;
+        byte[]? responseBody = null;
         try
         {
             var streamed = response.Content.Headers.ContentType?.MediaType == "text/event-stream";
-            byte[]? responseBody = null;
             if (!streamed)
             {
                 responseBody = await response.Content.ReadAsByteArrayAsync().ConfigureAwait(false);
@@ -63,13 +71,28 @@ public sealed class ModelCallHandler : DelegatingHandler
                 foreach (var h in response.Content.Headers) replay.Headers.TryAddWithoutValidation(h.Key, h.Value);
                 response.Content = replay;
             }
-            var call = ModelCallParser.Parse(api.Value, request, requestBody, response, responseBody);
-            if (call is not null)
-                await _run.RecordModelCallAsync(call, requestBody, responseBody, cancellationToken: cancellationToken).ConfigureAwait(false);
+            call = ModelCallParser.Parse(api.Value, request, requestBody, response, responseBody);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            _onError?.Invoke(ex);
+            _onError?.Invoke(ex); // a call that cannot be read or parsed is not recorded, in every run
+            return response;
+        }
+        if (call is null) return response;
+        // A streamed call is recorded here too, from its headers: before the caller gets the response and reads the stream.
+        try { await _run.RecordModelCallAsync(call, requestBody, responseBody, cancellationToken: cancellationToken).ConfigureAwait(false); }
+        catch (Exception ex) when (ex is not (OperationCanceledException or RunHaltedException))
+        {
+            if (!_run.IsEnforced)
+            {
+                _onError?.Invoke(ex);
+                return response;
+            }
+            // Enforced (Control Set v2 §7.5): the agent does not go on; the failure is raised after onError, which cannot hide it.
+            try { _onError?.Invoke(ex); }
+            catch (Exception) { }
+            response.Dispose();
+            throw;
         }
         return response;
     }

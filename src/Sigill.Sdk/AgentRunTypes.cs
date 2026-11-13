@@ -240,7 +240,41 @@ public sealed record AgentRunOptions
     /// usable.
     /// </summary>
     public Func<AgentRunArtifact, CancellationToken, Task>? OnArtifactSealed { get; init; }
+
+    /// <summary>
+    /// The guard (<c>spec/agent-policy-control-set-v2.md</c> §7): a policy engine that decides each event before the agent
+    /// acts on it. Required when the control set is a v2 policy control set with <c>enforcement.mode: "enforce"</c>; the run
+    /// then denies tool calls (<see cref="PolicyDeniedException"/>) and halts (<see cref="RunHaltedException"/>), each decision
+    /// sealed as evidence. With any other control set the guard never denies or halts and only reports the rules that match
+    /// (<see cref="AgentEnforcement.OnEvent"/>). Given a policy control set, it is validated strictly before anything is sealed.
+    /// </summary>
+    public AgentEnforcement? Enforcement { get; init; }
 }
+
+/// <summary>Switches the guard on for a run (<see cref="AgentRunOptions.Enforcement"/>).</summary>
+public sealed class AgentEnforcement
+{
+    /// <param name="engine">The Cedar engine the guard evaluates with, e.g. <c>Sigill.Sdk.Policy.CedarEngine</c>.</param>
+    public AgentEnforcement(IPolicyEngine engine) => Engine = engine ?? throw new ArgumentNullException(nameof(engine));
+
+    public IPolicyEngine Engine { get; }
+
+    /// <summary>
+    /// Called for each decision, after its evidence is sealed and before an exception reaches the recording call: outside the
+    /// run's lock, in seal order. A failing callback never breaks the run or hides a denial (the denial carries the failure as
+    /// its inner exception); after an allowed event it propagates as an <see cref="AgentRunOptions.OnArtifactSealed"/> failure does.
+    /// </summary>
+    public Action<EnforcementEvent>? OnEvent { get; init; }
+}
+
+/// <summary>One decision of the guard. Never carries arguments, results or definitions.</summary>
+/// <param name="Kind"><c>denied</c>, <c>halted</c> (a denial or a halt rule stopped the run), <c>start_refused</c> or <c>observed</c> (rules matched; nothing was sealed).</param>
+/// <param name="Reason">The enforcement record's reason (<c>rule</c>, <c>rule_error</c>, <c>unknown_tool</c>, <c>tool_changed</c>, <c>unavailable</c>, <c>configuration_locked</c>); null for <c>observed</c>.</param>
+/// <param name="Rules">The record's rule ids; for <c>observed</c>, the rules that matched.</param>
+/// <param name="Tool">The tool of the decided <c>tool_call</c>, when the decision names one.</param>
+/// <param name="UseId">Its <c>useId</c>.</param>
+/// <param name="Seq">The seq of the decided event.</param>
+public sealed record EnforcementEvent(string Kind, string? Reason, IReadOnlyList<string> Rules, string? Tool, string? UseId, int Seq);
 
 /// <summary>
 /// One delegation edge as the parent sealed it (<c>spec/agent-delegation-v1.md</c> §2): what a child run
@@ -252,6 +286,70 @@ public sealed record AgentDelegation(
 {
     /// <summary>The parent's sealed <c>delegation</c> event, when sealed in this process.</summary>
     public AgentRunArtifact? Artifact { get; init; }
+}
+
+/// <summary>
+/// A sealed <c>tool_call</c> (<see cref="AgentRun.BeginToolCallAsync"/>) and the one <c>tool_result</c> it takes: complete it
+/// with <see cref="CompleteAsync"/> once the tool returns. Nothing is sealed implicitly: a call never completed has no result.
+/// </summary>
+public sealed class ToolCall
+{
+    private readonly AgentRun _run;
+
+    internal ToolCall(AgentRun run, string tool, string useId, AgentRunArtifact artifact)
+    {
+        _run = run;
+        Tool = tool;
+        UseId = useId;
+        Artifact = artifact;
+    }
+
+    /// <summary>The call's <c>step.tool.useId</c>; its result carries the same.</summary>
+    public string UseId { get; }
+
+    /// <summary>The call's <c>step.tool.name</c>.</summary>
+    public string Tool { get; }
+
+    /// <summary>The sealed <c>tool_call</c>.</summary>
+    public AgentRunArtifact Artifact { get; }
+
+    /// <summary>Set under the run's sealing lock once the result is sealed.</summary>
+    internal bool Completed { get; set; }
+
+    /// <summary>
+    /// Seals the call's <c>tool_result</c> with the same tool name and <c>useId</c> and returns it. A second completion is
+    /// refused before sealing (<see cref="InvalidOperationException"/>).
+    /// </summary>
+    public Task<AgentRunArtifact> CompleteAsync(byte[] result, string contentType = "application/json", CancellationToken cancellationToken = default) =>
+        _run.CompleteToolCallAsync(this, result, contentType, cancellationToken);
+
+    /// <summary>What a <c>human_approval</c> for exactly this call names: its tool, its signed <c>tool-arguments</c> digest and its <c>useId</c>.</summary>
+    public ApprovalCovers Covers(DateTimeOffset? expiresAt = null)
+    {
+        var uri = (Artifact.Envelope["objects"] as JsonArray)?.OfType<JsonObject>()
+            .Where(o => AgentProfiles.Str(o["role"]) == "tool-arguments").Select(o => AgentProfiles.Str(o["uri"])).FirstOrDefault();
+        return new ApprovalCovers(Tool, Artifact.ObjectDigests[uri!], UseId, expiresAt);
+    }
+}
+
+/// <summary>
+/// The call a <c>human_approval</c> is for (<c>spec/agent-enforcement-v1.md</c> §3.5): the tool, the SHA-256 of the call's
+/// <c>tool-arguments</c> bytes and, optionally, its <c>useId</c>. An approval binds at most one call; <see cref="ExpiresAt"/>
+/// (sealed at millisecond precision, UTC) ends it, and a rejection ignores it. Never put arguments or names here.
+/// </summary>
+public sealed record ApprovalCovers(string Tool, string ArgumentsSha256, string? UseId = null, DateTimeOffset? ExpiresAt = null)
+{
+    /// <summary>Covers a call of <paramref name="tool"/> with exactly these argument bytes, under any <c>useId</c>: the approval a retry is bound by.</summary>
+    public static ApprovalCovers ForArguments(string tool, byte[] arguments, DateTimeOffset? expiresAt = null) =>
+        new(tool, EnvelopeHashing.HashHex(arguments ?? throw new ArgumentNullException(nameof(arguments))), null, expiresAt);
+
+    internal JsonObject ToJson()
+    {
+        var covers = new JsonObject { ["tool"] = Tool, ["argumentsSha256"] = ArgumentsSha256 };
+        if (UseId is not null) covers["useId"] = UseId;
+        if (ExpiresAt is { } at) covers["expiresAt"] = AgentProfiles.FormatTime(AgentProfiles.Truncate(at));
+        return covers;
+    }
 }
 
 /// <summary>Artifacts that get a qualified timestamp (<see cref="AgentRunOptions.QualifiedFor"/>).</summary>
@@ -360,6 +458,22 @@ public sealed record ControlEvaluationRequest
 /// <param name="Detail">Optional explanation.</param>
 /// <param name="Where">For FAIL and INDETERMINATE: the requests that produced it (seq as a decimal string, or <c>run</c>).</param>
 public sealed record PolicyRuleResult(string Id, string Result, IReadOnlyList<string>? Where = null, string? Detail = null);
+
+/// <summary>What the engine answered for one request of the facts (<see cref="AgentPolicy.Evaluate"/>).</summary>
+/// <param name="Seq">The request's seq as a decimal string, or <c>run</c>.</param>
+/// <param name="Reason">Rule ids that matched (Cedar's <c>diagnostics.reason</c> without the baseline permit), sorted.</param>
+/// <param name="Errors">Rule ids that errored (<c>diagnostics.errors</c>), sorted.</param>
+public sealed record PolicyRequestResult(string Seq, IReadOnlyList<string> Reason, IReadOnlyList<string> Errors);
+
+/// <summary>
+/// The results of a policy control set's Cedar rules over a facts document (Control Set v1 §6, v2 §9), from
+/// <see cref="AgentPolicy.Evaluate"/>. <see cref="Rules"/> can be passed as <see cref="PolicyEvaluationRequest.Rules"/>.
+/// </summary>
+/// <param name="Engine">The engine that evaluated, <c>cedar-policy@&lt;version&gt;</c>.</param>
+/// <param name="Rules">One result per rule, in the document's order; <c>Where</c> is null for PASS.</param>
+/// <param name="Overall">FAIL &gt; INDETERMINATE &gt; PASS over the rules.</param>
+/// <param name="Requests">Per request of the facts, in order.</param>
+public sealed record PolicyEvaluationResult(string Engine, IReadOnlyList<PolicyRuleResult> Rules, string Overall, IReadOnlyList<PolicyRequestResult> Requests);
 
 /// <summary>An earlier evaluation this one supersedes (<c>spec/control-evaluation-v2.md</c> §6).</summary>
 public sealed record EvaluationReference(string EvidenceId, string SignatureSha256);

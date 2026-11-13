@@ -860,6 +860,15 @@ public sealed class SigillClient : ISigillAiEvidenceClient, IDisposable
         AgentRunVerifier.VerifyAsync(bundle, AgentRunVerifier.Remote(this), expectedSigners, expectedEvaluationSigners, cancellationToken);
 
     /// <summary>
+    /// As <see cref="VerifyAgentRunAsync"/>, and recomputes policy evaluations with <paramref name="policyEngine"/>
+    /// (for example <c>Sigill.Sdk.Policy.CedarEngine</c>). See <see cref="AgentRunVerifier.VerifyWithEngineAsync(AgentRunBundle, BlindObjectsVerifier, IPolicyEngine, IReadOnlyCollection{string}?, IReadOnlyCollection{string}?, CancellationToken)"/>.
+    /// </summary>
+    public Task<AgentRunVerificationResult> VerifyAgentRunWithEngineAsync(
+        AgentRunBundle bundle, IPolicyEngine policyEngine, IReadOnlyCollection<string>? expectedSigners = null,
+        IReadOnlyCollection<string>? expectedEvaluationSigners = null, CancellationToken cancellationToken = default) =>
+        AgentRunVerifier.VerifyWithEngineAsync(bundle, AgentRunVerifier.Remote(this), policyEngine, expectedSigners, expectedEvaluationSigners, cancellationToken);
+
+    /// <summary>
     /// Opens a sub-agent run for a delegation its parent sealed (<c>spec/agent-delegation-v1.md</c>).
     /// See <see cref="AgentRun.StartChildAsync"/>.
     /// </summary>

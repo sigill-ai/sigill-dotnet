@@ -17,6 +17,8 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\Sigill.Sdk\Sigill.Sdk.csproj" />
+    <ProjectReference Include="..\..\src\Sigill.Sdk.Policy\Sigill.Sdk.Policy.csproj" />
+    <ProjectReference Include="..\..\examples\Sigill.Sdk.Examples\Sigill.Sdk.Examples.csproj" />
   </ItemGroup>
 
   <!-- Tests load the spec and test vectors at runtime via SpecRoot.GetPath() -->

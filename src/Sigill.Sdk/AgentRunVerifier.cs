@@ -152,7 +152,8 @@ public sealed record AgentControlVerdict
 /// <summary>
 /// One Control Evaluation, reported on its own and never merged into the run
 /// verdict (common rules §8). <see cref="Overall"/> and <see cref="Controls"/>
-/// are the verifier's claims, unchanged: the SDK never evaluates controls.
+/// are the verifier's claims, unchanged: the SDK evaluates no controls, except that it recomputes a policy evaluation's
+/// rules when a policy engine is given (<see cref="ResultsRecomputed"/>).
 /// </summary>
 public sealed record AgentEvaluationVerdict
 {
@@ -207,8 +208,9 @@ public sealed record AgentEvaluationVerdict
     public bool? PolicyDigestsMatch { get; init; }
 
     /// <summary>
-    /// policy: the per-rule results were recomputed with a Cedar engine (§4.6). This SDK has no Cedar engine, so it
-    /// is always false: the facts are checked, the results are the evaluator's.
+    /// policy: the per-rule results were recomputed with the policy engine given to the verifier and equal the evaluation's
+    /// (§4.6). False without an engine, for a v2 control set, or when the evaluation names another engine version (a note
+    /// says so): the facts are still checked, the results are then the evaluator's. Results that differ are a finding.
     /// </summary>
     public bool ResultsRecomputed { get; init; }
 
@@ -234,13 +236,35 @@ public sealed record AgentEvaluationVerdict
     public bool Current { get; init; } = true;
 }
 
+/// <summary>One finding of the <c>enforcement</c> check (<c>spec/agent-enforcement-v1.md</c> §5).</summary>
+public sealed class EnforcementFinding
+{
+    public EnforcementFinding(string code, IReadOnlyList<int> seqs)
+    {
+        Code = code;
+        Seqs = seqs;
+    }
+
+    /// <summary>
+    /// orphan_result | conflicting_result | executed_after_denial | duplicate_use_id | misplaced_decision |
+    /// unrecorded_halt | continued_after_halt | evidence_version_mismatch.
+    /// </summary>
+    public string Code { get; }
+
+    /// <summary>The seqs involved.</summary>
+    public IReadOnlyList<int> Seqs { get; }
+}
+
 /// <summary>The run-level result (common rules §8).</summary>
 public sealed record AgentRunVerificationResult
 {
     /// <summary>run_finalized | run_open | run_invalid.</summary>
     public required string Verdict { get; init; }
 
-    /// <summary>The nine checks (correlation, sequence, chain, envelope, signatures, timestamps, objects, finalization, control): ok | warn | bad.</summary>
+    /// <summary>
+    /// The nine checks (correlation, sequence, chain, envelope, signatures, timestamps, objects, finalization, control): ok | warn | bad.
+    /// A <c>schemaVersion "4"</c> run, or a run whose supplied control set is a v2 policy, adds <c>enforcement</c> (Agent Enforcement v1 §5).
+    /// </summary>
     public required IReadOnlyDictionary<string, string> Checks { get; init; }
 
     /// <summary>bound | run_only | control_only | unbound.</summary>
@@ -250,7 +274,8 @@ public sealed record AgentRunVerificationResult
     public required IReadOnlyList<string> Warnings { get; init; }
 
     /// <summary>
-    /// Informational notes — currently the legacy envelope reference diagnostic (AiEvidenceEnvelopeV2 §5.4). Never a
+    /// Informational notes — the legacy envelope reference diagnostic (AiEvidenceEnvelopeV2 §5.4), and a policy evaluation whose
+    /// results were not recomputed although an engine was given (another engine version, or the engine failed). Never a
     /// warning: notes do not affect <see cref="Verdict"/>, <see cref="Checks"/> or <see cref="Warnings"/>.
     /// </summary>
     public IReadOnlyList<string> Notes { get; init; } = Array.Empty<string>();
@@ -285,6 +310,12 @@ public sealed record AgentRunVerificationResult
     /// genuine is confirmed by the provider, never by the verifier.
     /// </summary>
     public int ModelCallsWithVendorRefs { get; init; }
+
+    /// <summary>
+    /// The <c>enforcement</c> check's findings, in the order of Agent Enforcement v1 §5 (each also in <see cref="Findings"/>).
+    /// A verifier does not evaluate the policy: a guard that skipped a due denial or halt is not found here.
+    /// </summary>
+    public IReadOnlyList<EnforcementFinding> EnforcementFindings { get; init; } = Array.Empty<EnforcementFinding>();
 
     /// <summary>What a verdict does and does not establish. Show it next to the verdict.</summary>
     public string Scope => AgentRunVerifier.Scope;
@@ -450,11 +481,25 @@ public static class AgentRunVerifier
         catch (Exception ex) when (ex is JsonException or ArgumentException or InvalidOperationException) { return null; }
     }
 
+    /// <summary>The engine of one run verification and what is left of its recomputation budget (bytes × requests).</summary>
+    private sealed class Recomputation(IPolicyEngine engine, long budget)
+    {
+        public IPolicyEngine Engine { get; } = engine;
+        public long Left { get; set; } = budget;
+    }
+
+    /// <summary>
+    /// The recomputation budget of one run verification: the sum over recomputed evaluations of (control-set bytes ×
+    /// requests of its facts). The engine has no time limit, and an evaluation's cost grows with both.
+    /// </summary>
+    internal const long RecomputeBudget = 536_870_912;
+
     private sealed class EvaluationV2Check
     {
         public List<string> Findings = new();
         public bool? FactsMatch, DigestsMatch, QualifiedMet;
-        public bool QualifiedRequired;
+        public bool QualifiedRequired, Recomputed;
+        public string? Note;
         public string? PolicyStatus, State;
     }
 
@@ -462,7 +507,7 @@ public static class AgentRunVerifier
 
     /// <summary>The kind-specific rules of <c>spec/control-evaluation-v2.md</c> §2–§5. Schema conformance is checked elsewhere.</summary>
     private static EvaluationV2Check CheckEvaluationV2(Signed sa, ArtifactCheck c, IReadOnlyDictionary<string, byte[]> payloads,
-        Signed? ctl, List<Signed> events, string label)
+        Signed? ctl, List<Signed> events, string label, Recomputation? recompute)
     {
         var r = new EvaluationV2Check();
         void Bad(string m) => r.Findings.Add($"{label}: {m}.");
@@ -515,14 +560,15 @@ public static class AgentRunVerifier
                 SameIds(IdsOf(cs["privateControls"]), "private control");
                 break;
             case "policy":
-                CheckPolicy(env, csBytes, cs, Bytes("evaluation-facts"), Bytes("policy-approval"), sa, ctl, events, r, Bad, SameIds);
+                CheckPolicy(env, csBytes, cs, Bytes("evaluation-facts"), Bytes("policy-approval"), sa, ctl, events, r, Bad, SameIds, recompute, label);
                 break;
         }
         return r;
     }
 
     private static void CheckPolicy(JsonObject env, byte[]? csBytes, JsonObject? cs, byte[]? factsBytes, byte[]? approvalBytes,
-        Signed sa, Signed? ctl, List<Signed> events, EvaluationV2Check r, Action<string> bad, Action<IEnumerable<string>, string> sameIds)
+        Signed sa, Signed? ctl, List<Signed> events, EvaluationV2Check r, Action<string> bad, Action<IEnumerable<string>, string> sameIds,
+        Recomputation? recompute, string label)
     {
         var policy = env["policy"] as JsonObject;
         r.PolicyStatus = AgentProfiles.Str(policy?["policyStatus"]);
@@ -531,6 +577,7 @@ public static class AgentRunVerifier
         if (sa.Objects.FirstOrDefault(o => o.Role == "control-set")?.ContentType != AgentPolicy.ControlSetContentType)
             bad("its control set is not a policy control set");
         if (AgentPolicy.Validate(csBytes).Count > 0 || cs["cedar"] is not JsonObject cedar) { bad("its control set is not a valid policy control set with Cedar rules"); return; }
+        if (cs.ContainsKey("schemaVersion")) { bad("policy evaluations of a v2 control set are not specified yet (Control Evaluation v2 fixes factsVersion 1)"); return; }
 
         var digests = AgentPolicy.ComputeDigests(csBytes);
         r.DigestsMatch = digests.ApprovalScopeDigest == AgentProfiles.Str(policy?["approvalScopeDigest"])
@@ -570,12 +617,15 @@ public static class AgentRunVerifier
             if (r.FactsMatch == false) bad("its facts are not the facts of this run's signed events");
             else
             {
-                var seqs = new HashSet<string>((JsonNode.Parse(factsBytes)!["requests"] as JsonArray ?? new JsonArray())
+                var requests = JsonNode.Parse(factsBytes)!["requests"] as JsonArray ?? new JsonArray();
+                var seqs = new HashSet<string>(requests
                     .Select(q => q?["seq"] is JsonValue v && v.GetValueKind() == JsonValueKind.String ? v.GetValue<string>() : AgentProfiles.Int(q?["seq"])?.ToString(System.Globalization.CultureInfo.InvariantCulture))
                     .OfType<string>(), StringComparer.Ordinal);
                 foreach (var w in (env["controls"] as JsonArray ?? new JsonArray()).OfType<JsonObject>()
                     .SelectMany(x => (x["where"] as JsonArray ?? new JsonArray()).Select(AgentProfiles.Str)).OfType<string>().Distinct())
                     if (!seqs.Contains(w)) bad($"where names request '{w}', which is not in its facts");
+                var ruleIds = (cedar["policies"]?["staticPolicies"] as JsonObject ?? new JsonObject()).Select(kv => kv.Key).ToList();
+                if (recompute is not null) Recompute(env, csBytes, factsBytes, ruleIds, (long)csBytes.Length * requests.Count, recompute, r, bad, label);
             }
         }
 
@@ -618,6 +668,146 @@ public static class AgentRunVerifier
         if (AgentProfiles.Str(approval["agentId"]) != AgentProfiles.Str(ctl?.Env["agent"]?["id"]))
             bad("the approval record is for another agent");
     }
+
+    /// <summary>
+    /// §4.6: recompute the results from the (already matched) facts and the control set, and compare them with the claimed
+    /// ones. Only when the claimed control ids are exactly the rule ids (otherwise the evaluation is invalid already). Another
+    /// engine version, a used-up budget or an engine that fails leaves the results unrecomputed with a note; a request the
+    /// named engine refuses is a finding.
+    /// </summary>
+    private static void Recompute(JsonObject env, byte[] csBytes, byte[] factsBytes, IReadOnlyList<string> ruleIds, long cost,
+        Recomputation recompute, EvaluationV2Check r, Action<string> bad, string label)
+    {
+        var claimed = (env["controls"] as JsonArray ?? new JsonArray()).OfType<JsonObject>().ToList();
+        var claimedIds = claimed.Select(x => AgentProfiles.Str(x["id"])).ToList();
+        if (claimedIds.Count != ruleIds.Count || claimedIds.Distinct(StringComparer.Ordinal).Count() != claimedIds.Count
+            || !ruleIds.All(id => claimedIds.Contains(id, StringComparer.Ordinal)))
+            return;
+        static string Trimmed(Exception ex) => ex.Message.TrimEnd('.'); // the note or finding adds the full stop
+        var claimedEngine = AgentProfiles.Str(env["policy"]?["evaluator"]?["engine"]);
+        PolicyEvaluationResult mine;
+        try
+        {
+            var engineId = "cedar-policy@" + recompute.Engine.Version;
+            if (claimedEngine != engineId)
+            {
+                r.Note = $"{label}: its results were not recomputed: it names the engine {claimedEngine}, the verifier has {engineId}.";
+                return;
+            }
+            if (cost > recompute.Left)
+            {
+                r.Note = $"{label}: its results were not recomputed: the recomputation budget of this verification is used up.";
+                return;
+            }
+            recompute.Left -= cost;
+            mine = AgentPolicy.Evaluate(csBytes, factsBytes, recompute.Engine);
+        }
+        catch (PolicyEngineException ex) when (ex.Refused)
+        {
+            bad($"its results cannot be recomputed: {Trimmed(ex)}");
+            return;
+        }
+        catch (Exception ex) // whatever the supplied engine throws: the verifier never raises because of it
+        {
+            r.Note = $"{label}: its results were not recomputed: {Trimmed(ex)}.";
+            return;
+        }
+        static string Show(string? result, IEnumerable<string> where) =>
+            where.Any() ? $"{result} at {string.Join(", ", where)}" : result ?? "";
+        foreach (var rule in mine.Rules)
+        {
+            var theirs = claimed.FirstOrDefault(x => AgentProfiles.Str(x["id"]) == rule.Id);
+            var theirResult = AgentProfiles.Str(theirs?["result"]);
+            var theirWhere = (theirs?["where"] as JsonArray ?? new JsonArray()).Select(w => w?.ToString() ?? "").ToList();
+            var myWhere = rule.Where ?? Array.Empty<string>();
+            if (theirResult == rule.Result && theirWhere.SequenceEqual(myWhere)) continue;
+            bad($"its results do not recompute: rule '{rule.Id}' is {Show(rule.Result, myWhere)} with {mine.Engine}, not {Show(theirResult, theirWhere)}");
+            return;
+        }
+        if (AgentProfiles.Str(env["overall"]) != mine.Overall)
+        {
+            bad($"its results do not recompute: overall is {mine.Overall} with {mine.Engine}, not {AgentProfiles.Str(env["overall"])}");
+            return;
+        }
+        r.Recomputed = true;
+    }
+
+    /// <summary>
+    /// Agent Enforcement v1 §5: the findings of a run's events (typed fields only), in the order of the spec's table, each
+    /// with the seqs involved. "Previous" and "next" are seq − 1 and seq + 1. <c>evidence_version_mismatch</c> is checked
+    /// only when the control-set bytes are given. A verifier does not evaluate the policy (§5).
+    /// </summary>
+    internal static List<EnforcementFinding> EnforcementFindings(IReadOnlyList<JsonObject> events, string? controlSetContentType, byte[]? controlSet)
+    {
+        var found = new List<EnforcementFinding>();
+        void Add(string code, params int[] seqs) => found.Add(new EnforcementFinding(code, seqs));
+        // Stable sort: of two events with the same seq, the first in bundle order is the event at that seq.
+        var evs = events.Select(e => (Seq: AgentProfiles.Int((e["chain"] as JsonObject)?["seq"]), Step: e["step"] as JsonObject ?? new JsonObject(), Env: e))
+            .Where(x => x.Seq is not null).Select(x => (Seq: x.Seq!.Value, x.Step, x.Env)).OrderBy(x => x.Seq).ToList();
+        // A missing or non-string member, or a tool that is not an object, is absent; an absent value equals nothing.
+        static string? Type(JsonObject s) => AgentProfiles.Str(s["type"]);
+        static JsonObject? Tool(JsonObject s) => s["tool"] as JsonObject;
+        static string? UseId(JsonObject s) => AgentProfiles.Str(Tool(s)?["useId"]);
+        static string? Name(JsonObject s) => AgentProfiles.Str(Tool(s)?["name"]);
+        static bool Same(string? a, string? b) => a is not null && a == b;
+        static bool IsRecord(JsonObject? s) => s is not null && Type(s) == "authorization" && s.ContainsKey("enforcer");
+        static bool Halted(JsonObject? s) => s is not null && Type(s) == "run_end" && AgentProfiles.Str(s["runDisposition"]) == "halted";
+        JsonObject? At(int seq) => evs.FirstOrDefault(x => x.Seq == seq).Step;
+
+        // The structural findings are those of a run whose events are all v4; any other run can only show evidence_version_mismatch.
+        var notV4 = evs.Where(x => AgentProfiles.Str(x.Env["schemaVersion"]) != "4").Select(x => x.Seq).ToArray();
+        if (evs.Count > 0 && notV4.Length == 0)
+        {
+            var calls = evs.Where(x => Type(x.Step) == "tool_call").ToList();
+            var results = evs.Where(x => Type(x.Step) == "tool_result").ToList();
+            var records = evs.Where(x => IsRecord(x.Step)).ToList();
+            foreach (var r in results)
+                if (!calls.Any(c => c.Seq < r.Seq && Same(UseId(c.Step), UseId(r.Step)) && Same(Name(c.Step), Name(r.Step)))) Add("orphan_result", r.Seq);
+            var firstResult = new Dictionary<string, int>(StringComparer.Ordinal);
+            foreach (var r in results)
+            {
+                if (UseId(r.Step) is not { } u) continue;
+                if (firstResult.TryGetValue(u, out var earlier)) Add("conflicting_result", earlier, r.Seq);
+                else firstResult[u] = r.Seq;
+            }
+            foreach (var r in results)
+                if (records.FirstOrDefault(d => Tool(d.Step) is not null && Same(UseId(d.Step), UseId(r.Step))) is { Step: not null } denial)
+                    Add("executed_after_denial", Math.Min(denial.Seq, r.Seq), Math.Max(denial.Seq, r.Seq));
+            foreach (var g in calls.Where(c => UseId(c.Step) is not null).GroupBy(c => UseId(c.Step)!, StringComparer.Ordinal).Where(g => g.Count() > 1))
+                Add("duplicate_use_id", g.Select(c => c.Seq).ToArray());
+            foreach (var r in records)
+            {
+                var prev = At(r.Seq - 1);
+                var placed = Tool(r.Step) is not null
+                    ? prev is not null && Type(prev) == "tool_call" && Same(Name(prev), Name(r.Step)) && Same(UseId(prev), UseId(r.Step))
+                    : prev is null || Type(prev) != "tool_call";
+                if (IsRecord(prev) || !placed) Add("misplaced_decision", r.Seq);
+            }
+            foreach (var e in evs.Where(x => Halted(x.Step)))
+                if (!IsRecord(At(e.Seq - 1))) Add("unrecorded_halt", e.Seq);
+            // Every record without tool is a halt, and so is every unavailable record.
+            foreach (var r in records.Where(x => AgentProfiles.Str((x.Step["enforcer"] as JsonObject)?["reason"]) == "unavailable" || Tool(x.Step) is null))
+                if (!Halted(At(r.Seq + 1))) Add("continued_after_halt", r.Seq);
+        }
+        // Fails closed (§5): a mismatch unless the bytes parse strictly as an object without schemaVersion (a v1 control set).
+        if (controlSetContentType == AgentPolicy.ControlSetContentType && controlSet is not null && notV4.Length > 0
+            && !(AgentPolicy.Parse(controlSet, out _) is { } doc && !doc.ContainsKey("schemaVersion")))
+            Add("evidence_version_mismatch", notV4);
+        return found;
+    }
+
+    /// <summary>What each <see cref="EnforcementFinding"/> code means, as a run finding says it.</summary>
+    private static readonly Dictionary<string, string> EnforcementText = new(StringComparer.Ordinal)
+    {
+        ["orphan_result"] = "a tool_result with no earlier tool_call of the same useId and tool name",
+        ["conflicting_result"] = "a second tool_result for the same useId",
+        ["executed_after_denial"] = "a tool_result for a call an enforcement record denied",
+        ["duplicate_use_id"] = "tool_calls share a useId",
+        ["misplaced_decision"] = "an enforcement record that does not directly follow the event it decides",
+        ["unrecorded_halt"] = "a halted run_end that does not directly follow an enforcement record",
+        ["continued_after_halt"] = "the run continued after an enforcement record that halts it",
+        ["evidence_version_mismatch"] = "the policy control set does not parse strictly as a v1 document, but the events are not all schemaVersion 4",
+    };
 
     /// <summary>§6.4: never seal an envelope the verifier would reject. Throws ArgumentException.</summary>
     internal static void Prevalidate(JsonObject envelope, string schemaName)
@@ -805,9 +995,35 @@ public static class AgentRunVerifier
     /// with (§3); when given, a run signed by anyone else fails. <paramref name="expectedEvaluationSigners"/>
     /// does the same for Control Evaluations.
     /// </summary>
-    public static async Task<AgentRunVerificationResult> VerifyAsync(
+    public static Task<AgentRunVerificationResult> VerifyAsync(
         AgentRunBundle bundle, BlindObjectsVerifier verifier, IReadOnlyCollection<string>? expectedSigners = null,
-        IReadOnlyCollection<string>? expectedEvaluationSigners = null, CancellationToken cancellationToken = default)
+        IReadOnlyCollection<string>? expectedEvaluationSigners = null, CancellationToken cancellationToken = default) =>
+        VerifyCoreAsync(bundle, verifier, null, expectedSigners, expectedEvaluationSigners, cancellationToken);
+
+    /// <summary>
+    /// As <see cref="VerifyAsync"/>, and recomputes with <paramref name="policyEngine"/> (for example
+    /// <c>Sigill.Sdk.Policy.CedarEngine</c>) the results of each conforming policy evaluation of a v1 control set whose facts
+    /// and control set are supplied and whose control ids are exactly the rule ids (<c>spec/control-evaluation-v2.md</c> §4.6,
+    /// <see cref="AgentEvaluationVerdict.ResultsRecomputed"/>). Results that do not recompute, or a request the engine
+    /// refuses, make the evaluation invalid. An evaluation made with another engine version, one beyond the verification's
+    /// recomputation budget, or one the engine fails on is not recomputed, and a note says so; the engine never makes this
+    /// method throw.
+    /// </summary>
+    public static Task<AgentRunVerificationResult> VerifyWithEngineAsync(
+        AgentRunBundle bundle, BlindObjectsVerifier verifier, IPolicyEngine policyEngine, IReadOnlyCollection<string>? expectedSigners = null,
+        IReadOnlyCollection<string>? expectedEvaluationSigners = null, CancellationToken cancellationToken = default) =>
+        VerifyWithEngineAsync(bundle, verifier, policyEngine, RecomputeBudget, expectedSigners, expectedEvaluationSigners, cancellationToken);
+
+    /// <summary>Tests: another recomputation budget.</summary>
+    internal static Task<AgentRunVerificationResult> VerifyWithEngineAsync(
+        AgentRunBundle bundle, BlindObjectsVerifier verifier, IPolicyEngine policyEngine, long budget, IReadOnlyCollection<string>? expectedSigners = null,
+        IReadOnlyCollection<string>? expectedEvaluationSigners = null, CancellationToken cancellationToken = default) =>
+        VerifyCoreAsync(bundle, verifier, new Recomputation(policyEngine ?? throw new ArgumentNullException(nameof(policyEngine)), budget),
+            expectedSigners, expectedEvaluationSigners, cancellationToken);
+
+    private static async Task<AgentRunVerificationResult> VerifyCoreAsync(
+        AgentRunBundle bundle, BlindObjectsVerifier verifier, Recomputation? recompute, IReadOnlyCollection<string>? expectedSigners,
+        IReadOnlyCollection<string>? expectedEvaluationSigners, CancellationToken cancellationToken)
     {
         if (bundle is null) throw new ArgumentNullException(nameof(bundle));
         if (verifier is null) throw new ArgumentNullException(nameof(verifier));
@@ -1118,12 +1334,31 @@ public static class AgentRunVerifier
         }
         checks["control"] = controlOk ? "ok" : "bad";
 
+        // ── enforcement (Agent Enforcement v1 §5): a v4 run, or a run whose control-set bytes are supplied (only signed bytes count)
+        byte[]? csBytes = null;
+        string? csType = null;
+        var csObjects = ctl is not null && ctlCheck is not null ? ctl.Objects.Where(o => o.Role == "control-set").ToList() : new List<SignedObject>();
+        if (csObjects.Count == 1 && bundle.Payloads.TryGetValue(csObjects[0].Uri, out var supplied)
+            && ctlCheck!.SignedDigest(csObjects[0].Uri) == EnvelopeHashing.HashHex(supplied))
+        {
+            csBytes = supplied;
+            csType = csObjects[0].ContentType;
+        }
+        var enforcement = EnforcementFindings(good.Select(g => g.Env).ToList(), csType, csBytes);
+        if ((versions.Count == 1 && versions[0] == "4") || enforcement.Count > 0)
+        {
+            checks["enforcement"] = enforcement.Count == 0 ? "ok" : "bad";
+            foreach (var f in enforcement)
+                findings.Add($"enforcement: {EnforcementText[f.Code]} ({f.Code}; seq {string.Join(", ", f.Seqs)}).");
+        }
+
         // ── seal time, defence in depth (§8): warnings only
         var ctlAt = ctlCheck is { TimestampOk: true } ? Time(ctlCheck.GenTime) : null;
         bool? sealedBeforeRun = null;
         if (ctlAt is { } controlTime && timeline.FirstOrDefault(t => t.SealedAt is not null) is { SealedAt: { } firstAt } first)
         {
-            sealedBeforeRun = controlTime <= firstAt + TimeSpan.FromSeconds(1); // TSAs state up to 1 s accuracy
+            // TSAs state up to 1 s accuracy. Differences, never shifted instants: those overflow near years 1 and 9999.
+            sealedBeforeRun = controlTime - firstAt <= TimeSpan.FromSeconds(1);
             if (sealedBeforeRun == false)
                 warnings.Add($"The Control Artifact's timestamp is later than the run's first timestamp (seq {first.Seq}): the control basis may not have been sealed before the run.");
         }
@@ -1138,12 +1373,12 @@ public static class AgentRunVerifier
             if (ctlAt is { } lower)
             {
                 plausible ??= true;
-                if (claimed < lower - SealTimeAllowance) early.Add(timeline[i].Seq);
+                if (lower - claimed > SealTimeAllowance) early.Add(timeline[i].Seq);
             }
             if (timeline.Skip(i).Select(t => t.SealedAt).FirstOrDefault(t => t is not null) is { } upper)
             {
                 plausible ??= true;
-                if (claimed > upper + SealTimeAllowance) late.Add(timeline[i].Seq);
+                if (claimed - upper > SealTimeAllowance) late.Add(timeline[i].Seq);
             }
         }
         if (early.Count > 0 || late.Count > 0) plausible = false;
@@ -1195,7 +1430,9 @@ public static class AgentRunVerifier
             }
             var endStep = end.Env["step"] as JsonObject;
             disposition = AgentProfiles.Str(endStep?["runDisposition"]);
-            if (disposition is null || !Dispositions.Contains(disposition))
+            // Enforcement §3.6: a v4 run may end halted (the guard stopped it).
+            if (disposition is null || !(Dispositions.Contains(disposition)
+                    || (disposition == "halted" && AgentProfiles.Str(end.Env["schemaVersion"]) == "4")))
             {
                 finOk = false;
                 findings.Add($"run_end carries no valid runDisposition (got '{disposition ?? "none"}').");
@@ -1225,6 +1462,7 @@ public static class AgentRunVerifier
         // ── evaluations: reported on their own, never merged into the run verdict
         var evaluations = new List<AgentEvaluationVerdict>();
         var evaluationChecks = new List<(string Label, ArtifactCheck Check)>();
+        var evaluationNotes = new List<string>();
         var runEndSig = end is not null ? AgentProfiles.SignatureSha256(end.Jws) : null;
         List<SignedObject> WithRole(Signed s, string role) => s.Objects.Where(o => o.Role == role).ToList();
         for (var i = 0; i < bundle.Evaluations.Count; i++)
@@ -1295,8 +1533,9 @@ public static class AgentRunVerifier
                 warnings.Add($"{label} names run_end {subjectRunEnd} of this control basis, which is not in the bundle: events may have been withheld.");
             if (baselineMatches == false) ef.Add($"{label}: its baseline is not the one sealed in the Control Artifact.");
             // Kind rules read typed fields, so they run on a schema-valid envelope only; a non-conforming one is never valid anyway.
-            var v2 = isV2 && sa.Conformance.Count == 0 ? CheckEvaluationV2(sa, c, bundle.Payloads, ctl, good, label) : null;
+            var v2 = isV2 && sa.Conformance.Count == 0 ? CheckEvaluationV2(sa, c, bundle.Payloads, ctl, good, label, recompute) : null;
             if (v2 is not null) ef.AddRange(v2.Findings);
+            if (v2?.Note is { } note) evaluationNotes.Add(note);
 
             evaluations.Add(new AgentEvaluationVerdict
             {
@@ -1307,7 +1546,7 @@ public static class AgentRunVerifier
                     && subjectBound && controlSetMatches && baselineMatches != false && (v2 is null || v2.Findings.Count == 0),
                 SchemaVersion = AgentProfiles.Str(sa.Env["schemaVersion"]), Kind = kind,
                 PolicyStatus = v2?.PolicyStatus, PolicyState = v2?.State, FactsMatch = v2?.FactsMatch,
-                PolicyDigestsMatch = v2?.DigestsMatch, SealedFor = SealedForOf(sa.Jws),
+                PolicyDigestsMatch = v2?.DigestsMatch, ResultsRecomputed = v2?.Recomputed ?? false, SealedFor = SealedForOf(sa.Jws),
                 QualifiedTimestampsRequired = v2?.QualifiedRequired ?? false, QualifiedTimestampsMet = v2?.QualifiedMet,
                 Supersedes = AgentProfiles.Str((sa.Env["supersedes"] as JsonObject)?["evidenceId"]),
                 ObjectsComplete = c.ObjectsComplete, WellFormed = sa.Conformance.Count == 0, Signer = signer,
@@ -1349,9 +1588,11 @@ public static class AgentRunVerifier
         var notes = legacy > 0
             ? new List<string> { $"{legacy} of {allSignatures.Count} artifact(s): {EnvelopeReferences.LegacyDiagnostic}." }
             : new List<string>();
+        notes.AddRange(evaluationNotes);
         return new AgentRunVerificationResult
         {
             Notes = notes,
+            EnforcementFindings = enforcement,
             Verdict = verdict,
             Checks = checks,
             Binding = binding,

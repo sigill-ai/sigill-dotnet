@@ -375,6 +375,7 @@ cover one controlled run:
 | Before | [Control Artifact](spec/agent-control-artifact-v1.md) | configuration, control set, baseline, timestamp policy |
 | During | [Execution Evidence](spec/agent-execution-evidence-v1.md) | one artifact per event, chained by signature |
 | During | [Model Calls](spec/agent-model-calls-v1.md) (execution `schemaVersion "3"`) | per model call: the model that served it and the provider's own ids for the call, so the provider can confirm it against its logs; prompts and responses as digests only |
+| During | [Enforcement (draft)](spec/agent-enforcement-v1.md) (execution `schemaVersion "4"`) | the guard's denials and halts before the action, recomputable from the [policy control set v2](spec/agent-policy-control-set-v2.md) |
 | After | [Control Evaluation](spec/control-evaluation-v1.md), [v2 (draft)](spec/control-evaluation-v2.md) | what an independent verifier observed, and each control's result; v2 adds policy evaluations (reproducible from the run's facts) and the producer's own attested results |
 
 To record model calls, start the run with `RecordsModelCalls = true` and put
@@ -492,8 +493,9 @@ What to know:
   each timestamp's TSA trust; until it reports `trusted_chain` or `qualified`,
   the result carries a "TSA trust not established" warning.
 - **Evaluations never change the run verdict.** They are reported on their
-  own, and the SDK never evaluates controls: `Overall` is the named
-  verifier's claim. Read it only when `Valid` is true — the evaluation is then
+  own, and the SDK evaluates no controls: `Overall` is the named verifier's
+  claim (a policy evaluation's rules can be recomputed: see
+  [Policy engine](#policy-engine)). Read it only when `Valid` is true — the evaluation is then
   signed over its own envelope, timestamped, intact, and bound to this run's
   `run_end`, Control Artifact and pre-sealed control set.
 - **Persist as you go.** `OnArtifactSealed` runs after each artifact is sealed,
@@ -543,6 +545,163 @@ var result = await client.VerifyAgentRunTreeAsync(tree);
   (`agent.id` → certificate thumbprints) and `ExpectedRoot…` to bind the tree to
   what you expected; without them a shared certificate proves consistency, not
   who ran each sub-agent.
+
+### Policy enforcement (draft): tool calls and bound approvals
+
+A run whose control set is a [policy control set v2](spec/agent-policy-control-set-v2.md)
+(`AgentPolicy.ControlSetFromDocument`, with `"schemaVersion": "2"`) is recorded as
+execution `schemaVersion "4"` ([Agent Enforcement v1](spec/agent-enforcement-v1.md)): every
+tool call has a `useId` and every result names its call. Only the guard (below) writes an
+enforcement record or a halted `run_end`; `RecordAsync` refuses those members. The verifier
+adds the `enforcement` check for v4 runs (results without a call, a second result, reused
+use ids, misplaced or unrecorded decisions), and reports `evidence_version_mismatch` when a
+run under a v2 policy control set is not v4.
+
+Record a call and its result as one lifecycle:
+
+```csharp
+ToolCall call = await run.BeginToolCallAsync("crm.read_customer", argsJson, operation: "read",
+    definition: toolManifestEntry);   // optional: binds the tool's definition by digest
+byte[] result = await ReadCustomerAsync(argsJson);
+await call.CompleteAsync(result);      // same tool and useId; a second completion is refused
+```
+
+Bind an approval to the call it is for with `RecordBoundApprovalAsync`: its tool and the digest of its exact arguments,
+optionally its `useId` and an expiry. One approval binds at most one call, and a
+rejection is sticky for the run:
+
+```csharp
+await run.RecordBoundApprovalAsync("approved", approver: "urn:example:approver:42",
+    covers: ApprovalCovers.ForArguments("payments.refund", refundArgs, expiresAt: DateTimeOffset.UtcNow.AddMinutes(15)));
+ToolCall refund = await run.BeginToolCallAsync("payments.refund", refundArgs, consequential: true);
+// Or covers: call.Covers() for one sealed call exactly, including its useId.
+```
+
+`AgentPolicy.Validate` checks a v2 document (entities, enforcement settings, annotations,
+the schema v2 digest; strict Cedar validation needs a Cedar engine, below), `AgentPolicy.Enforcement`
+gives its effective settings and each rule's effect, and `AgentPolicy.BuildFactsV2` builds
+the facts v2 a guard and an evaluator evaluate.
+
+### Policy engine
+
+The package `Sigill.Sdk.Policy` adds `CedarEngine`: the official [Cedar](https://github.com/cedar-policy/cedar)
+policy core, `cedar-policy` 4.14.0, compiled to one WebAssembly module (sha256
+`a0cd395067e77a157116f6b25bcdb612d34c61d1a4446918d75da1a07c80d1f3`, built reproducibly from
+[`engine/`](engine/README.md)) and run in-process with [Wasmtime](https://wasmtime.dev). The module is
+embedded in the package and refused if its digest differs; it has no filesystem, network, clock or
+environment, and at most 256 MiB of memory. `Sigill.Sdk` itself has no dependency on it: the methods
+below take any `IPolicyEngine`. The licences and notices of Cedar and the other Rust crates compiled into
+the module are in [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md), which the package also carries.
+
+```sh
+dotnet add package Sigill.Sdk.Policy
+```
+
+```csharp
+using Sigill.Sdk.Policy;
+
+var engine = new CedarEngine();   // loads on first use; share one instance between threads
+
+// Everything Validate checks, plus Cedar's strict validation of the rules against the schema of the
+// document's version (and, for v2, of cedar.entities against schema v2).
+IReadOnlyList<string> problems = AgentPolicy.ValidateStrict(controlSetBytes, engine);
+
+// Per-rule results over a run's facts: PASS / FAIL / INDETERMINATE with where, overall, the engine id
+// ("cedar-policy@4.14.0") and per request the rules that matched or errored.
+PolicyFacts facts = AgentPolicy.BuildFacts(agentId, correlationId, events);
+PolicyEvaluationResult evaluated = AgentPolicy.Evaluate(controlSetBytes, facts.Bytes, engine);
+
+// Verify a run and recompute each policy evaluation of a v1 control set from its sealed facts:
+// ResultsRecomputed is true when they match; results that differ make the evaluation invalid.
+var result = await client.VerifyAgentRunWithEngineAsync(bundle, engine);
+```
+
+An evaluation made with another Cedar version, or beyond the verification's recomputation budget, is
+not recomputed (a note says so); a request the engine refuses makes the evaluation invalid. A failure
+inside the engine is a `PolicyEngineException`, and never makes the verifier throw. The engine runs where
+Wasmtime ships native libraries: Linux (glibc), macOS and Windows on x64 and arm64.
+
+### Enforcement (draft): deny a tool call, halt a run
+
+With a policy engine the run gets a guard ([Control Set v2 §7](spec/agent-policy-control-set-v2.md)): after
+each event is sealed it evaluates the event's facts, and under `enforcement.mode: "enforce"` it denies a tool
+call or halts the run **before the agent acts**, and seals that decision in the run's chain as an
+enforcement record (and, for a halt, a `run_end` with `runDisposition: "halted"`).
+
+```csharp
+using var engine = new CedarEngine();
+var run = await client.StartAgentRunAsync(agent, new AgentRunOptions
+{
+    CertificateId = certId, Activity = "support-session",
+    ControlSet = AgentPolicy.ControlSetFromDocument(controlSetBytes),
+    Enforcement = new AgentEnforcement(engine) { OnEvent = e => log.Information("guard {Kind} {Reason}", e.Kind, e.Reason) },
+});
+
+try
+{
+    // Begins the call; runs the tool only if the guard allows it; seals its result.
+    byte[] result = await run.InvokeToolAsync("payments.refund", argsJson, ct => RefundAsync(argsJson, ct), consequential: true);
+}
+catch (PolicyDeniedException denied)   // denied.Reason, .Rules, .Tool, .UseId, .Seq, .Record, .Halted
+{
+    // The tool did not run. A retry is a new call (a new use id): e.g. after a human approves exactly this call
+    // with RecordBoundApprovalAsync(..., covers: ApprovalCovers.ForArguments("payments.refund", argsJson)).
+}
+```
+
+- **Switching it on.** A control set whose `enforcement.mode` is `enforce` requires `Enforcement`: starting
+  without one is an `ArgumentException`, before anything is sealed. With `Enforcement`, the control set is
+  validated strictly (`AgentPolicy.ValidateStrict`) before anything is sealed. With `mode: "observe"`, a v1
+  control set or no policy control set, the guard never denies or halts and seals nothing; matching rules are
+  only reported to `OnEvent` (kind `observed`, naming the tool on a `tool_call` or `tool_result`), as are
+  `effect: observe` (shadow) rules in enforce mode. The producer's own `run_end` is not evaluated. In observe mode
+  an engine that fails at start raises a `PolicyEngineException` before anything is sealed; later failures are silent.
+- **A denied call.** `BeginToolCallAsync`, `RecordToolCallAsync` and `InvokeToolAsync` raise
+  `PolicyDeniedException` after the call and its record (and the halt, when it halts) are sealed. No `ToolCall`
+  is returned, and a result for that use id is refused.
+- **A halt.** A `halt` rule, `haltAfterDenials`, or an engine that fails halts the run. The recording call that
+  caused it raises `RunHaltedException`; so does every later recording call (a call allowed just before the halt is
+  not started: `BeginToolCallAsync`, `RecordToolCallAsync` and `InvokeToolAsync` raise it too), and `ModelCallHandler` sends no
+  further model call. In an enforced run `ModelCallHandler` also raises a failure to record a model call (after `onError`)
+  and sends nothing once the run is broken or finished. `IsHalted` is true and `HaltedToken` is cancelled: pass it to the agent's other work.
+  `FinishAsync` returns the halted run's bundle without sealing anything. A `halt` rule on `delegation` hands out
+  no delegation at all.
+- **A refused start.** A locked configuration that differs, or an engine that cannot load, refuses the start:
+  `StartAsync` raises `StartRefusedException`; its `Run` is the closed run (Control Artifact, `run_start`, the
+  record, the halted `run_end`).
+- **Callbacks.** `OnEvent` runs after the evidence is sealed, outside the run's lock, in seal order, and before
+  the exception reaches the caller. A failing callback never breaks the run or hides a denial (it becomes the
+  denial's inner exception).
+- **Nothing leaves.** Records, messages and events name the tool alias, use id, rule ids, reason and seq only;
+  never arguments, results or definitions. The engine sees facts and the control set, not content.
+
+Three runnable examples are in [`examples/Sigill.Sdk.Examples`](examples/Sigill.Sdk.Examples) (scripted agents,
+no model calls, under the example's own control set): `loop`, an agent that keeps retrying a forbidden call until
+the run is halted; `graph`, two branches recording concurrently on one run (one denied, one finishing) and a
+delegated child run; `approval`, a call denied, approved with `covers`, retried and allowed. Each prints what the
+guard decided and the verification of the run with the engine:
+
+```sh
+SIGILL_API_KEY=… SIGILL_CERTIFICATE_ID=… dotnet run --project examples/Sigill.Sdk.Examples -- loop
+# SIGILL_BASE_URL selects another endpoint; SIGILL_CA_BUNDLE (a PEM file) makes only that CA trusted for it.
+```
+
+**What enforcement does and does not show.**
+
+- Enforcement is done by the producer's own SDK, in the producer's process. The evidence shows what that guard
+  decided; it cannot show that a producer did not bypass it.
+- A stop means the SDK refused the call, not that the tool could not be reached another way.
+- That a denied tool did not run is not proven by the evidence: the evidence shows that the call was denied
+  and that no result was recorded for it.
+- Anyone with the control set and the signed events can recompute each decision with the Cedar core named in
+  the record — except a record with reason `unavailable` (the engine failed), which cannot be recomputed.
+- A tool that is already executing when another event halts the run is not stopped by the SDK; its result is not sealed.
+- Model calls the SDK cannot recognise or parse are not recorded, so no rule sees them.
+- The run's state is checked once more after the call's callbacks have run and, in `InvokeToolAsync`, immediately before
+  the function is called; a halt sealed by another thread after that check does not stop the function.
+- An engine that does not answer holds the run: there is no timeout on a decision.
+- A child run is refused after its parent halted only when it is started from the delegation object the parent
+  returned in the same process.
 
 ## Error handling
 

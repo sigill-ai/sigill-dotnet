@@ -396,7 +396,7 @@ public static class AgentRunTreeVerifier
                 var closed = Closed(e.ParentCorrelationId);
                 if (closed is null)
                     openReasons.Add(new AgentRunTreeFinding("delegation_pending", $"{e.ParentCorrelationId} → {e.ChildCorrelationId}: no result yet."));
-                else if (closed is "aborted" or "failed")
+                else if (closed is "aborted" or "failed" or "halted") // a halted run counts as aborted (agent-enforcement-v1.md §3.6)
                     openReasons.Add(new AgentRunTreeFinding("parent_terminated",
                         $"{e.ParentCorrelationId} closed {closed} with {e.ChildCorrelationId} unresolved: parent terminated; evidence incomplete."));
             }

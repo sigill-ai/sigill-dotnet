@@ -16,7 +16,7 @@ namespace Sigill.Sdk.Internal;
 /// Validation against the Agent Evidence Profiles v1 JSON Schemas, embedded
 /// from <c>spec/*.schema.json</c>. Implements exactly the keywords those
 /// schemas use (type, required, properties, additionalProperties, const,
-/// enum, items, minItems, minLength, minimum, maximum, pattern, format, allOf, anyOf,
+/// enum, items, minItems, maxItems, uniqueItems, minLength, maxLength, minimum, maximum, pattern, format, allOf, anyOf,
 /// not, if/then/else, contains/minContains/maxContains, local $ref); a schema
 /// using anything else is rejected at load time rather than silently
 /// half-checked. Messages match the Python SDK byte for byte; the agent-run
@@ -30,6 +30,7 @@ internal static class EnvelopeSchema
         [AgentProfiles.ExecutionEvidenceSchema] = "Sigill.Sdk.agent-execution-evidence-v1.schema.json",
         [AgentProfiles.ExecutionEvidenceSchemaV2] = "Sigill.Sdk.agent-execution-evidence-v2.schema.json",
         [AgentProfiles.ExecutionEvidenceSchemaV3] = "Sigill.Sdk.agent-execution-evidence-v3.schema.json",
+        [AgentProfiles.ExecutionEvidenceSchemaV4] = "Sigill.Sdk.agent-execution-evidence-v4.schema.json",
         [AgentProfiles.ControlEvaluationSchema] = "Sigill.Sdk.control-evaluation-v1.schema.json",
         [AgentProfiles.ControlEvaluationSchemaV2] = "Sigill.Sdk.control-evaluation-v2.schema.json",
     };
@@ -37,17 +38,18 @@ internal static class EnvelopeSchema
     private static readonly HashSet<string> Supported = new(StringComparer.Ordinal)
     {
         "$schema", "$id", "$defs", "$ref", "title", "description", "type", "required", "properties",
-        "additionalProperties", "const", "enum", "items", "minItems", "minLength", "minimum", "maximum", "pattern", "format",
-        "allOf", "anyOf", "not", "if", "then", "else", "contains", "minContains", "maxContains",
+        "additionalProperties", "const", "enum", "items", "minItems", "maxItems", "uniqueItems", "minLength", "maxLength",
+        "minimum", "maximum", "pattern", "format", "allOf", "anyOf", "not", "if", "then", "else", "contains", "minContains", "maxContains",
     };
 
     private static readonly Regex Ident = new("^[A-Za-z_][A-Za-z0-9_]*$", RegexOptions.CultureInvariant);
+    // \z, never $: `$` also matches before a final newline (ECMA-262 does not).
     private static readonly Regex Uuid = new(
-        "^(urn:uuid:)?[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$", RegexOptions.CultureInvariant);
+        @"^(urn:uuid:)?[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\z", RegexOptions.CultureInvariant);
     private static readonly Regex UriReference = new(
-        @"^([A-Za-z0-9\-._~:/?#\[\]@!$&'()*+,;=]|%[0-9A-Fa-f]{2})*$", RegexOptions.CultureInvariant);
+        @"^([A-Za-z0-9\-._~:/?#\[\]@!$&'()*+,;=]|%[0-9A-Fa-f]{2})*\z", RegexOptions.CultureInvariant);
     private static readonly Regex DateTimePattern = new(
-        @"^\d{4}-\d{2}-\d{2}[Tt]\d{2}:\d{2}:\d{2}(\.\d+)?([Zz]|[+-]\d{2}:\d{2})$", RegexOptions.CultureInvariant);
+        @"^[0-9]{4}-[0-9]{2}-[0-9]{2}[Tt][0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]+)?([Zz]|[+-][0-9]{2}:[0-9]{2})\z", RegexOptions.CultureInvariant);
 
     private static readonly Dictionary<string, Lazy<JsonObject>> Schemas = Resources.ToDictionary(
         kv => kv.Key, kv => new Lazy<JsonObject>(() => Load(kv.Value)), StringComparer.Ordinal);
@@ -76,14 +78,24 @@ internal static class EnvelopeSchema
                 foreach (var sub in list.OfType<JsonObject>()) CheckKeywords(sub);
     }
 
-    /// <summary>RFC 3339 date-time; fractional seconds of any length.</summary>
+    /// <summary>
+    /// RFC 3339 date-time; fractional seconds of any length, TRUNCATED to microseconds (never rounded: DateTimeOffset
+    /// rounds beyond 7 digits, and both SDKs must compare the same instants). Offsets beyond ±14:00 are refused.
+    /// </summary>
     internal static bool TryParseDateTime(string? s, out DateTimeOffset value)
     {
         value = default;
-        return s is not null && DateTimePattern.IsMatch(s)
-            && DateTimeOffset.TryParse(s, CultureInfo.InvariantCulture,
-                DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out value);
+        if (s is null || DateTimePattern.Match(s) is not { Success: true } m) return false;
+        var fraction = m.Groups[1]; // ".ddd…"
+        if (fraction.Length > 7) s = s.Remove(fraction.Index + 7, fraction.Length - 7);
+        return DateTimeOffset.TryParse(s, CultureInfo.InvariantCulture,
+            DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out value);
     }
+
+    /// <summary>A schema <c>pattern</c> with its final <c>$</c> as <c>\z</c>: the end of the string, not before a final newline.</summary>
+    private static string EndAnchored(string pattern) =>
+        pattern.EndsWith("$", StringComparison.Ordinal) && !pattern.EndsWith(@"\$", StringComparison.Ordinal)
+            ? pattern.Substring(0, pattern.Length - 1) + @"\z" : pattern;
 
     /// <summary>A UUID; the <c>urn:uuid:</c> form is accepted (common rules §1).</summary>
     internal static bool IsUuid(string? s) => s is not null && Uuid.IsMatch(s);
@@ -190,7 +202,10 @@ internal static class EnvelopeSchema
         {
             if (AgentProfiles.Int(schema["minLength"]) is int minLength && s.Length < minLength)
                 errs.Add($"{Label(path)} is shorter than {minLength}");
-            if (AgentProfiles.Str(schema["pattern"]) is { } pattern && !Regex.IsMatch(s, pattern, RegexOptions.CultureInvariant))
+            // JSON Schema counts characters (code points), not UTF-16 units.
+            if (AgentProfiles.Int(schema["maxLength"]) is int maxLength && s.Length - s.Count(char.IsLowSurrogate) > maxLength)
+                errs.Add($"{Label(path)} is longer than {maxLength}");
+            if (AgentProfiles.Str(schema["pattern"]) is { } pattern && !Regex.IsMatch(s, EndAnchored(pattern), RegexOptions.CultureInvariant))
                 errs.Add($"{Label(path)} does not match {pattern}");
             if (AgentProfiles.Str(schema["format"]) is { } format && !FormatOk(s, format))
                 errs.Add($"{Label(path)} is not a valid {format}");
@@ -209,6 +224,15 @@ internal static class EnvelopeSchema
         {
             if (AgentProfiles.Int(schema["minItems"]) is int minItems && arr.Count < minItems)
                 errs.Add($"{Label(path)} must have at least {minItems} item{(minItems == 1 ? "" : "s")}");
+            var maxItems = AgentProfiles.Int(schema["maxItems"]);
+            var tooMany = maxItems is int cap && arr.Count > cap;
+            if (tooMany) errs.Add($"{Label(path)} must have at most {maxItems} item{(maxItems == 1 ? "" : "s")}");
+            // Skipped past maxItems, and linear: canonical forms through a set.
+            if (!tooMany && AgentProfiles.IsTrue(schema["uniqueItems"]))
+            {
+                var seen = new HashSet<string>(StringComparer.Ordinal);
+                if (!arr.All(x => seen.Add(CanonicalText(x)))) errs.Add($"{Label(path)} has non-unique items");
+            }
             if (schema["items"] is JsonObject items)
                 for (var i = 0; i < arr.Count; i++)
                     Validate(arr[i], items, root, path.Length == 0 ? $"[{i}]" : $"{path}[{i}]", errs);
@@ -248,6 +272,15 @@ internal static class EnvelopeSchema
             var branch = IsValid(instance, cond, root) ? schema["then"] : schema["else"];
             if (branch is JsonObject b) Validate(instance, b, root, path, errs);
         }
+    }
+
+    /// <summary>The item's JCS form, so equal values compare equal (1, 1.0 and 1e0 are one number), as the Python port does.</summary>
+    private static string CanonicalText(JsonNode? node)
+    {
+        var text = node?.ToJsonString() ?? "null";
+        // Wrapped in an array: the canonicalizer takes a document, and a bare scalar is canonicalised as a nested value.
+        try { return System.Text.Encoding.UTF8.GetString(JsonCanonicalizer.Canonicalize("[" + text + "]")); }
+        catch (Exception ex) when (ex is JsonException or SigillCanonicalizationException or ArgumentException or InvalidOperationException) { return text; }
     }
 
     private static bool IsValid(JsonNode? instance, JsonObject schema, JsonObject root)

@@ -1,4 +1,4 @@
-# Seal the package exactly as nuget.org serves it. nuget.org adds a repository
+# Seal the packages exactly as nuget.org serves them. nuget.org adds a repository
 # signature inside every .nupkg, so its bytes differ from the package built in
 # publish.yml (sealed there). Called after every publish; can also be run by
 # hand for a release published before releases were sealed automatically —
@@ -24,33 +24,54 @@ jobs:
       id-token: write
       contents: write
     steps:
-      - name: Download the package from nuget.org
+      - name: Download the packages from nuget.org
         env:
           VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
           v="${VERSION#v}"
-          url="https://api.nuget.org/v3-flatcontainer/sigill.sdk/$v/sigill.sdk.$v.nupkg"
+          # The version is part of the download path and the file names: canonical only (as publish.yml releases).
+          if ! printf '%s' "$v" | grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9a-z]+(\.[0-9a-z]+)*)?$'; then
+            echo "::error::$VERSION is not a canonical version: MAJOR.MINOR.PATCH, optionally -prerelease in lower case, no build metadata"
+            exit 1
+          fi
           mkdir -p nuget.org
-          for i in $(seq 1 60); do
-            curl -fsSL "$url" -o "nuget.org/Sigill.Sdk.$v.nupkg" && break
-            echo "not on nuget.org yet ($i/60)"; sleep 30
+          for id in Sigill.Sdk Sigill.Sdk.Policy; do
+            # Sigill.Sdk.Policy is published from 0.14.0 on; an older release has only Sigill.Sdk.
+            if [ "$id" = Sigill.Sdk.Policy ] && [ "$(printf '%s\n' 0.14.0 "$v" | sort -V | head -n1)" != 0.14.0 ]; then
+              echo "$id: not published for $v (first release 0.14.0)"; continue
+            fi
+            lid=$(echo "$id" | tr '[:upper:]' '[:lower:]')
+            url="https://api.nuget.org/v3-flatcontainer/$lid/$v/$lid.$v.nupkg"
+            # Download beside the sealed folder and move in only a complete transfer: a failed curl can leave a
+            # partial file, which must never be sealed as "the package nuget.org serves".
+            part=$(mktemp)
+            ok=
+            for i in $(seq 1 60); do
+              if curl -fsSL "$url" -o "$part"; then ok=1; break; fi
+              : > "$part"
+              echo "$id not on nuget.org yet ($i/60)"; sleep 30
+            done
+            if [ -z "$ok" ]; then echo "::error::$id $v could not be downloaded from nuget.org"; exit 1; fi
+            unzip -tq "$part" >/dev/null   # a .nupkg is a zip: refuse a truncated or damaged one
+            mv "$part" "nuget.org/$id.$v.nupkg"
+            sha256sum "nuget.org/$id.$v.nupkg"
           done
-          test -s "nuget.org/Sigill.Sdk.$v.nupkg"
-          sha256sum "nuget.org/Sigill.Sdk.$v.nupkg"
       - uses: sigill-ai/evidence-action@29c7582a2072557734f1d566abeaf292462ce46b # v1.1.0
         with:
           files: nuget.org/*.nupkg
           mode: seal
           pqc: true
           qualified: true
-      - name: Attach the seal to the GitHub release
+      - name: Attach the seals to the GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
           v="${VERSION#v}"
-          cp "nuget.org/Sigill.Sdk.$v.nupkg.p7s" "Sigill.Sdk.$v.nuget-org.nupkg.p7s"
+          for f in nuget.org/*.nupkg; do
+            cp "$f.p7s" "$(basename "$f" .nupkg).nuget-org.nupkg.p7s"
+          done
           gh release view "v$v" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || gh release create "v$v" --verify-tag --generate-notes --repo "$GITHUB_REPOSITORY"
-          gh release upload "v$v" "Sigill.Sdk.$v.nuget-org.nupkg.p7s" --clobber --repo "$GITHUB_REPOSITORY"
+          gh release upload "v$v" ./*.nuget-org.nupkg.p7s --clobber --repo "$GITHUB_REPOSITORY"

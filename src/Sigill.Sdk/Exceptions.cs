@@ -14,6 +14,120 @@ public class SigillException : Exception
 }
 
 /// <summary>
+/// A policy engine (<see cref="IPolicyEngine"/>) could not be loaded, or could not answer a call (for example a trap
+/// inside the engine, or its memory limit reached). A call the engine answers with <c>"type": "failure"</c> is an answer,
+/// not this exception, except that <see cref="AgentPolicy.Evaluate"/> raises it for one, with <see cref="Refused"/> set.
+/// </summary>
+public sealed class PolicyEngineException : SigillException
+{
+    public PolicyEngineException(string message) : base(message) { }
+    public PolicyEngineException(string message, Exception inner) : base(message, inner) { }
+
+    /// <summary>A request refused by the engine: <see cref="Refused"/> is true.</summary>
+    public PolicyEngineException(string message, bool refused) : base(message) => Refused = refused;
+
+    /// <summary>
+    /// True when the engine answered and refused a request (<c>type: failure</c>, raised by <see cref="AgentPolicy.Evaluate"/>):
+    /// the policy or request cannot be evaluated at all. False for a trap, a load failure or any other failure of the engine.
+    /// </summary>
+    public bool Refused { get; }
+}
+
+/// <summary>
+/// The guard denied a tool call (<c>spec/agent-policy-control-set-v2.md</c> §7.2): the <c>tool_call</c> and the enforcement
+/// record are sealed, and so is <c>run_end</c> when the denial halts the run. Do not run the tool; a retry is a new call with
+/// a new use id. Raised after the evidence is sealed; an <see cref="AgentEnforcement.OnEvent"/> or
+/// <see cref="AgentRunOptions.OnArtifactSealed"/> failure is its <see cref="Exception.InnerException"/>.
+/// </summary>
+public sealed class PolicyDeniedException : SigillException
+{
+    internal PolicyDeniedException(string reason, IReadOnlyList<string> rules, string tool, string useId, int seq, AgentRunArtifact record,
+        bool halted, Exception? inner)
+        : base($"The policy denied the call of tool '{tool}' (use_id '{useId}', seq {seq}): {EnforcementText.Describe(reason, rules)}"
+            + (halted ? "; the run is halted." : "."), inner!)
+    {
+        Reason = reason;
+        Rules = rules;
+        Tool = tool;
+        UseId = useId;
+        Seq = seq;
+        Record = record;
+        Halted = halted;
+    }
+
+    /// <summary><c>rule</c>, <c>rule_error</c>, <c>unknown_tool</c>, <c>tool_changed</c> or <c>unavailable</c>.</summary>
+    public string Reason { get; }
+
+    /// <summary>The record's rule ids (empty unless the reason is <c>rule</c> or <c>rule_error</c>).</summary>
+    public IReadOnlyList<string> Rules { get; }
+
+    public string Tool { get; }
+    public string UseId { get; }
+
+    /// <summary>The seq of the denied <c>tool_call</c>.</summary>
+    public int Seq { get; }
+
+    /// <summary>The sealed enforcement record.</summary>
+    public AgentRunArtifact Record { get; }
+
+    /// <summary>The denial also halted the run.</summary>
+    public bool Halted { get; }
+}
+
+/// <summary>
+/// The run is halted (<c>spec/agent-policy-control-set-v2.md</c> §7): raised by the recording call whose event the guard
+/// halted the run after, once the record and <c>run_end</c> are sealed, and by every later recording call. The properties name
+/// the decision that halted the run. <see cref="AgentRun.FinishAsync"/> still returns the bundle.
+/// </summary>
+public sealed class RunHaltedException : SigillException
+{
+    internal RunHaltedException(string reason, IReadOnlyList<string> rules, int seq, AgentRunArtifact record, Exception? inner = null)
+        : base($"The policy halted the run at seq {seq}: {EnforcementText.Describe(reason, rules)}.", inner!)
+    {
+        Reason = reason;
+        Rules = rules;
+        Seq = seq;
+        Record = record;
+    }
+
+    public string Reason { get; }
+    public IReadOnlyList<string> Rules { get; }
+
+    /// <summary>The seq of the event the run was halted after.</summary>
+    public int Seq { get; }
+
+    /// <summary>The sealed enforcement record.</summary>
+    public AgentRunArtifact Record { get; }
+}
+
+/// <summary>
+/// The guard refused to start the run (<c>spec/agent-policy-control-set-v2.md</c> §7.4): the Control Artifact,
+/// <c>run_start</c>, the enforcement record and a halted <c>run_end</c> are sealed. <see cref="Run"/> is the closed run.
+/// </summary>
+public sealed class StartRefusedException : SigillException
+{
+    internal StartRefusedException(string reason, IReadOnlyList<string> rules, AgentRun run, Exception? inner)
+        : base($"The policy refused the start of the run: reason {reason}.", inner!)
+    {
+        Reason = reason;
+        Run = run;
+    }
+
+    /// <summary><c>configuration_locked</c>, <c>unavailable</c> or <c>rule</c> (a halt rule on <c>run_start</c>).</summary>
+    public string Reason { get; }
+
+    /// <summary>The halted run; <see cref="AgentRun.FinishAsync"/> or <see cref="AgentRun.ToBundle"/> gives its bundle.</summary>
+    public AgentRun Run { get; }
+}
+
+internal static class EnforcementText
+{
+    /// <summary>The reason and rule ids of a decision (the Python port's text): never arguments, results or definitions.</summary>
+    public static string Describe(string reason, IReadOnlyList<string> rules) =>
+        $"reason {reason}" + (rules.Count > 0 ? $", rules {string.Join(", ", rules)}" : "");
+}
+
+/// <summary>
 /// The envelope cannot be canonicalized. Typical causes: input contains values
 /// JCS rejects (NaN, Infinity), the top-level value is not an object, or the
 /// JSON is malformed.
