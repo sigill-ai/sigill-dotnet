@@ -34,7 +34,7 @@ jobs:
     needs: test
     runs-on: ubuntu-latest
     permissions:
-      id-token: write   # GitHub OIDC token, exchanged for a short-lived Sigill token
+      id-token: write   # GitHub OIDC tokens: one exchanged for a short-lived Sigill token, one for the nuget.org key
       contents: write   # GitHub release + assets
     steps:
       - uses: actions/checkout@v4
@@ -57,13 +57,22 @@ jobs:
           mode: seal
           pqc: true
           qualified: true
+      # Trusted publishing: nuget.org exchanges this job's GitHub OIDC token for an API key that lives one hour
+      # (the policy on nuget.org names this repository and this workflow file). No stored secret.
+      - name: NuGet login
+        id: nuget-login
+        uses: NuGet/login@8d196754b4036150537f80ac539e15c2f1028841 # v1.2.0
+        with:
+          user: sigill-ai   # the nuget.org profile that owns the packages
       - name: Push
         # Sigill.Sdk first: Sigill.Sdk.Policy depends on it at the same version.
+        env:
+          NUGET_API_KEY: ${{ steps.nuget-login.outputs.NUGET_API_KEY }}
         run: |
           v="${GITHUB_REF_NAME#v}"
           for id in Sigill.Sdk Sigill.Sdk.Policy; do
-            dotnet nuget push "./artifacts/$id.$v.nupkg" --api-key ${{ secrets.NUGET_ORG }} --source https://api.nuget.org/v3/index.json --skip-duplicate
-            dotnet nuget push "./artifacts/$id.$v.snupkg" --api-key ${{ secrets.NUGET_ORG }} --source https://api.nuget.org/v3/index.json --skip-duplicate
+            dotnet nuget push "./artifacts/$id.$v.nupkg" --api-key "$NUGET_API_KEY" --source https://api.nuget.org/v3/index.json --skip-duplicate
+            dotnet nuget push "./artifacts/$id.$v.snupkg" --api-key "$NUGET_API_KEY" --source https://api.nuget.org/v3/index.json --skip-duplicate
           done
       - name: GitHub release with the packages and their seals
         env:
