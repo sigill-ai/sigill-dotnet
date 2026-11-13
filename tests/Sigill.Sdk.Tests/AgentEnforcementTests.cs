@@ -234,8 +234,19 @@ public class PolicyEnforcementVectorTests
 
 public partial class AgentRunTests
 {
+    // Vector 13's control set in observe mode: an enforcing control set needs the guard (AgentGuardTests).
     private static AgentRunOptions PolicyV2Options() =>
-        Options() with { ControlSet = AgentPolicy.ControlSetFromDocument(PolicyControlSetV2VectorTests.Doc) };
+        Options() with { ControlSet = AgentPolicy.ControlSetFromDocument(ObserveV2Doc) };
+
+    internal static byte[] ObserveV2Doc
+    {
+        get
+        {
+            var doc = JsonNode.Parse(PolicyControlSetV2VectorTests.Doc)!.AsObject();
+            doc["enforcement"]!["mode"] = "observe";
+            return Encoding.UTF8.GetBytes(doc.ToJsonString());
+        }
+    }
 
     private static readonly byte[] RefundArgs = Encoding.UTF8.GetBytes("""{"amount":120,"order":"o-1"}""");
 

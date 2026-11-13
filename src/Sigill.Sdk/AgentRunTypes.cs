@@ -240,7 +240,41 @@ public sealed record AgentRunOptions
     /// usable.
     /// </summary>
     public Func<AgentRunArtifact, CancellationToken, Task>? OnArtifactSealed { get; init; }
+
+    /// <summary>
+    /// The guard (<c>spec/agent-policy-control-set-v2.md</c> §7): a policy engine that decides each event before the agent
+    /// acts on it. Required when the control set is a v2 policy control set with <c>enforcement.mode: "enforce"</c>; the run
+    /// then denies tool calls (<see cref="PolicyDeniedException"/>) and halts (<see cref="RunHaltedException"/>), each decision
+    /// sealed as evidence. With any other control set the guard never denies or halts and only reports the rules that match
+    /// (<see cref="AgentEnforcement.OnEvent"/>). Given a policy control set, it is validated strictly before anything is sealed.
+    /// </summary>
+    public AgentEnforcement? Enforcement { get; init; }
 }
+
+/// <summary>Switches the guard on for a run (<see cref="AgentRunOptions.Enforcement"/>).</summary>
+public sealed class AgentEnforcement
+{
+    /// <param name="engine">The Cedar engine the guard evaluates with, e.g. <c>Sigill.Sdk.Policy.CedarEngine</c>.</param>
+    public AgentEnforcement(IPolicyEngine engine) => Engine = engine ?? throw new ArgumentNullException(nameof(engine));
+
+    public IPolicyEngine Engine { get; }
+
+    /// <summary>
+    /// Called for each decision, after its evidence is sealed and before an exception reaches the recording call: outside the
+    /// run's lock, in seal order. A failing callback never breaks the run or hides a denial (the denial carries the failure as
+    /// its inner exception); after an allowed event it propagates as an <see cref="AgentRunOptions.OnArtifactSealed"/> failure does.
+    /// </summary>
+    public Action<EnforcementEvent>? OnEvent { get; init; }
+}
+
+/// <summary>One decision of the guard. Never carries arguments, results or definitions.</summary>
+/// <param name="Kind"><c>denied</c>, <c>halted</c> (a denial or a halt rule stopped the run), <c>start_refused</c> or <c>observed</c> (rules matched; nothing was sealed).</param>
+/// <param name="Reason">The enforcement record's reason (<c>rule</c>, <c>rule_error</c>, <c>unknown_tool</c>, <c>tool_changed</c>, <c>unavailable</c>, <c>configuration_locked</c>); null for <c>observed</c>.</param>
+/// <param name="Rules">The record's rule ids; for <c>observed</c>, the rules that matched.</param>
+/// <param name="Tool">The tool of the decided <c>tool_call</c>, when the decision names one.</param>
+/// <param name="UseId">Its <c>useId</c>.</param>
+/// <param name="Seq">The seq of the decided event.</param>
+public sealed record EnforcementEvent(string Kind, string? Reason, IReadOnlyList<string> Rules, string? Tool, string? UseId, int Seq);
 
 /// <summary>
 /// One delegation edge as the parent sealed it (<c>spec/agent-delegation-v1.md</c> §2): what a child run

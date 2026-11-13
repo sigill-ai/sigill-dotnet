@@ -438,17 +438,7 @@ public static class AgentPolicy
         if (v2 && !JsonNode.DeepEquals(f["entities"], entities))
             throw new ArgumentException("The facts carry other entities than the control set.", nameof(facts));
 
-        var policies = (JsonObject)rules.DeepClone();
-        policies[BaselinePermit] = new JsonObject
-        {
-            ["effect"] = "permit", ["principal"] = new JsonObject { ["op"] = "All" }, ["action"] = new JsonObject { ["op"] = "All" },
-            ["resource"] = new JsonObject { ["op"] = "All" }, ["conditions"] = new JsonArray(),
-        };
-        var call = new JsonObject
-        {
-            ["schema"] = CedarSchema(v2), ["validateRequest"] = true, ["policies"] = new JsonObject { ["staticPolicies"] = policies },
-            ["entities"] = v2 ? entities.DeepClone() : new JsonArray(),
-        };
+        var call = AuthorizeCall(doc);
         var ids = rules.Select(kv => kv.Key).ToList();
         var results = ids.ToDictionary(id => id, _ => (Result: "PASS", Where: new List<string>()), StringComparer.Ordinal);
         void Mark(string id, string result, string where)
@@ -462,18 +452,12 @@ public static class AgentPolicy
         {
             var seq = Seq(request!["seq"])!;
             foreach (var member in new[] { "principal", "action", "resource", "context" }) call[member] = request?[member]?.DeepClone();
-            var answer = engine.Authorize(call);
-            if (AgentProfiles.Str(answer["type"]) == "failure")
-                throw new PolicyEngineException($"The policy engine refused request {seq}: {FailureMessages(answer)}", refused: true);
+            var answer = engine.Authorize((JsonObject)call.DeepClone()); // its own copy: an engine that changes it changes no later request
+            if (AgentProfiles.Str(answer?["type"]) == "failure")
+                throw new PolicyEngineException($"The policy engine refused request {seq}: {FailureMessages(answer!)}", refused: true);
             // Anything else that is not a well-formed success is the engine's fault, not a refusal.
-            if (AgentProfiles.Str(answer["type"]) != "success" || answer["response"]?["diagnostics"] is not JsonObject { } diagnostics
-                || diagnostics["reason"] is not JsonArray reasonIds || diagnostics["errors"] is not JsonArray errorList
-                || reasonIds.Any(id => AgentProfiles.Str(id) is null) || errorList.Any(e => AgentProfiles.Str((e as JsonObject)?["policyId"]) is null))
+            if (!TryDiagnostics(answer, out var reason, out var erring))
                 throw new PolicyEngineException("The policy engine's answer is not an isAuthorized answer.");
-            var reason = reasonIds.Select(id => AgentProfiles.Str(id)!)
-                .Where(id => id != BaselinePermit).OrderBy(id => id, StringComparer.Ordinal).ToList();
-            var erring = errorList.Select(e => AgentProfiles.Str(e!["policyId"])!)
-                .OrderBy(id => id, StringComparer.Ordinal).ToList();
             foreach (var id in erring) Mark(id, "INDETERMINATE", seq);
             foreach (var id in reason) Mark(id, "FAIL", seq);
             answered.Add(new PolicyRequestResult(seq, reason.AsReadOnly(), erring.AsReadOnly()));
@@ -482,6 +466,43 @@ public static class AgentPolicy
             : new PolicyRuleResult(id, results[id].Result, results[id].Where.AsReadOnly())).ToList();
         var overall = controls.Select(c => c.Result).Aggregate("PASS", (a, b) => ResultRank[b] > ResultRank[a] ? b : a);
         return new PolicyEvaluationResult("cedar-policy@" + engine.Version, controls.AsReadOnly(), overall, answered.AsReadOnly());
+    }
+
+    /// <summary>
+    /// The <c>isAuthorized</c> call of a valid policy control set without its request (v1 §4 rule 1, v2 §8): the schema of its
+    /// version, its rules plus the evaluator's baseline permit, and (v2) its <c>cedar.entities</c>.
+    /// </summary>
+    internal static JsonObject AuthorizeCall(JsonObject doc)
+    {
+        var v2 = doc.ContainsKey("schemaVersion");
+        var policies = (JsonObject?)doc["cedar"]?["policies"]?["staticPolicies"]?.DeepClone() ?? new JsonObject();
+        policies[BaselinePermit] = new JsonObject
+        {
+            ["effect"] = "permit", ["principal"] = new JsonObject { ["op"] = "All" }, ["action"] = new JsonObject { ["op"] = "All" },
+            ["resource"] = new JsonObject { ["op"] = "All" }, ["conditions"] = new JsonArray(),
+        };
+        return new JsonObject
+        {
+            ["schema"] = CedarSchema(v2), ["validateRequest"] = true, ["policies"] = new JsonObject { ["staticPolicies"] = policies },
+            ["entities"] = v2 ? (doc["cedar"]?["entities"] ?? new JsonArray()).DeepClone() : new JsonArray(),
+        };
+    }
+
+    /// <summary>
+    /// The rules of a well-formed <c>isAuthorized</c> success: <paramref name="reason"/> without the baseline permit and
+    /// <paramref name="errors"/>, each sorted by code unit. False for a refusal (<c>type: failure</c>) or anything else, including a
+    /// <c>decision</c> other than <c>deny</c> exactly when a rule matched and <c>allow</c> otherwise (the baseline permit is in every call).
+    /// </summary>
+    internal static bool TryDiagnostics(JsonObject? answer, out List<string> reason, out List<string> errors)
+    {
+        reason = errors = new List<string>();
+        if (AgentProfiles.Str(answer?["type"]) != "success" || (answer!["response"] as JsonObject)?["diagnostics"] is not JsonObject { } diagnostics
+            || diagnostics["reason"] is not JsonArray reasonIds || diagnostics["errors"] is not JsonArray errorList
+            || reasonIds.Any(id => AgentProfiles.Str(id) is null) || errorList.Any(e => AgentProfiles.Str((e as JsonObject)?["policyId"]) is null))
+            return false;
+        reason = reasonIds.Select(id => AgentProfiles.Str(id)!).Where(id => id != BaselinePermit).OrderBy(id => id, StringComparer.Ordinal).ToList();
+        errors = errorList.Select(e => AgentProfiles.Str(e!["policyId"])!).OrderBy(id => id, StringComparer.Ordinal).ToList();
+        return AgentProfiles.Str(answer["response"]!["decision"]) == (reason.Count > 0 ? "deny" : "allow");
     }
 
     /// <summary>The messages of a <c>type: failure</c> answer (or of anything that is not a success).</summary>
@@ -573,46 +594,10 @@ public static class AgentPolicy
         var isChildRun = bySeq.TryGetValue(0, out var first) && StepType(first) == "run_start"
             && AgentProfiles.Str(first["binds"]?["parentCorrelationId"]) is { Length: > 0 };
         var requests = new JsonArray();
-        var consequentialCount = 0;
-        var sawApproval = false;
-        var approvals = v2 ? ToolCallApprovals(prefix, digests!) : null;
-        var callsByTool = new Dictionary<string, int>(StringComparer.Ordinal);
-        int toolCalls = 0, denials = 0;
+        var state = new FactsState(agentId, v2, isChildRun);
         foreach (var (seq, e) in prefix)
-        {
-            var type = StepType(e);
-            var consequential = Consequential(e);
-            if (consequential) consequentialCount++;
-            var context = Context(consequential, Tool(e, "operation") ?? "", seq, sawApproval ? "unbound" : "none",
-                isChildRun, 0, consequentialCount, 0);
-            if (v2)
-            {
-                // v2 §8: counters up to and including this seq; denials strictly before it.
-                // An absent tool name equals nothing: such a call counts in toolCallsSoFar only, and its callsOfThisTool is 0.
-                var name = Tool(e, "name");
-                if (type == "tool_call")
-                {
-                    toolCalls++;
-                    if (name is not null) callsByTool[name] = (callsByTool.TryGetValue(name, out var c) ? c : 0) + 1;
-                    context["approval"] = approvals![seq];
-                }
-                context["toolCallsSoFar"] = toolCalls;
-                context["callsOfThisTool"] = type is "tool_call" or "tool_result" && name is not null && callsByTool.TryGetValue(name, out var n) ? n : 0;
-                context["denialsSoFar"] = denials;
-                if (IsEnforcementRecord(e)) denials++;
-            }
-            requests.Add(new JsonObject
-            {
-                ["seq"] = seq,
-                ["principal"] = Principal(),
-                ["action"] = new JsonObject { ["type"] = "Action", ["id"] = type },
-                ["resource"] = type is "tool_call" or "tool_result"
-                    ? new JsonObject { ["type"] = "Tool", ["id"] = Tool(e, "name") ?? "" }
-                    : new JsonObject { ["type"] = "Step", ["id"] = seq.ToString(System.Globalization.CultureInfo.InvariantCulture) },
-                ["context"] = context,
-            });
-            if (type == "human_approval") sawApproval = true;
-        }
+            requests.Add(state.Next(seq, e, digests is not null && digests.TryGetValue(e, out var d) ? d : null));
+        var consequentialCount = state.ConsequentialCount;
 
         var runEnd = prefix.FirstOrDefault(x => StepType(x.Env) == "run_end");
         var runLevel = runEnd.Env is not null && missing.Count == 0;
@@ -666,46 +651,91 @@ public static class AgentPolicy
         e["step"] is JsonObject step && AgentProfiles.Str(step["type"]) == "authorization" && step.ContainsKey("enforcer");
 
     /// <summary>
-    /// v2 §8.1: the <c>approval</c> of every <c>tool_call</c> of the prefix, by seq. The calls are walked in seq order and a
-    /// <c>bound</c> call consumes the lowest-seq approval that matches it, so one approval binds at most one call.
+    /// The per-event requests of the facts, one event at a time in seq order (v1 §5, v2 §8): the running counters, the
+    /// earlier approvals and those already consumed. <see cref="BuildFacts(string, string, IEnumerable{JsonObject})"/> and the
+    /// guard both use it, so the guard's request for an event is exactly the evaluator's; one event costs O(approvals).
     /// </summary>
-    private static Dictionary<int, string> ToolCallApprovals(List<(int Seq, JsonObject Env)> prefix,
-        IReadOnlyDictionary<JsonObject, IReadOnlyDictionary<string, string>> digests)
+    internal sealed class FactsState(string agentId, bool v2, bool isChildRun)
     {
-        var result = new Dictionary<int, string>();
-        var earlier = new List<(int Seq, JsonObject Step)>();
-        var consumed = new HashSet<int>();
-        foreach (var (seq, env) in prefix)
+        private readonly Dictionary<string, int> _callsByTool = new(StringComparer.Ordinal);
+        private readonly List<(int Seq, JsonObject Step)> _approvals = new(); // every earlier human_approval
+        private readonly HashSet<int> _consumed = new();
+        private int _toolCalls, _denials;
+        private bool _sawApproval;
+
+        public int ConsequentialCount { get; private set; }
+
+        /// <summary>The request of the event at <paramref name="seq"/>, with <c>seq</c>; <paramref name="digests"/> are its signed object digests.</summary>
+        public JsonObject Next(int seq, JsonObject e, IReadOnlyDictionary<string, string>? digests)
         {
-            if (env["step"] is not JsonObject step) continue;
-            var type = AgentProfiles.Str(step["type"]);
-            if (type == "human_approval") earlier.Add((seq, step));
-            if (type != "tool_call") continue;
-            var u = AgentProfiles.Str((step["tool"] as JsonObject)?["useId"]);
-            var t = AgentProfiles.Str((step["tool"] as JsonObject)?["name"]);
+            var step = e["step"] as JsonObject;
+            var type = AgentProfiles.Str(step?["type"]) ?? "";
+            var consequential = step?["consequential"] is JsonValue v && v.GetValueKind() == JsonValueKind.True;
+            var tool = step?["tool"] as JsonObject; // a non-object tool is absent
+            var name = AgentProfiles.Str(tool?["name"]);
+            if (consequential) ConsequentialCount++;
+            var context = Context(consequential, AgentProfiles.Str(tool?["operation"]) ?? "", seq, _sawApproval ? "unbound" : "none",
+                isChildRun, 0, ConsequentialCount, 0);
+            if (v2)
+            {
+                // v2 §8: counters up to and including this seq; denials strictly before it.
+                // An absent tool name equals nothing: such a call counts in toolCallsSoFar only, and its callsOfThisTool is 0.
+                if (type == "tool_call")
+                {
+                    _toolCalls++;
+                    if (name is not null) _callsByTool[name] = (_callsByTool.TryGetValue(name, out var c) ? c : 0) + 1;
+                    context["approval"] = Approval(step!, AgentProfiles.Str(tool?["useId"]), name, e, digests);
+                }
+                context["toolCallsSoFar"] = _toolCalls;
+                context["callsOfThisTool"] = type is "tool_call" or "tool_result" && name is not null && _callsByTool.TryGetValue(name, out var n) ? n : 0;
+                context["denialsSoFar"] = _denials;
+                if (IsEnforcementRecord(e)) _denials++;
+            }
+            if (type == "human_approval")
+            {
+                _sawApproval = true;
+                if (v2) _approvals.Add((seq, step!));
+            }
+            return new JsonObject
+            {
+                ["seq"] = seq,
+                ["principal"] = new JsonObject { ["type"] = "Agent", ["id"] = agentId },
+                ["action"] = new JsonObject { ["type"] = "Action", ["id"] = type },
+                ["resource"] = type is "tool_call" or "tool_result"
+                    ? new JsonObject { ["type"] = "Tool", ["id"] = name ?? "" }
+                    : new JsonObject { ["type"] = "Step", ["id"] = seq.ToString(System.Globalization.CultureInfo.InvariantCulture) },
+                ["context"] = context,
+            };
+        }
+
+        /// <summary>
+        /// v2 §8.1 for one <c>tool_call</c>, against the earlier approvals: calls come in seq order and a <c>bound</c> call
+        /// consumes the lowest-seq approval that matches it, so one approval binds at most one call.
+        /// </summary>
+        private string Approval(JsonObject step, string? u, string? t, JsonObject env, IReadOnlyDictionary<string, string>? digests)
+        {
             // a: the signed digest of the call's one tool-arguments object; undefined (null) otherwise, and equal to nothing.
             var args = (env["objects"] as JsonArray ?? new JsonArray()).OfType<JsonObject>()
                 .Where(o => AgentProfiles.Str(o["role"]) == "tool-arguments").ToList();
-            var a = args.Count == 1 && AgentProfiles.Str(args[0]["uri"]) is { } uri && digests.TryGetValue(env, out var d)
-                && d.TryGetValue(uri, out var hex) ? hex : null;
+            var a = args.Count == 1 && AgentProfiles.Str(args[0]["uri"]) is { } uri && digests is not null
+                && digests.TryGetValue(uri, out var hex) ? hex : null;
             // P7: a missing or non-string member is absent, and an absent value equals nothing.
             bool Covers(JsonObject c) => t is not null && AgentProfiles.Str(c["tool"]) == t && a is not null && AgentProfiles.Str(c["argumentsSha256"]) == a;
             bool Live(JsonObject c) => !c.ContainsKey("expiresAt")
                 || (EnvelopeSchema.TryParseDateTime(AgentProfiles.Str(step["eventTime"]), out var at)
                     && EnvelopeSchema.TryParseDateTime(AgentProfiles.Str(c["expiresAt"]), out var expires) && at < expires);
-            if (earlier.Any(x => AgentProfiles.Str(x.Step["decision"]) == "rejected" && x.Step["covers"] is JsonObject c
+            if (_approvals.Any(x => AgentProfiles.Str(x.Step["decision"]) == "rejected" && x.Step["covers"] is JsonObject c
                     && ((u is not null && AgentProfiles.Str(c["useId"]) == u) || Covers(c))))
-                result[seq] = "rejected"; // sticky; a rejection ignores expiresAt
-            else if (earlier.FirstOrDefault(x => AgentProfiles.Str(x.Step["decision"]) == "approved" && x.Step["covers"] is JsonObject c
-                    && Covers(c) && (!c.ContainsKey("useId") || (u is not null && AgentProfiles.Str(c["useId"]) == u)) && Live(c) && !consumed.Contains(x.Seq))
+                return "rejected"; // sticky; a rejection ignores expiresAt
+            if (_approvals.FirstOrDefault(x => AgentProfiles.Str(x.Step["decision"]) == "approved" && x.Step["covers"] is JsonObject c
+                    && Covers(c) && (!c.ContainsKey("useId") || (u is not null && AgentProfiles.Str(c["useId"]) == u)) && Live(c) && !_consumed.Contains(x.Seq))
                 is { Step: not null } binding)
             {
-                result[seq] = "bound";
-                consumed.Add(binding.Seq);
+                _consumed.Add(binding.Seq);
+                return "bound";
             }
-            else result[seq] = earlier.Count > 0 ? "unbound" : "none";
+            return _approvals.Count > 0 ? "unbound" : "none";
         }
-        return result;
     }
 
     private static JsonObject Context(bool consequential, string operation, int stepsSoFar, string approval, bool isChildRun,

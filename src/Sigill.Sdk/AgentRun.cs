@@ -4,6 +4,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Runtime.ExceptionServices;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Threading;
@@ -64,9 +65,13 @@ public sealed class AgentRun
     // delegation §4: open delegations (child correlationId → delegation seq) and those already resolved.
     private readonly Dictionary<string, int> _outstanding = new(StringComparer.Ordinal);
     private readonly HashSet<string> _resolved = new(StringComparer.Ordinal);
-    // Agent Enforcement v1 §3.2: in a v4 run every tool_call has its own useId and at most one result (the guard adds "denied").
-    private enum ToolCallState { Open, HasResult }
+    // Agent Enforcement v1 §3.2: in a v4 run every tool_call has its own useId and at most one result; a denied call has none.
+    private enum ToolCallState { Open, HasResult, Denied }
     private readonly Dictionary<string, (ToolCallState State, string? Tool)> _toolCalls = new(StringComparer.Ordinal);
+    // Control Set v2 §7: the guard (null without AgentRunOptions.Enforcement), and the decision that halted the run.
+    private readonly AgentGuard? _guard;
+    private Outcome? _halt;
+    private readonly CancellationTokenSource _haltedCts = new();
 
     /// <summary>The run identifier (<c>activity.correlationId</c>).</summary>
     public string CorrelationId { get; }
@@ -89,6 +94,12 @@ public sealed class AgentRun
     /// <summary><c>run_end</c> has been sealed.</summary>
     public bool IsFinished => _finished;
 
+    /// <summary>The guard halted the run (a halted <c>run_end</c> is sealed): every later recording call raises <see cref="RunHaltedException"/>.</summary>
+    public bool IsHalted => _halt is not null;
+
+    /// <summary>Cancelled when the guard halts the run, before any callback of the halt runs: stop the agent's other work with it.</summary>
+    public CancellationToken HaltedToken => _haltedCts.Token;
+
     /// <summary>Delegations sealed but not yet resolved by a <c>delegation_result</c>.</summary>
     public IReadOnlyCollection<string> OutstandingDelegations
     {
@@ -96,8 +107,9 @@ public sealed class AgentRun
     }
 
     private AgentRun(ISigillAiEvidenceClient client, AgentDefinition agent, AgentRunOptions options, Func<DateTimeOffset> clock,
-        AgentDelegation? parent = null)
+        AgentDelegation? parent, AgentGuard? guard)
     {
+        _guard = guard;
         _client = client;
         _agent = agent;
         _options = options;
@@ -112,8 +124,10 @@ public sealed class AgentRun
 
     /// <summary>
     /// Opens a run: seals the Control Artifact (always timestamped), then
-    /// <c>run_start</c> binding it.
+    /// <c>run_start</c> binding it. With <see cref="AgentRunOptions.Enforcement"/> the guard decides
+    /// <c>run_start</c> too (Control Set v2 §7.4).
     /// </summary>
+    /// <exception cref="StartRefusedException">The guard refused the start; the refusal is sealed and the exception carries the closed run.</exception>
     public static Task<AgentRun> StartAsync(
         ISigillAiEvidenceClient client, AgentDefinition agent, AgentRunOptions options, CancellationToken cancellationToken = default) =>
         StartCoreAsync(client, agent, options, () => DateTimeOffset.UtcNow, cancellationToken);
@@ -138,6 +152,8 @@ public sealed class AgentRun
         if (agent is null) throw new ArgumentNullException(nameof(agent));
         if (options is null) throw new ArgumentNullException(nameof(options));
         if (options.ControlSet is null) throw new ArgumentException("ControlSet is required.", nameof(options));
+        // A private copy: what is validated, enforced and sealed are the same bytes, whatever the caller does with its array.
+        options = options with { ControlSet = options.ControlSet with { Content = options.ControlSet.Content?.ToArray()! } };
         ValidatePolicy(options.TimestampPolicy);
         ValidateControlSet(options);
         if (parent is not null)
@@ -149,15 +165,19 @@ public sealed class AgentRun
                 throw new ArgumentException("A child run's correlationId is the one its parent declared.", nameof(options));
             if (parent.ChildAgentId != agent.AgentId)
                 throw new ArgumentException($"The parent delegated to '{parent.ChildAgentId}', not '{agent.AgentId}'.", nameof(agent));
+            // Control Set v2 §7.3: the child of a halted parent is not started (known for a delegation DelegateAsync returned).
+            if (Delegators.TryGetValue(parent, out var delegator)) delegator.ThrowIfHalted();
         }
+        var guard = AgentGuard.Create(options, agent.AgentId, parent is not null);
 
-        var run = new AgentRun(client, agent, options, clock, parent);
+        var run = new AgentRun(client, agent, options, clock, parent, guard);
         var now = AgentProfiles.Truncate(clock());
         var objects = new List<AgentRunObject>();
         var config = agent.Configuration ?? new AgentConfiguration();
         void Add(string role, byte[]? bytes, string contentType)
         {
-            if (bytes is not null) objects.Add(new AgentRunObject { Role = role, Bytes = bytes, ContentType = contentType });
+            // Private copies: the start gate checks the digests that are sealed, which a caller's array cannot change meanwhile.
+            if (bytes is not null) objects.Add(new AgentRunObject { Role = role, Bytes = bytes.ToArray(), ContentType = contentType });
         }
         Add("instruction-set", config.InstructionSet, "text/plain");
         Add("tool-manifest", config.ToolManifest, "application/json");
@@ -187,22 +207,23 @@ public sealed class AgentRun
         };
         AgentRunVerifier.Prevalidate(envelope, AgentProfiles.ControlArtifactSchema);
 
+        var digests = Digests(objects); // once: the seal request, the Control Artifact and the start gate use these
         var result = await SealAsync(client, envelope, objects, AgentProfiles.ControlArtifactContentType,
             options.CertificateId, timestamp: true, options.Qualified || options.QualifiedFor.HasFlag(QualifiedArtifacts.ControlArtifact),
-            cancellationToken).ConfigureAwait(false);
+            cancellationToken, digests).ConfigureAwait(false);
         if (result.TimestampedBy is null)
             throw new SigillException("The Control Artifact must be timestamped, but the seal carries no timestamp.");
         var (signer, problem) = AgentProfiles.SignerOf(result.Signature);
         if (problem is not null)
             throw new SigillException($"The sealing service returned a signature whose signer cannot be established: {problem}.");
         run._signer = signer;
-        run.ControlArtifact = new AgentRunArtifact(envelope, result.Signature, Digests(objects));
+        run.ControlArtifact = new AgentRunArtifact(envelope, result.Signature, digests);
         foreach (var kv in run.ControlArtifact.ObjectDigests) run._sealedDigests[kv.Key] = kv.Value;
         if (options.RetainPayloads)
             foreach (var o in objects) run._payloads[o.Uri] = o.Bytes;
 
         // Seal run_start before any callback runs, so a failing callback cannot strand a sealed control basis.
-        var start = await run.SealEventAsync("run_start", options.StartObjects ?? Array.Empty<AgentRunObject>(),
+        var (start, outcome) = await run.SealEventAsync("run_start", options.StartObjects ?? Array.Empty<AgentRunObject>(),
             new JsonObject(), consequential: false, cancellationToken).ConfigureAwait(false);
         if (options.DisclosePolicy)
         {
@@ -216,13 +237,12 @@ public sealed class AgentRun
             catch (Exception ex) { run.PolicyDisclosure = new AgentIndexResult("failed", Error: ex.Message); }
         }
         // Both are delivered even when the first callback fails: later events wait for their turn in order.
+        // Every failure — a cancellation included — surfaces with the started run attached; a refused start as StartRefusedException.
         Exception? failure = null;
-        foreach (var (artifact, seq) in new[] { (run.ControlArtifact, -1), (start, 0) })
-        {
-            // Every failure — a cancellation included — surfaces with the started run attached.
-            try { await run.NotifyAsync(artifact, seq, cancellationToken).ConfigureAwait(false); }
-            catch (Exception ex) { failure ??= ex; }
-        }
+        try { await run.NotifyAsync(run.ControlArtifact, -1, cancellationToken).ConfigureAwait(false); }
+        catch (Exception ex) { failure ??= ex; }
+        try { await run.DeliverAsync(start, outcome, cancellationToken, failure).ConfigureAwait(false); }
+        catch (Exception ex) when (ex is not StartRefusedException) { failure ??= ex; }
         if (failure is not null) throw new AgentRunCallbackException(run, failure);
         return run;
     }
@@ -263,6 +283,7 @@ public sealed class AgentRun
         bool consequential, CancellationToken cancellationToken, bool requireTimestamp = false, ToolCall? completes = null)
     {
         AgentRunArtifact artifact;
+        Outcome? outcome;
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
@@ -270,19 +291,23 @@ public sealed class AgentRun
             if (completes is { Completed: true })
                 throw new InvalidOperationException($"Tool call '{completes.UseId}' already has its result.");
             // Keep the last slot for run_end, and one per open delegation for its result (delegation §4 rule 6),
-            // so a bundle always fits AgentRunBundle.MaxArtifacts and can finish.
+            // so a bundle always fits AgentRunBundle.MaxArtifacts and can finish. Enforced (§4 rule 4): one more for the record before a
+            // halt, and a tool_call one more for the record that may deny it (a delegation_result, never checked, may still halt after it).
+            var guard = !Enforcing ? 0 : stepType == "tool_call" ? 2 : 1;
             lock (_artifacts)
-                if (_artifacts.Count >= AgentRunBundle.MaxArtifacts - 1 - _outstanding.Count)
-                    throw new InvalidOperationException(_outstanding.Count == 0
+                if (_artifacts.Count >= AgentRunBundle.MaxArtifacts - 1 - guard - _outstanding.Count)
+                    throw new InvalidOperationException(guard > 0
+                        ? $"The run has {_artifacts.Count} events; the rest of the bundle limit of {AgentRunBundle.MaxArtifacts} is reserved for run_end, the guard's enforcement record(s) and {_outstanding.Count} delegation result(s)."
+                        : _outstanding.Count == 0
                         ? $"The run has {_artifacts.Count} events; only run_end fits within the bundle limit of {AgentRunBundle.MaxArtifacts}. Finish the run."
                         : $"The run has {_artifacts.Count} events; the rest of the bundle limit of {AgentRunBundle.MaxArtifacts} is reserved for run_end and {_outstanding.Count} delegation result(s).");
             var step = (JsonObject?)fields?.DeepClone() ?? new JsonObject();
             if (requireTimestamp) step["timestamp"] = "required";
-            artifact = await SealEventAsync(stepType, objects ?? Array.Empty<AgentRunObject>(), step, consequential, cancellationToken).ConfigureAwait(false);
+            (artifact, outcome) = await SealEventAsync(stepType, objects ?? Array.Empty<AgentRunObject>(), step, consequential, cancellationToken).ConfigureAwait(false);
             if (completes is not null) completes.Completed = true;
         }
         finally { _gate.Release(); }
-        await NotifyAsync(artifact, artifact.Seq!.Value, cancellationToken).ConfigureAwait(false);
+        await DeliverAsync(artifact, outcome, cancellationToken).ConfigureAwait(false);
         return artifact;
     }
 
@@ -311,11 +336,14 @@ public sealed class AgentRun
     /// <see cref="ToolCall.CompleteAsync"/>, which names the same tool and <c>useId</c>. A <c>useId</c> (a UUID) is
     /// generated when <paramref name="useId"/> is omitted. <paramref name="definition"/> is the tool's definition as your
     /// runtime holds it (e.g. its tool-manifest entry), bound by digest as the <c>tool-definition</c> object
-    /// (<c>spec/agent-enforcement-v1.md</c> §3.3); only a <c>schemaVersion "4"</c> run can carry it. This release records the
-    /// call; it does not decide it.
+    /// (<c>spec/agent-enforcement-v1.md</c> §3.3); only a <c>schemaVersion "4"</c> run can carry it. In an enforced run the
+    /// guard decides the sealed call before this returns: a denied call raises <see cref="PolicyDeniedException"/> and has no
+    /// <see cref="ToolCall"/>, so its tool must not run.
     /// </summary>
     /// <exception cref="InvalidOperationException"><paramref name="definition"/> in a run that is not <c>schemaVersion "4"</c>.</exception>
     /// <exception cref="ArgumentException">The call would not verify, or its useId is already used; nothing was sealed and the run stays usable.</exception>
+    /// <exception cref="PolicyDeniedException">The guard denied the call (sealed with its enforcement record).</exception>
+    /// <exception cref="RunHaltedException">The run is halted.</exception>
     public async Task<ToolCall> BeginToolCallAsync(string tool, byte[] arguments, string? operation = null, bool consequential = false,
         string contentType = "application/json", string? useId = null, byte[]? definition = null, CancellationToken cancellationToken = default)
     {
@@ -325,6 +353,23 @@ public sealed class AgentRun
         var artifact = await SealToolCallAsync(tool, arguments, operation, consequential, contentType, id, definition, cancellationToken)
             .ConfigureAwait(false);
         return new ToolCall(this, tool, id, artifact);
+    }
+
+    /// <summary>
+    /// Runs one tool call through the guard: begins it (<see cref="BeginToolCallAsync"/>), runs <paramref name="func"/> only
+    /// if the call is allowed, seals its result and returns the result bytes. <paramref name="contentType"/> is that of the
+    /// arguments and the result. A denied call raises <see cref="PolicyDeniedException"/> and <paramref name="func"/> never runs;
+    /// when <paramref name="func"/> throws, the call stays without a result.
+    /// </summary>
+    public async Task<byte[]> InvokeToolAsync(string tool, byte[] arguments, Func<CancellationToken, Task<byte[]>> func, string? operation = null,
+        bool consequential = false, string contentType = "application/json", string? useId = null, byte[]? definition = null,
+        CancellationToken cancellationToken = default)
+    {
+        if (func is null) throw new ArgumentNullException(nameof(func));
+        var call = await BeginToolCallAsync(tool, arguments, operation, consequential, contentType, useId, definition, cancellationToken).ConfigureAwait(false);
+        var result = await func(cancellationToken).ConfigureAwait(false);
+        await call.CompleteAsync(result, contentType, cancellationToken).ConfigureAwait(false);
+        return result;
     }
 
     /// <summary>
@@ -472,6 +517,7 @@ public sealed class AgentRun
     /// <summary>
     /// Seals <c>run_end</c> (always timestamped), closing the run, and returns
     /// the bundle. <paramref name="disposition"/>: completed | failed | aborted.
+    /// A run the guard halted is closed already: its bundle is returned and nothing is sealed.
     /// </summary>
     public async Task<AgentRunBundle> FinishAsync(
         string disposition = "completed", string? detail = null, CancellationToken cancellationToken = default)
@@ -480,9 +526,11 @@ public sealed class AgentRun
             throw new ArgumentException("disposition must be completed, failed or aborted.", nameof(disposition));
         AgentRunArtifact artifact;
         AgentRunBundle bundle;
+        Outcome? outcome;
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
+            if (_halt is not null) return ToBundle();
             EnsureOpen();
             lock (_artifacts)
                 if (disposition == "completed" && _outstanding.Count > 0)
@@ -497,12 +545,12 @@ public sealed class AgentRun
                 ["finalPrevSignatureSha256"] = _prevSignatureSha256,
                 ["runDisposition"] = disposition,
             };
-            artifact = await SealEventAsync("run_end", Array.Empty<AgentRunObject>(), Detail(step, detail),
+            (artifact, outcome) = await SealEventAsync("run_end", Array.Empty<AgentRunObject>(), Detail(step, detail),
                 consequential: false, cancellationToken).ConfigureAwait(false);
             bundle = ToBundle();
         }
         finally { _gate.Release(); }
-        await NotifyAsync(artifact, artifact.Seq!.Value, cancellationToken).ConfigureAwait(false);
+        await DeliverAsync(artifact, outcome, cancellationToken).ConfigureAwait(false);
         return bundle;
     }
 
@@ -535,6 +583,7 @@ public sealed class AgentRun
         if (child.Length == 0 || child == CorrelationId)
             throw new ArgumentException("A run cannot delegate to itself.", nameof(childCorrelationId));
         AgentRunArtifact artifact;
+        Outcome? outcome;
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
@@ -543,23 +592,26 @@ public sealed class AgentRun
             {
                 if (_outstanding.ContainsKey(child) || _resolved.Contains(child))
                     throw new ArgumentException($"'{child}' is already delegated by this run (§4 rule 10).", nameof(childCorrelationId));
-                // This event, a result for every open delegation including this one, and run_end must fit.
-                if (_artifacts.Count + 1 + _outstanding.Count + 1 + 1 > AgentRunBundle.MaxArtifacts)
-                    throw new InvalidOperationException(
-                        $"No room for another delegation: the bundle limit of {AgentRunBundle.MaxArtifacts} is reserved for run_end and the results of {_outstanding.Count} open delegation(s).");
+                // This event, a result for every open delegation including this one, and run_end must fit (enforced: and a record).
+                if (_artifacts.Count + 1 + _outstanding.Count + 1 + 1 + (Enforcing ? 1 : 0) > AgentRunBundle.MaxArtifacts)
+                    throw new InvalidOperationException(!Enforcing
+                        ? $"No room for another delegation: the bundle limit of {AgentRunBundle.MaxArtifacts} is reserved for run_end and the results of {_outstanding.Count} open delegation(s)."
+                        : $"No room for another delegation: the bundle limit of {AgentRunBundle.MaxArtifacts} is reserved for run_end, the guard's enforcement record and the results of {_outstanding.Count} open delegation(s).");
             }
             var block = new JsonObject { ["childCorrelationId"] = child, ["childAgentId"] = childAgentId };
             if (useId is not null) block["useId"] = useId;
             var objects = instruction is null
                 ? Array.Empty<AgentRunObject>()
                 : new[] { Obj("delegation-input", instruction, instructionContentType) };
-            artifact = await SealEventAsync("delegation", objects, new JsonObject { ["delegation"] = block }, consequential,
+            (artifact, outcome) = await SealEventAsync("delegation", objects, new JsonObject { ["delegation"] = block }, consequential,
                 cancellationToken).ConfigureAwait(false);
             lock (_artifacts) _outstanding[child] = artifact.Seq!.Value;
         }
         finally { _gate.Release(); }
-        await NotifyAsync(artifact, artifact.Seq!.Value, cancellationToken).ConfigureAwait(false);
-        return new AgentDelegation(CorrelationId, artifact.SignatureSha256!, child, childAgentId) { Artifact = artifact };
+        await DeliverAsync(artifact, outcome, cancellationToken).ConfigureAwait(false); // a halt rule on delegation: no delegation to start
+        var delegation = new AgentDelegation(CorrelationId, artifact.SignatureSha256!, child, childAgentId) { Artifact = artifact };
+        Delegators.Add(delegation, this);
+        return delegation;
     }
 
     /// <summary>
@@ -587,6 +639,7 @@ public sealed class AgentRun
         if (childDisposition is not ("completed" or "failed" or "aborted") && !(childDisposition == "halted" && _schemaVersion == "4"))
             throw new ArgumentException("childDisposition must be completed, failed or aborted.", nameof(childDisposition));
         AgentRunArtifact artifact;
+        Outcome? outcome;
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
@@ -602,7 +655,7 @@ public sealed class AgentRun
                 ["childRunEndSignatureSha256"] = childRunEndSignatureSha256,
                 ["childDisposition"] = childDisposition,
             };
-            artifact = await SealEventAsync("delegation_result", Array.Empty<AgentRunObject>(),
+            (artifact, outcome) = await SealEventAsync("delegation_result", Array.Empty<AgentRunObject>(),
                 new JsonObject { ["delegation"] = block }, consequential: false, cancellationToken).ConfigureAwait(false);
             lock (_artifacts)
             {
@@ -611,7 +664,7 @@ public sealed class AgentRun
             }
         }
         finally { _gate.Release(); }
-        await NotifyAsync(artifact, artifact.Seq!.Value, cancellationToken).ConfigureAwait(false);
+        await DeliverAsync(artifact, outcome, cancellationToken).ConfigureAwait(false);
         return artifact;
     }
 
@@ -619,10 +672,11 @@ public sealed class AgentRun
 
     /// <summary>
     /// Builds, validates and seals one event. Call with the gate held (or
-    /// before the run is published); the callback is the caller's job.
+    /// before the run is published); the callback is the caller's job (<see cref="DeliverAsync"/>).
+    /// Then the guard decides on it and seals its record and halt, directly after it under the same gate (Control Set v2 §7.1).
     /// </summary>
-    private async Task<AgentRunArtifact> SealEventAsync(
-        string stepType, IReadOnlyList<AgentRunObject> objects, JsonObject fields, bool consequential, CancellationToken ct)
+    private async Task<(AgentRunArtifact Artifact, Outcome? Outcome)> SealEventAsync(
+        string stepType, IReadOnlyList<AgentRunObject> objects, JsonObject fields, bool consequential, CancellationToken ct, bool byGuard = false)
     {
         var now = AgentProfiles.Truncate(_clock()); // the decision below must use the signed, truncated time
         int seq;
@@ -686,6 +740,8 @@ public sealed class AgentRun
                 // Texts identical to the Python port's (hence use_id).
                 if (stepType == "tool_result" && !known)
                     throw new ArgumentException($"No tool_call of this run with use_id '{useId}' awaits a result.");
+                if (stepType == "tool_result" && state == ToolCallState.Denied)
+                    throw new ArgumentException($"The tool_call with use_id '{useId}' was denied; it has no result.");
                 if (stepType == "tool_result" && state == ToolCallState.HasResult)
                     throw new ArgumentException($"The tool_call with use_id '{useId}' already has its result.");
                 // §3.2: a tool_result carries the same tool.name as the call it answers.
@@ -694,11 +750,12 @@ public sealed class AgentRun
             }
         AgentRunVerifier.Prevalidate(envelope, AgentProfiles.ExecutionSchemaFor(envelope)); // throws before anything is sealed
 
+        AgentRunArtifact artifact;
         try
         {
             var result = await SealAsync(_client, envelope, objects, AgentProfiles.ExecutionEvidenceContentType,
                 _options.CertificateId, stamp,
-                _options.Qualified || (stepType == "run_end" && _options.QualifiedFor.HasFlag(QualifiedArtifacts.RunEnd)), ct).ConfigureAwait(false);
+                _options.Qualified || (stepType == "run_end" && _options.QualifiedFor.HasFlag(QualifiedArtifacts.RunEnd)), ct, digests).ConfigureAwait(false);
             if (stamp && result.TimestampedBy is null)
                 throw new SigillException($"{stepType}: a timestamp is required by the run's policy, but the seal carries none.");
             var (signer, problem) = AgentProfiles.SignerOf(result.Signature);
@@ -707,7 +764,7 @@ public sealed class AgentRun
             if (signer != _signer)
                 throw new SigillException("The event was sealed with a different certificate than the run's Control Artifact (certificate rotated?); a run has one signer.");
 
-            var artifact = new AgentRunArtifact(envelope, result.Signature, digests);
+            artifact = new AgentRunArtifact(envelope, result.Signature, digests);
             lock (_artifacts) foreach (var kv in digests) _sealedDigests[kv.Key] = kv.Value;
             _prevSignatureSha256 = artifact.SignatureSha256
                 ?? throw new SigillException("The seal returned no classical signature to chain to.");
@@ -721,13 +778,103 @@ public sealed class AgentRun
                 if (_options.RetainPayloads)
                     foreach (var o in objects) _payloads[o.Uri] = o.Bytes;
             }
-            return artifact;
         }
         catch (Exception)
         {
             _broken = true;
             throw;
         }
+
+        AgentGuard.Decision? decision;
+        try { decision = _guard?.Decide(seq, envelope, digests, byGuard, ControlArtifact); }
+        catch (Exception)
+        {
+            _broken = true; // a sealed event the guard could not decide is never continued
+            throw;
+        }
+        if (decision is null) return (artifact, null);
+        var outcome = new Outcome(decision, seq, stepType);
+        if (!decision.Seals) return (artifact, outcome);
+        try
+        {
+            // Agent Enforcement v1 §3.4. Not the caller's token: a cancellation must not separate the decision from its event.
+            var record = new JsonObject { ["decision"] = "denied" };
+            if (decision.Tool is not null) record["tool"] = new JsonObject { ["name"] = decision.Tool, ["useId"] = decision.UseId };
+            if (decision.Rules.Count > 0) record["rules"] = new JsonArray(decision.Rules.Select(r => (JsonNode?)r).ToArray());
+            record["enforcer"] = new JsonObject { ["engine"] = _guard!.EngineName, ["factsVersion"] = "2", ["reason"] = decision.Reason };
+            outcome.Record = (await SealEventAsync("authorization", Array.Empty<AgentRunObject>(), record, false, CancellationToken.None, byGuard: true)
+                .ConfigureAwait(false)).Artifact;
+            if (decision.UseId is not null) lock (_artifacts) _toolCalls[decision.UseId] = (ToolCallState.Denied, decision.Tool);
+            if (decision.Halts)
+            {
+                lock (_artifacts) seq = _artifacts.Count;
+                var end = new JsonObject { ["finalSeq"] = seq, ["finalPrevSignatureSha256"] = _prevSignatureSha256, ["runDisposition"] = "halted" };
+                outcome.RunEnd = (await SealEventAsync("run_end", Array.Empty<AgentRunObject>(), end, false, CancellationToken.None, byGuard: true)
+                    .ConfigureAwait(false)).Artifact;
+                _halt = outcome;
+            }
+        }
+        catch (Exception ex)
+        {
+            // Fail closed (§7.5): a decided event without its record is never continued; the caller sees the sealing failure.
+            _broken = true;
+            outcome.Failure = ex;
+        }
+        return (artifact, outcome);
+    }
+
+    /// <summary>One guard decision as sealed: what the caller of the decided event is told after the gate is released.</summary>
+    private sealed class Outcome(AgentGuard.Decision decision, int seq, string stepType)
+    {
+        public AgentGuard.Decision Decision { get; } = decision;
+        public int Seq { get; } = seq;
+        public AgentRunArtifact? Record { get; set; }
+        public AgentRunArtifact? RunEnd { get; set; }
+        public Exception? Failure { get; set; }
+
+        public EnforcementEvent Event => new(stepType == "run_start" && RunEnd is not null ? "start_refused" : Decision.Kind,
+            Decision.Reason, Decision.Rules, Decision.Tool, Decision.UseId, Seq);
+
+        /// <summary>What the decided call raises; null for an allowed event.</summary>
+        public Exception? Raise(AgentRun run, Exception? inner) =>
+            Record is null ? null
+            : stepType == "run_start" ? new StartRefusedException(Decision.Reason!, Decision.Rules, run, inner)
+            : Decision.Tool is not null ? new PolicyDeniedException(Decision.Reason!, Decision.Rules, Decision.Tool, Decision.UseId!, Seq, Record, RunEnd is not null, inner)
+            : new RunHaltedException(Decision.Reason!, Decision.Rules, Seq, Record, inner);
+    }
+
+    /// <summary>
+    /// After the gate is released: the callbacks of the sealed event and of the guard's record and halt (in seal order, all of them
+    /// even when one fails), <see cref="AgentEnforcement.OnEvent"/> before the last one's turn ends, then the decision's
+    /// exception carrying the first callback failure. Without a decision, exactly <see cref="NotifyAsync"/>.
+    /// </summary>
+    private async Task DeliverAsync(AgentRunArtifact artifact, Outcome? outcome, CancellationToken ct, Exception? earlier = null)
+    {
+        if (outcome is null)
+        {
+            await NotifyAsync(artifact, artifact.Seq!.Value, ct).ConfigureAwait(false);
+            return;
+        }
+        var failure = earlier;
+        if (outcome.RunEnd is not null)
+            try { _haltedCts.Cancel(); }
+            catch (Exception ex) { failure ??= ex; } // a failing registration of the caller's
+        void Report()
+        {
+            if (outcome.Failure is not null || _guard!.Options.OnEvent is not { } onEvent) return; // nothing sealed, nothing to report
+            InCallback.Value = true; // as for OnArtifactSealed: an event it records is delivered at once, not after this one's turn
+            try { onEvent(outcome.Event); }
+            catch (Exception ex) { failure ??= ex; }
+        }
+        var sealedNow = new[] { artifact, outcome.Record, outcome.RunEnd }.OfType<AgentRunArtifact>().ToList();
+        for (var i = 0; i < sealedNow.Count; i++)
+        {
+            try { await NotifyAsync(sealedNow[i], sealedNow[i].Seq!.Value, ct, i == sealedNow.Count - 1 ? Report : null).ConfigureAwait(false); }
+            catch (Exception ex) { failure ??= ex; }
+        }
+        if (outcome.Failure is not null) ExceptionDispatchInfo.Capture(outcome.Failure).Throw();
+        if (outcome.Raise(this, failure) is { } decided) throw decided;
+        if (failure is not null) ExceptionDispatchInfo.Capture(failure).Throw();
     }
 
     /// <summary>
@@ -739,7 +886,7 @@ public sealed class AgentRun
     /// callback that recorded it). The artifact is already sealed; a failing
     /// callback is the caller's error and does not break the run.
     /// </summary>
-    private async Task NotifyAsync(AgentRunArtifact artifact, int seq, CancellationToken ct)
+    private async Task NotifyAsync(AgentRunArtifact artifact, int seq, CancellationToken ct, Action? then = null)
     {
         if (!InCallback.Value) await WaitForTurnAsync(seq).ConfigureAwait(false);
         try
@@ -750,7 +897,11 @@ public sealed class AgentRun
                 await callback(artifact, ct).ConfigureAwait(false);
             }
         }
-        finally { Advance(seq); }
+        finally
+        {
+            then?.Invoke(); // never throws; runs within this seq's turn, so the guard's reports keep seal order too
+            Advance(seq);
+        }
     }
 
     private static readonly AsyncLocal<bool> InCallback = new();
@@ -784,12 +935,12 @@ public sealed class AgentRun
     // No operation label: only digests, opaque URIs and content types reach the sealing service (§6).
     internal static async Task<SignHashesResult> SealAsync(
         ISigillAiEvidenceClient client, JsonObject envelope, IReadOnlyList<AgentRunObject> objects, string profileContentType,
-        Guid certificateId, bool timestamp, bool qualified, CancellationToken ct)
+        Guid certificateId, bool timestamp, bool qualified, CancellationToken ct, IReadOnlyDictionary<string, string>? hashes = null)
     {
         var digests = objects.Select(o => new SignedObjectDigest
         {
             Uri = o.Uri,
-            HashHex = EnvelopeHashing.HashHex(o.Bytes),
+            HashHex = hashes?[o.Uri] ?? EnvelopeHashing.HashHex(o.Bytes),
             ContentType = o.ContentType,
         }).ToList();
         return await client.SignObjectHashesAsync(
@@ -832,9 +983,24 @@ public sealed class AgentRun
 
     private void EnsureOpen()
     {
+        ThrowIfHalted();
         if (_broken) throw new InvalidOperationException("The run's chain is broken by an earlier sealing failure; no further events can be sealed.");
         if (_finished) throw new InvalidOperationException("The run is finished.");
     }
+
+    /// <summary>A halted run takes no more events: <see cref="RunHaltedException"/> naming the decision that halted it.</summary>
+    internal void ThrowIfHalted()
+    {
+        if (_halt is { } h) throw new RunHaltedException(h.Decision.Reason!, h.Decision.Rules, h.Seq, h.Record!);
+    }
+
+    private bool Enforcing => _guard is { Enforcing: true };
+
+    /// <summary>The run that returned each delegation (outside the record's state, so equality is unchanged); weak on both.</summary>
+    private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<AgentDelegation, AgentRun> Delegators = new();
+
+    /// <summary>Tests: the run's guard (null without one).</summary>
+    internal AgentGuard? Guard => _guard;
 
     private static void ValidatePolicy(AgentTimestampPolicy p)
     {

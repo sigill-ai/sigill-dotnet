@@ -25,7 +25,8 @@ namespace Sigill.Sdk;
 /// bodies are sealed as digests only; their content never leaves the process. A streamed response (server-sent events)
 /// is recorded with the identifiers in its headers only. The run must be started with
 /// <see cref="AgentRunOptions.RecordsModelCalls"/>. A failure to record never fails the model call: it is reported to
-/// <c>onError</c>.
+/// <c>onError</c>. A halt is not such a failure: when the guard halts the run on a recorded call, or the run is halted already,
+/// the call raises <see cref="RunHaltedException"/> (in the second case without being sent).
 /// </summary>
 public sealed class ModelCallHandler : DelegatingHandler
 {
@@ -42,6 +43,7 @@ public sealed class ModelCallHandler : DelegatingHandler
     {
         var api = Classify(request);
         if (api is null) return await base.SendAsync(request, cancellationToken).ConfigureAwait(false);
+        _run.ThrowIfHalted(); // a halted run's agent makes no more model calls
 
         byte[]? requestBody = null;
         if (request.Content is not null)
@@ -67,7 +69,7 @@ public sealed class ModelCallHandler : DelegatingHandler
             if (call is not null)
                 await _run.RecordModelCallAsync(call, requestBody, responseBody, cancellationToken: cancellationToken).ConfigureAwait(false);
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (Exception ex) when (ex is not (OperationCanceledException or RunHaltedException))
         {
             _onError?.Invoke(ex);
         }
