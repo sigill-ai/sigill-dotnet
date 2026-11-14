@@ -3,6 +3,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
 using System.Runtime.ExceptionServices;
 using System.Text.Json;
@@ -164,7 +165,7 @@ public sealed class AgentRun
 
     internal static async Task<AgentRun> StartCoreAsync(
         ISigillAiEvidenceClient client, AgentDefinition agent, AgentRunOptions options,
-        Func<DateTimeOffset> clock, CancellationToken cancellationToken, AgentDelegation? parent = null, Func<DateTimeOffset>? indexClock = null)
+        Func<DateTimeOffset> clock, CancellationToken cancellationToken, AgentDelegation? parent = null, Func<TimeSpan>? indexClock = null)
     {
         if (client is null) throw new ArgumentNullException(nameof(client));
         if (agent is null) throw new ArgumentNullException(nameof(agent));
@@ -969,13 +970,20 @@ public sealed class AgentRun
     private bool _indexRejected;
     private bool _indexWithoutPolicy;
     private TimeSpan _indexBackoff = AgentRunIndex.FirstBackoff;
-    private DateTimeOffset _indexRetryAt = DateTimeOffset.MinValue;
-    private Func<DateTimeOffset> _indexClock = () => DateTimeOffset.UtcNow;
+    private TimeSpan _indexRetryAt = TimeSpan.MinValue;
+    private Func<TimeSpan> _indexClock = AgentRunIndex.Monotonic;   // monotonic: the back-off does not move with the wall clock
+
+    /// <summary>Tests: the delivery's time limits.</summary>
+    internal AgentRunIndex.Limits IndexLimits { get; set; } = AgentRunIndex.Limits.Default;
+
+    /// <summary>The message of a turn whose time budget was used up before every artifact was delivered (no back-off follows).</summary>
+    internal const string IndexBudgetUsedUp = "time budget used up";
 
     /// <summary>
-    /// Uploads from the cursor through <paramref name="through"/>. Held during a back-off, except for a final attempt (the
-    /// <c>run_end</c> turn, <see cref="FinishAsync"/> on a halted run), which is capped at <see cref="AgentRunIndex.FinalBudget"/>.
-    /// Never raises: a failure is <see cref="Delivery"/>.
+    /// Uploads from the cursor through <paramref name="through"/>, within the turn's time budget (<see cref="AgentRunIndex.Limits"/>:
+    /// an ordinary turn, or the final one — the <c>run_end</c> turn and <see cref="FinishAsync"/> on a halted run, which also
+    /// ignores a back-off). Every attempt has a deadline of its own, at most what is left of the budget. Never raises: a failure is
+    /// <see cref="Delivery"/>.
     /// </summary>
     private async Task IndexThroughAsync(int through, bool final)
     {
@@ -984,29 +992,48 @@ public sealed class AgentRun
         try
         {
             if (_indexRejected || _indexNext > through || (!final && _indexClock() < _indexRetryAt)) return;
-            using var budget = new CancellationTokenSource();
-            if (final) budget.CancelAfter(AgentRunIndex.FinalBudget);
+            var limits = IndexLimits;
+            var budget = Stopwatch.StartNew();
+            var allowed = final ? limits.Final : limits.Turn;
+            TimeSpan Left() => allowed - budget.Elapsed;
+            async Task<AgentRunIndex.Answer> Send(AgentRunArtifact artifact, byte[]? document)
+            {
+                var answer = await client.IndexUploadAsync(artifact, document, Min(limits.Upload, Left()), CancellationToken.None).ConfigureAwait(false);
+                // A concurrent upload won: once more, on the same budget.
+                return answer.Conflict && Left() > TimeSpan.Zero
+                    ? await client.IndexUploadAsync(artifact, document, Min(limits.Upload, Left()), CancellationToken.None).ConfigureAwait(false)
+                    : answer;
+            }
             while (_indexNext <= through)
             {
                 AgentRunArtifact artifact;
                 lock (_artifacts) artifact = _indexNext == 0 ? ControlArtifact : _artifacts[_indexNext - 1];
+                if (Left() <= TimeSpan.Zero)
+                {
+                    _indexError = AgentRunIndex.Where(artifact) + IndexBudgetUsedUp; // the rest waits for a later turn, no back-off
+                    return;
+                }
                 var withPolicy = _indexNext == 0 && _options.DisclosePolicy && !_indexWithoutPolicy;
-                var answer = await AgentRunIndex.UploadAsync(client, artifact, withPolicy ? _options.ControlSet.Content : null,
-                    CancellationToken.None, budget.Token).ConfigureAwait(false);
+                var answer = await Send(artifact, withPolicy ? _options.ControlSet.Content : null).ConfigureAwait(false);
                 if (withPolicy)
                 {
                     PolicyDisclosure = answer.Accepted ? new AgentIndexResult("indexed", answer.RunId)
-                        : new AgentIndexResult("failed", Error: answer.ErrorAt(artifact));
-                    if (answer.ControlSetRejected)
+                        : new AgentIndexResult("failed", Error: AgentRunIndex.Where(artifact) + answer.ErrorText);
+                    if (answer.ControlSetRejected && Left() > TimeSpan.Zero)
                     {
                         // A refused policy document must not block the steps: the Control Artifact again, without it.
                         _indexWithoutPolicy = true;
-                        answer = await AgentRunIndex.UploadAsync(client, artifact, null, CancellationToken.None, budget.Token).ConfigureAwait(false);
+                        answer = await Send(artifact, null).ConfigureAwait(false);
                     }
                 }
                 if (!answer.Accepted)
                 {
-                    _indexError = answer.ErrorAt(artifact);
+                    if (!answer.Final && Left() <= TimeSpan.Zero)
+                    {
+                        _indexError = AgentRunIndex.Where(artifact) + IndexBudgetUsedUp; // cut by the budget, not failed: no back-off
+                        return;
+                    }
+                    _indexError = AgentRunIndex.Where(artifact) + answer.ErrorText;
                     if (answer.Final) _indexRejected = true; // the index keeps a true prefix of the run
                     else
                     {
@@ -1019,12 +1046,14 @@ public sealed class AgentRun
                 _indexRunId = answer.RunId ?? _indexRunId;
                 _indexError = null;
                 _indexBackoff = AgentRunIndex.FirstBackoff;
-                _indexRetryAt = DateTimeOffset.MinValue;
+                _indexRetryAt = TimeSpan.MinValue;
             }
         }
-        catch (Exception ex) { _indexError = $"{ex.GetType().Name}: {ex.Message}"; } // never raised: delivery is not part of the run's chain
+        catch (Exception ex) { _indexError = ex.GetType().Name; } // never raised: delivery is not part of the run's chain
         finally { _indexGate.Release(); }
     }
+
+    private static TimeSpan Min(TimeSpan a, TimeSpan b) => a < b ? a : b;
 
     private static readonly AsyncLocal<bool> InCallback = new();
     private readonly object _notifyLock = new();

@@ -524,29 +524,38 @@ the run seals with (`DeliverRun` needs `SigillClient`; another client is refused
 anything is sealed).
 
 - **What leaves the machine:** each artifact's signed envelope, signature and object
-  digests. That is: agent id and version, activity name and run id, step types and
-  times, tool names, operations and use ids, rule ids and guard reasons, model and
-  provider request ids, token counts, approver references, sub-agent ids, object URIs,
-  content types and sizes, and the `detail` text and the names and identifiers you
-  chose — those are your own text and are uploaded as written. Never arguments, results, prompts,
-  outputs or receipts. The policy document travels only with `DisclosePolicy`, on the
+  digests. That is: the agent id, version, tenant id and identity reference, the activity
+  name and run id, the control set's id and version, step types and times, tool names,
+  operations and use ids, authorization decisions and policy ids, rule ids and guard
+  reasons, model names, deployments, regions and stop reasons, model and provider request
+  ids, token counts, approver references, sub-agent ids, object URIs, content types and
+  sizes, the `detail` text, and the signing certificate inside each signature. Every one of
+  these is your own value, uploaded as written; only `detail`, the activity name, the
+  approver, the decision and the content type are length-bounded. Never arguments,
+  results, prompts, outputs or receipts. The policy document travels only with `DisclosePolicy`, on the
   Control Artifact's upload (`run.PolicyDisclosure` is its outcome); if the index
   refuses the document, the Control Artifact is sent again without it and the steps
   follow.
 - **Free text is bounded, with or without delivery.** A step's `detail` is at most 512
-  characters, the activity name and an approver reference at most 255 (Unicode code
-  points), an object's `metadata` at most 2,048 bytes. A longer value is refused with an
-  `ArgumentException` before anything is sealed — never truncated — and the index refuses
-  it too (`AgentProfiles.CheckFreeTextLimits` is the same rule). New in 0.15.0: 0.14 sealed
-  longer values.
+  characters; the activity name, an approver reference, a step's `decision` and an
+  object's content type at most 255 (Unicode code points). A longer value is refused with
+  an `ArgumentException` before anything is sealed — never truncated — and an index may
+  refuse it too (`AgentProfiles.CheckFreeTextLimits` is the same rule). Object `metadata`
+  and envelope `extensions` (at most 2,048 bytes each) cannot be set through this SDK; the
+  bound is there for envelopes built by other means. New in 0.15.0: 0.14 sealed longer
+  values.
 - **A delivery failure never fails the run.** It is not raised, does not break the
   chain and does not halt an enforced run (the guard's own exceptions are raised as
   before). An unreachable index (a timeout, 408, 429 or 5xx) holds the uploads; the
   next attempt waits for a back-off (5 s, doubling to 5 min) and resumes from the first
   artifact not delivered. `run_end` — and `FinishAsync` on a halted run — make one more
   attempt past the back-off, at most 30 s. If the index refuses an artifact (any other
-  4xx), delivery stops there: the index holds a true prefix of the run, and
-  `run.Delivery` says why.
+  4xx — or an answer that is not the index's: another 2xx, a redirect, an unreadable
+  body), delivery stops there: the index holds a true prefix of the run, and
+  `run.Delivery` says why. Each turn has a time budget: 10 s for a step's uploads
+  together, 30 s for the run's end. So with the index unreachable a step can take up to
+  10 s longer and the run's end up to 30 s; a guard refusal still blocks the call at
+  once, but its exception is raised after that wait.
 - **Catch up later** from the bundle: `await client.DeliverAgentRunAsync(bundle)`
   uploads the Control Artifact, then the events by seq, skips evaluations, and does not
   send the policy document. Repeating it is safe (the index answers `exists`), a partial

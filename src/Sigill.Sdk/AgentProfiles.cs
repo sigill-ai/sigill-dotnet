@@ -83,6 +83,12 @@ public static class AgentProfiles
     /// <summary>At most this many characters (Unicode code points) in a step's <c>approver</c>.</summary>
     public const int MaxApproverLength = 255;
 
+    /// <summary>At most this many characters (Unicode code points) in a step's <c>decision</c>.</summary>
+    public const int MaxDecisionLength = 255;
+
+    /// <summary>At most this many characters (Unicode code points) in an object's <c>contentType</c>.</summary>
+    public const int MaxContentTypeLength = 255;
+
     /// <summary>At most this many bytes in an object's <c>metadata</c>: the UTF-8 length of the member's value in canonical (JCS) form.</summary>
     public const int MaxObjectMetadataBytes = 2048;
 
@@ -91,12 +97,19 @@ public static class AgentProfiles
 
     /// <summary>
     /// Checks the free text a caller sets in a Control Artifact or Execution Evidence envelope (any schema version) against
-    /// <see cref="MaxDetailLength"/>, <see cref="MaxActivityNameLength"/>, <see cref="MaxApproverLength"/> and
-    /// <see cref="MaxObjectMetadataBytes"/>, <see cref="MaxExtensionsBytes"/>. Null when it is within them; otherwise a short message naming the first field over
+    /// <see cref="MaxDetailLength"/>, <see cref="MaxActivityNameLength"/>, <see cref="MaxApproverLength"/>,
+    /// <see cref="MaxDecisionLength"/>, <see cref="MaxContentTypeLength"/>, <see cref="MaxObjectMetadataBytes"/> and
+    /// <see cref="MaxExtensionsBytes"/>. Null when it is within them; otherwise a short message naming the first field over
     /// its limit and the limit, never the value. The recorder refuses such an event before sealing it, and an index may refuse
     /// it on upload. Never throws: a member that is absent or of another type is not checked (schema validation is separate).
     /// </summary>
     public static string? CheckFreeTextLimits(JsonNode? envelope)
+    {
+        try { return FreeTextProblem(envelope); }
+        catch (Exception) { return null; } // never throws: an envelope this cannot read is the schema's business
+    }
+
+    private static string? FreeTextProblem(JsonNode? envelope)
     {
         if (envelope is not JsonObject e) return null;
         if (TooLong((e["activity"] as JsonObject)?["name"], MaxActivityNameLength))
@@ -104,17 +117,23 @@ public static class AgentProfiles
         var step = e["step"] as JsonObject;
         if (TooLong(step?["detail"], MaxDetailLength)) return $"step.detail is longer than {MaxDetailLength} characters";
         if (TooLong(step?["approver"], MaxApproverLength)) return $"step.approver is longer than {MaxApproverLength} characters";
+        if (TooLong(step?["decision"], MaxDecisionLength)) return $"step.decision is longer than {MaxDecisionLength} characters";
         if (e["objects"] is JsonArray objects)
             for (var i = 0; i < objects.Count; i++)
-                if (objects[i] is JsonObject o && o["metadata"] is { } metadata && Utf8Length(metadata) > MaxObjectMetadataBytes)
+            {
+                if (objects[i] is not JsonObject o) continue;
+                if (TooLong(o["contentType"], MaxContentTypeLength)) return $"objects[{i}].contentType is longer than {MaxContentTypeLength} characters";
+                if (o["metadata"] is { } metadata && Utf8Length(metadata) > MaxObjectMetadataBytes)
                     return $"objects[{i}].metadata is larger than {MaxObjectMetadataBytes} bytes";
+            }
         if (e["extensions"] is JsonObject extensions && Utf8Length(extensions) > MaxExtensionsBytes)
             return $"extensions is larger than {MaxExtensionsBytes} bytes";
         return null;
     }
 
+    // TryGetValue: a JsonValue built from a Guid, a DateTime or a char reports kind String but is no string to GetValue.
     private static bool TooLong(JsonNode? node, int max) =>
-        node is JsonValue v && v.GetValueKind() == JsonValueKind.String && CodePoints(v.GetValue<string>()) > max;
+        node is JsonValue v && v.TryGetValue<string>(out var s) && CodePoints(s) > max;
 
     /// <summary>Unicode code points: a surrogate pair counts once (netstandard2.1 has no Rune).</summary>
     private static int CodePoints(string s)

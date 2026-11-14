@@ -32,14 +32,18 @@ public partial class AgentRunTests
         public List<JsonObject> Attempts { get; } = new();
         public List<string> Indexed { get; } = new();
         public Func<JsonObject, (HttpStatusCode Status, string Body, string ContentType)?>? Answer { get; set; }
+        public Func<JsonObject, HttpResponseMessage?>? Respond { get; set; }
         public bool Down { get; set; }
+        public TimeSpan Delay { get; set; }
 
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
         {
             if (request.RequestUri!.AbsolutePath != "/api/agent-evidence/artifacts") return await base.SendAsync(request, ct);
             var body = JsonNode.Parse(await request.Content!.ReadAsStringAsync(ct))!.AsObject();
             lock (Attempts) Attempts.Add(body);
+            if (Delay > TimeSpan.Zero) await Task.Delay(Delay, ct);
             if (Down) throw new HttpRequestException("connection refused");
+            if (Respond?.Invoke(body) is { } response) return response;
             if (Answer?.Invoke(body) is { } a)
                 return new HttpResponseMessage(a.Status) { Content = new StringContent(a.Body, Encoding.UTF8, a.ContentType) };
             bool fresh;
@@ -60,7 +64,7 @@ public partial class AgentRunTests
         (status, new JsonObject { ["code"] = code, ["message"] = "no" }.ToJsonString(), "application/json");
 
     private static async Task<(AgentRun Run, DeliveryIndex Index, SigillClient Client)> StartDelivered(AgentRunOptions? options = null,
-        DeliveryIndex? index = null, AgentDefinition? agent = null, Func<DateTimeOffset>? indexClock = null)
+        DeliveryIndex? index = null, AgentDefinition? agent = null, Func<TimeSpan>? indexClock = null)
     {
         index ??= new DeliveryIndex(new StubSealer());
         var client = new SigillClient(new HttpClient(index) { BaseAddress = new Uri("https://api.example") });
@@ -180,7 +184,7 @@ public partial class AgentRunTests
     {
         var conflicts = new Dictionary<string, int>();
         var index = new DeliveryIndex(new StubSealer());
-        var now = DateTimeOffset.UtcNow;
+        var now = TimeSpan.FromHours(1);
         index.Answer = u =>
         {
             var label = Label(u);
@@ -194,7 +198,7 @@ public partial class AgentRunTests
         run.Delivery!.Status.Should().Be("delivered", "one conflict: the second upload wins");
         await run.RecordModelOutputAsync(Utf8("twice"));
         run.Delivery.Should().Match<AgentRunDelivery>(d => d.Status == "pending" && d.Delivered == 3 && d.Pending == 1 && d.Error == "seq 2: 409 conflict");
-        now = now.AddSeconds(6);
+        now += TimeSpan.FromSeconds(6);
         await run.RecordModelOutputAsync(Utf8("after the back-off"));
         run.Delivery!.Status.Should().Be("delivered");
         index.Indexed.Should().Equal(Chain(run));
@@ -202,7 +206,7 @@ public partial class AgentRunTests
 
     [Theory]
     [InlineData("seq_conflict", "application/json", "seq 1: 409 seq_conflict")]
-    [InlineData(null, "text/html", "seq 1: 409 Conflict")]
+    [InlineData(null, "text/html", "seq 1: 409 unexpected_response")]
     public async Task AFinalConflict_OrAConflictWithoutACode_IsRejected(string? code, string contentType, string error)
     {
         var index = new DeliveryIndex(new StubSealer());
@@ -222,7 +226,7 @@ public partial class AgentRunTests
     public async Task AnUnreachableIndex_HoldsTheUploads_TheRunGoesOn_AndTheCursorResumesAfterTheBackoff()
     {
         var index = new DeliveryIndex(new StubSealer());
-        var now = DateTimeOffset.UtcNow;
+        var now = TimeSpan.FromHours(1);
         var (run, _, client) = await StartDelivered(index: index, indexClock: () => now);
         using var owned = client;
         index.Answer = _ => (HttpStatusCode.ServiceUnavailable, "busy", "text/plain");
@@ -230,10 +234,10 @@ public partial class AgentRunTests
         var attempts = index.Attempts.Count;
         await run.RecordModelOutputAsync(Utf8("2"));   // within the back-off: nothing is tried
         index.Attempts.Should().HaveCount(attempts);
-        run.Delivery.Should().Match<AgentRunDelivery>(d => d.Status == "pending" && d.Delivered == 2 && d.Pending == 2 && d.Error == "seq 1: 503 Service Unavailable");
+        run.Delivery.Should().Match<AgentRunDelivery>(d => d.Status == "pending" && d.Delivered == 2 && d.Pending == 2 && d.Error == "seq 1: 503 unexpected_response");
 
         index.Answer = null;
-        now = now.AddSeconds(6);
+        now += TimeSpan.FromSeconds(6);
         await run.RecordModelOutputAsync(Utf8("3"));   // after it: the cursor resumes, in chain order
         index.Indexed.Should().Equal(Chain(run));
 
@@ -254,7 +258,7 @@ public partial class AgentRunTests
     public async Task FinishOnAHaltedRun_MakesOneMoreAttempt_PastTheBackoff()
     {
         var index = new DeliveryIndex(new StubSealer());
-        var now = DateTimeOffset.UtcNow;
+        var now = TimeSpan.FromHours(1);
         var (run, _, client) = await StartDelivered(GuardOptions(WithEnforcement(e => e["haltAfterDenials"] = 1), TestEngine.Shared)
             with { DeliverRun = true }, index, SupportAgent(), () => now);
         using var owned = client;
@@ -277,7 +281,7 @@ public partial class AgentRunTests
         await run.RecordToolCallAsync("lookup_ticket", Utf8("{}"));
         var bundle = await run.FinishAsync();
         bundle.Artifacts.Should().HaveCount(3);
-        run.Delivery.Should().Be(new AgentRunDelivery("pending", 0, 4, null, "control artifact: HttpRequestException: connection refused"));
+        run.Delivery.Should().Be(new AgentRunDelivery("pending", 0, 4, null, "control artifact: HttpRequestException"));
     }
 
     [Fact]

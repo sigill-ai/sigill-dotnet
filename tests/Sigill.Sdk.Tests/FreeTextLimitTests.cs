@@ -134,4 +134,59 @@ public partial class AgentRunTests
         (AgentProfiles.MaxDetailLength, AgentProfiles.MaxActivityNameLength, AgentProfiles.MaxApproverLength, AgentProfiles.MaxObjectMetadataBytes,
             AgentProfiles.MaxExtensionsBytes).Should().Be((512, 255, 255, 2048, 2048));
     }
+
+    [Fact]
+    public async Task DecisionAndContentType_AtTheLimitAreSealed_OneOverIsRefused()
+    {
+        var sealer = new StubSealer();
+        using var client = Client(sealer);
+        var run = await Start(client);
+        var atLimit = string.Concat(Enumerable.Repeat(Astral, 255));
+        await run.RecordAuthorizationAsync(new AgentAuthorization { Decision = atLimit });
+        await run.RecordToolCallAsync("t", Utf8("{}"), contentType: atLimit);
+        var before = sealer.Requests.Count;
+        (await FluentActions.Awaiting(() => run.RecordAuthorizationAsync(new AgentAuthorization { Decision = atLimit + "x" })).Should().ThrowAsync<ArgumentException>())
+            .Which.Message.Should().Be("step.decision is longer than 255 characters; nothing was sealed.");
+        (await FluentActions.Awaiting(() => run.RecordToolCallAsync("t", Utf8("{}"), contentType: atLimit + "x")).Should().ThrowAsync<ArgumentException>())
+            .Which.Message.Should().Be("objects[0].contentType is longer than 255 characters; nothing was sealed.");
+        (await FluentActions.Awaiting(() => Start(client, Options() with { BaselineStateContentType = atLimit + "x" })).Should().ThrowAsync<ArgumentException>())
+            .Which.Message.Should().StartWith("objects[").And.EndWith("].contentType is longer than 255 characters; nothing was sealed.");
+        sealer.Requests.Should().HaveCount(before);
+        (AgentProfiles.MaxDecisionLength, AgentProfiles.MaxContentTypeLength).Should().Be((255, 255));
+    }
+
+    [Fact]
+    public void TheCheck_NeverThrows_OnValuesThatAreNotStrings()
+    {
+        foreach (var value in new JsonNode?[] { JsonValue.Create(Guid.NewGuid()), JsonValue.Create(DateTimeOffset.UtcNow), JsonValue.Create('x'), JsonValue.Create(DateTime.UtcNow), JsonValue.Create(double.NaN) })
+        {
+            var envelope = new JsonObject
+            {
+                ["activity"] = new JsonObject { ["name"] = value!.DeepClone() },
+                ["step"] = new JsonObject { ["detail"] = value.DeepClone(), ["approver"] = value.DeepClone(), ["decision"] = value.DeepClone() },
+                ["objects"] = new JsonArray(new JsonObject { ["contentType"] = value.DeepClone(), ["metadata"] = new JsonObject { ["v"] = value.DeepClone() } }),
+                ["extensions"] = new JsonObject { ["v"] = value.DeepClone() },
+            };
+            FluentActions.Invoking(() => AgentProfiles.CheckFreeTextLimits(envelope)).Should().NotThrow();
+        }
+    }
+
+    // The bytes of a bound are those of the canonical (JCS) form: escapes as JCS writes them.
+    [Theory]
+    [InlineData("é", 1020, true)]
+    [InlineData("é", 1021, false)]
+    [InlineData("\U0001F600", 510, true)]
+    [InlineData("\U0001F600", 511, false)]
+    [InlineData("\u0001", 340, true)]
+    [InlineData("\u0001", 341, false)]
+    [InlineData("<", 2040, true)]
+    [InlineData("<", 2041, false)]
+    [InlineData("\u2028", 680, true)]
+    [InlineData("\u2028", 681, false)]
+    public void ExtensionsBytes_AreCountedInCanonicalForm(string fill, int count, bool within)
+    {
+        var text = System.Text.RegularExpressions.Regex.Unescape(fill.Replace("\\U0001F600", "\uD83D\uDE00"));
+        var envelope = new JsonObject { ["extensions"] = new JsonObject { ["k"] = string.Concat(Enumerable.Repeat(text, count)) } };
+        (AgentProfiles.CheckFreeTextLimits(envelope) is null).Should().Be(within);
+    }
 }

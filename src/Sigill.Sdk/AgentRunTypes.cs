@@ -222,16 +222,20 @@ public sealed record AgentRunOptions
     /// with <see cref="DeliverRun"/> itself. The upload happens in the artifact's ordered turn, after
     /// <see cref="OnArtifactSealed"/> and <see cref="AgentEnforcement.OnEvent"/>, in chain order.
     /// <para>
-    /// What leaves the machine, exactly: each artifact's signed envelope, signature and object digests. That is: the agent id
-    /// and version, the activity name and run id, step types and times, tool names, operations and use ids, rule ids and guard
-    /// reasons, model and provider request ids, token counts, approver references, sub-agent ids, object URIs, content types
-    /// and sizes, and the <c>detail</c> text and the names and identifiers you chose — those are your own text and are
-    /// uploaded as written. Never arguments, results, prompts, outputs or receipts; the policy document only with
-    /// <see cref="DisclosePolicy"/>.
+    /// What leaves the machine, exactly: each artifact's signed envelope, signature and object digests. That is: the agent id,
+    /// version, tenant id and identity reference, the activity name and run id, the control set's id and version, step types
+    /// and times, tool names, operations and use ids, authorization decisions and policy ids, rule ids and guard reasons, model
+    /// names, deployments, regions and stop reasons, model and provider request ids, token counts, approver references,
+    /// sub-agent ids, object URIs, content types and sizes, the <c>detail</c> text, and the signing certificate inside each
+    /// signature. Every one of these is your own value, uploaded as written; only <c>detail</c>, the activity name, the approver,
+    /// the decision and the content type are length-bounded (<see cref="AgentProfiles.CheckFreeTextLimits"/>). Never arguments,
+    /// results, prompts, outputs or receipts; the policy document only with <see cref="DisclosePolicy"/>.
     /// </para>
     /// <para>
     /// A delivery failure never raises, never breaks or halts the run: a temporary failure is retried at a later step after a
-    /// back-off, <c>run_end</c> makes one last attempt, and <see cref="AgentRun.Delivery"/> says where it stands;
+    /// back-off, <c>run_end</c> makes one last attempt, and <see cref="AgentRun.Delivery"/> says where it stands. With the index
+    /// unreachable a step takes up to 10 s longer and the run's end up to 30 s; a guard's refusal still blocks the call at once,
+    /// but its exception is raised after that wait.
     /// <see cref="SigillClient.DeliverAgentRunAsync"/> delivers a bundle later. Requires a <see cref="SigillClient"/>.
     /// </para>
     /// </summary>

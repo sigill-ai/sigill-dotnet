@@ -35,7 +35,9 @@ public sealed class SigillClient : ISigillAiEvidenceClient, IDisposable
     public SigillClient(string apiKey, string baseUrl = DefaultBaseUrl, TimeSpan? timeout = null)
     {
         if (string.IsNullOrWhiteSpace(apiKey)) throw new ArgumentException("apiKey is required", nameof(apiKey));
-        _http = new HttpClient { BaseAddress = new Uri(baseUrl), Timeout = timeout ?? TimeSpan.FromSeconds(30) };
+        // No redirects: a request with the API key and a run's envelopes goes to the configured host or nowhere.
+        _http = new HttpClient(new HttpClientHandler { AllowAutoRedirect = false })
+            { BaseAddress = new Uri(baseUrl), Timeout = timeout ?? TimeSpan.FromSeconds(30) };
         _http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
         _http.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
         _ownsHttp = true;
@@ -43,7 +45,9 @@ public sealed class SigillClient : ISigillAiEvidenceClient, IDisposable
 
     /// <summary>
     /// Construct using a caller-managed HttpClient — the <c>IHttpClientFactory</c>
-    /// path. The Authorization header MUST be set on the supplied client.
+    /// path. The Authorization header MUST be set on the supplied client. Disable redirects on it
+    /// (<c>HttpClientHandler.AllowAutoRedirect = false</c>), as the client this SDK creates itself does: otherwise a redirect
+    /// can carry the credentials and a run's envelopes to another host.
     /// </summary>
     public SigillClient(HttpClient http)
     {
@@ -825,14 +829,9 @@ public sealed class SigillClient : ISigillAiEvidenceClient, IDisposable
         AgentRunArtifact artifact, byte[]? controlSetDocument = null, CancellationToken cancellationToken = default)
     {
         if (artifact is null) throw new ArgumentNullException(nameof(artifact));
-        using var resp = await _http.PostAsJsonAsync(IndexPath, IndexBody(artifact, controlSetDocument), cancellationToken).ConfigureAwait(false);
-        JsonObject? json = null;
-        try { json = await resp.Content.ReadFromJsonAsync<JsonObject>(cancellationToken: cancellationToken).ConfigureAwait(false); }
-        catch (System.Text.Json.JsonException) { /* a non-JSON error page: the status code says enough */ }
-        if (!resp.IsSuccessStatusCode)
-            return new AgentIndexResult("failed", Error: $"{(int)resp.StatusCode} {AgentProfiles.Str(json?["code"]) ?? resp.ReasonPhrase}");
-        return new AgentIndexResult(AgentProfiles.Str(json?["status"]) ?? "indexed",
-            Guid.TryParse(AgentProfiles.Str(json?["runId"]), out var runId) ? runId : null);
+        // As in 0.14 no deadline of its own (the HttpClient's timeout applies); the answer is read by delivery's rules.
+        var answer = await IndexUploadAsync(artifact, controlSetDocument, Timeout.InfiniteTimeSpan, cancellationToken).ConfigureAwait(false);
+        return answer.Accepted ? new AgentIndexResult(answer.Status!, answer.RunId) : new AgentIndexResult("failed", Error: answer.ErrorText);
     }
 
     private const string IndexPath = "/api/agent-evidence/artifacts";
@@ -852,35 +851,31 @@ public sealed class SigillClient : ISigillAiEvidenceClient, IDisposable
 
     /// <summary>
     /// One upload of a run's delivery (<see cref="AgentRunOptions.DeliverRun"/>, <see cref="DeliverAgentRunAsync"/>): at most
-    /// <see cref="AgentRunIndex.UploadTimeout"/>, and never an exception — a transport failure or a timeout is an answer too.
+    /// <paramref name="timeout"/> from the request to the end of the answer's body (at most <see cref="AgentRunIndex.MaxAnswerBytes"/>
+    /// of it are read), and never an exception — a transport failure, a timeout or an unreadable answer is an answer too.
     /// </summary>
     /// <param name="artifact">The sealed artifact.</param>
     /// <param name="controlSetDocument">The policy document, with a Control Artifact only.</param>
+    /// <param name="timeout">The deadline of this upload.</param>
     /// <param name="ct">The caller's cancellation: raised.</param>
-    /// <param name="budget">A time budget: when it runs out, the upload is an answer (a timeout), not an exception.</param>
-    internal async Task<AgentRunIndex.Answer> IndexUploadAsync(AgentRunArtifact artifact, byte[]? controlSetDocument, CancellationToken ct,
-        CancellationToken budget = default)
+    internal async Task<AgentRunIndex.Answer> IndexUploadAsync(AgentRunArtifact artifact, byte[]? controlSetDocument, TimeSpan timeout,
+        CancellationToken ct)
     {
-        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct, budget);
-        timeout.CancelAfter(AgentRunIndex.UploadTimeout);
+        if (timeout != Timeout.InfiniteTimeSpan && timeout <= TimeSpan.Zero) return AgentRunIndex.Answer.Failed(nameof(TimeoutException));
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        deadline.CancelAfter(timeout);
         try
         {
-            using var resp = await _http.PostAsJsonAsync(IndexPath, IndexBody(artifact, controlSetDocument), timeout.Token).ConfigureAwait(false);
-            string? text = null;
-            try { text = await resp.Content.ReadAsStringAsync().ConfigureAwait(false); }
-            catch (Exception) { /* no body: the status code says enough */ }
-            JsonObject? json = null;
-            try { json = text is null ? null : JsonNode.Parse(text) as JsonObject; }
-            catch (System.Text.Json.JsonException) { /* an HTML error page: the status code says enough */ }
-            return new AgentRunIndex.Answer((int)resp.StatusCode, AgentProfiles.Str(json?["code"]), AgentProfiles.Str(json?["status"]),
-                Guid.TryParse(AgentProfiles.Str(json?["runId"]), out var runId) ? runId : null, resp.ReasonPhrase);
+            using var request = new HttpRequestMessage(HttpMethod.Post, IndexPath) { Content = JsonContent.Create(IndexBody(artifact, controlSetDocument)) };
+            // Headers first: the body is read against the same deadline, and only so far.
+            using var resp = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, deadline.Token).ConfigureAwait(false);
+            var body = await AgentRunIndex.ReadAtMostAsync(resp.Content, deadline.Token).ConfigureAwait(false);
+            return AgentRunIndex.Answer.From((int)resp.StatusCode, body);
         }
         catch (Exception ex) when (!ct.IsCancellationRequested) // the caller's cancellation is raised; everything else is an answer
         {
-            // Any exception is a temporary failure; our own time limit is named as the timeout it is.
-            return ex is OperationCanceledException
-                ? new AgentRunIndex.Answer(null, null, null, null, "the upload took longer than its time limit", nameof(TimeoutException))
-                : new AgentRunIndex.Answer(null, null, null, null, ex.Message, ex.GetType().Name);
+            // Our own SDK's words only: the exception's type, never its message.
+            return AgentRunIndex.Answer.Failed(ex is OperationCanceledException ? nameof(TimeoutException) : ex.GetType().Name);
         }
     }
 
@@ -901,10 +896,10 @@ public sealed class SigillClient : ISigillAiEvidenceClient, IDisposable
         Guid? runId = null;
         for (var i = 0; i < chain.Count; i++)
         {
-            var answer = await AgentRunIndex.UploadAsync(this, chain[i], null, cancellationToken).ConfigureAwait(false);
+            var answer = await AgentRunIndex.UploadAsync(this, chain[i], null, AgentRunIndex.UploadTimeout, cancellationToken).ConfigureAwait(false);
             cancellationToken.ThrowIfCancellationRequested();
             if (!answer.Accepted)
-                return new AgentRunDelivery(answer.Final ? "rejected" : "pending", i, chain.Count - i, runId, answer.ErrorAt(chain[i]));
+                return new AgentRunDelivery(answer.Final ? "rejected" : "pending", i, chain.Count - i, runId, AgentRunIndex.Where(chain[i]) + answer.ErrorText);
             runId = answer.RunId ?? runId;
         }
         return new AgentRunDelivery("delivered", chain.Count, 0, runId, null);
