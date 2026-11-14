@@ -547,6 +547,13 @@ public sealed record PolicyEvaluationRequest
     /// <summary>One result per Cedar rule.</summary>
     public required IReadOnlyList<PolicyRuleResult> Rules { get; init; }
 
+    /// <summary>
+    /// The enforcement comparison of the evaluated prefix (<c>spec/control-evaluation-v3.md</c> §5–§6), as
+    /// <see cref="AgentPolicy.CompareEnforcement"/> returns it: required for a v2 control set (the evaluation is then a
+    /// ControlEvaluation v3), absent for a v1 one. <see cref="Engine"/> is then the core it names or used.
+    /// </summary>
+    public JsonObject? Enforcement { get; init; }
+
     /// <summary>approved_before_run, approved_after_start or unapproved (§4.4).</summary>
     public required string PolicyStatus { get; init; }
 

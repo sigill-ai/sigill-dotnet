@@ -761,6 +761,49 @@ SIGILL_API_KEY=… SIGILL_CERTIFICATE_ID=… dotnet run --project examples/Sigil
 - A child run is refused after its parent halted only when it is started from the delegation object the parent
   returned in the same process.
 
+### Evaluating an enforced run (draft): did the guard do what the control set required?
+
+The verifier checks that a run's enforcement records hang together; it does not check that the guard denied or halted
+when it had to. An independent evaluator does: from the Control Artifact, the signed events with their signed object
+digests and the control-set document — never a payload — `AgentPolicy.CompareEnforcement` recomputes, for each event,
+what was due and compares it with what the chain records ([ControlEvaluation v3](spec/control-evaluation-v3.md) §5).
+It needs nothing an evidence index does not hold, and any `IPolicyEngine`.
+
+```csharp
+JsonObject enforcement = AgentPolicy.CompareEnforcement(bundle.ControlArtifact!, bundle.Artifacts, controlSetBytes, engine);
+var facts = AgentPolicy.BuildFactsV2(agentId, bundle.CorrelationId!, bundle.Artifacts, controlSetBytes);
+var evaluated = AgentPolicy.Evaluate(controlSetBytes, facts.Bytes, engine);
+var prepared = ControlEvaluation.PreparePolicy(new PolicyEvaluationRequest
+{
+    CertificateId = evaluatorCert, EvaluatorId = "urn:example:policy-evaluator", EvaluatorVersion = "1.0.0",
+    ControlArtifact = bundle.ControlArtifact!, ControlSetDocument = controlSetBytes, Events = bundle.Artifacts,
+    Rules = evaluated.Rules, Engine = evaluated.Engine, Enforcement = enforcement, PolicyStatus = "unapproved",
+});
+var evaluation = await ControlEvaluation.SealAsync(client, prepared, evaluatorCert);   // a ControlEvaluation v3
+```
+
+A policy evaluation of a run under a v2 control set is a ControlEvaluation v3 (facts v2 plus `policy.enforcement`); a v1
+control set keeps getting ControlEvaluation v2. A rule's result keeps its meaning — a matching rule is `FAIL` whether it
+was observed, refused or let through — and `overall` ignores the comparison; read `enforcement.result` beside it.
+`AgentRunVerifier.VerifyWithEngineAsync` recomputes the comparison with the core the evaluation names.
+
+| Outcome | Meaning | Findings |
+|---|---|---|
+| `as_required` | the guard did what was due | — |
+| `let_through` | the guard did less than required | `refusal_missing`, `unknown_tool_allowed`, `configuration_not_enforced`, `halt_missing` |
+| `over_enforced` | the guard did more, or recorded another reason or rules (nothing forbidden happened) | `unfounded_record`, `unfounded_halt`, `reason_mismatch`, `rules_mismatch` |
+| `not_checkable` | the record says the guard's core failed (`unavailable`) | — |
+| `pending` | the run has not ended at that event; nothing is asserted | — |
+
+The comparison is `not_performed` — never to be read as `as_required` — when the chain contradicts its own records or
+holds an event that is not Execution Evidence v4 (`chain_inconsistent`), when its records name more than one core
+(`engine_inconsistent`), or one the evaluator cannot run (`engine_unavailable`). It does not show which tool was in fact run under a call's name, that the per-call digests are those
+of what was sent and run, an action recorded as another step type, that a human approved, when an approval in fact
+expired, that a refused tool or anything after a halt did not run outside the run, whether the guard or other code of the
+producer sealed a record, whether the guard's core in fact failed where a record says `unavailable`, which core the guard
+ran when the run holds no record, that the sealed configuration is the one the runtime used, anything a rule matches only
+at run level, or anything after the evaluated prefix.
+
 ## Error handling
 
 Producer-time errors throw; verification errors are collected. This split is

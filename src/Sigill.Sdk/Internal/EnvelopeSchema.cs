@@ -33,6 +33,7 @@ internal static class EnvelopeSchema
         [AgentProfiles.ExecutionEvidenceSchemaV4] = "Sigill.Sdk.agent-execution-evidence-v4.schema.json",
         [AgentProfiles.ControlEvaluationSchema] = "Sigill.Sdk.control-evaluation-v1.schema.json",
         [AgentProfiles.ControlEvaluationSchemaV2] = "Sigill.Sdk.control-evaluation-v2.schema.json",
+        [AgentProfiles.ControlEvaluationSchemaV3] = "Sigill.Sdk.control-evaluation-v3.schema.json",
     };
 
     private static readonly HashSet<string> Supported = new(StringComparer.Ordinal)

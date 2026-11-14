@@ -58,7 +58,7 @@ public sealed class PolicyEnforcement
 /// content type <see cref="ControlSetContentType"/> that carries forbid-only Cedar rules, private controls
 /// and a coverage contract. Keep the approved document as a file and pass the same bytes to every run.
 /// </summary>
-public static class AgentPolicy
+public static partial class AgentPolicy
 {
     public const string ControlSetContentType = "application/vnd.sigill.control-set+json";
 
@@ -434,9 +434,11 @@ public static class AgentPolicy
         var errors = Validate(document);
         if (errors.Count > 0) throw new ArgumentException("Invalid policy control set: " + string.Join("; ", errors), nameof(document));
         var doc = Parse(document)!;
-        if (doc["cedar"]?["policies"]?["staticPolicies"] is not JsonObject rules)
-            throw new ArgumentException("The control set carries no Cedar rules.", nameof(document));
         var v2 = doc.ContainsKey("schemaVersion");
+        // A v2 control set may enforce without rules (ControlEvaluation v3 §2): every request is still evaluated, with the
+        // baseline permit alone, and there are no results.
+        if (doc["cedar"]?["policies"]?["staticPolicies"] is not JsonObject rules)
+            rules = v2 ? new JsonObject() : throw new ArgumentException("The control set carries no Cedar rules.", nameof(document));
         JsonObject? f;
         try { f = JsonNode.Parse(facts ?? throw new ArgumentNullException(nameof(facts))) as JsonObject; }
         catch (JsonException) { f = null; }
@@ -564,7 +566,12 @@ public static class AgentPolicy
     /// </param>
     /// <param name="controlSetDocument">The run's v2 policy control set, exact bytes.</param>
     /// <exception cref="ArgumentException">The control set is not a valid v2 policy control set, or the chain is not valid (as <see cref="BuildFacts(string, string, IEnumerable{JsonObject})"/>).</exception>
-    public static PolicyFacts BuildFactsV2(string agentId, string correlationId, IEnumerable<AgentRunArtifact> events, byte[] controlSetDocument)
+    public static PolicyFacts BuildFactsV2(string agentId, string correlationId, IEnumerable<AgentRunArtifact> events, byte[] controlSetDocument) =>
+        BuildFactsV2(agentId, correlationId, events, controlSetDocument, null);
+
+    /// <summary>As the public overload; with <paramref name="claimedMissing"/>, the events are an evaluator's contiguous prefix (CE v2 §4.5).</summary>
+    internal static PolicyFacts BuildFactsV2(string agentId, string correlationId, IEnumerable<AgentRunArtifact> events, byte[] controlSetDocument,
+        IReadOnlyList<int>? claimedMissing)
     {
         var errors = Validate(controlSetDocument);
         if (errors.Count > 0) throw new ArgumentException("Invalid policy control set: " + string.Join("; ", errors), nameof(controlSetDocument));
@@ -575,7 +582,7 @@ public static class AgentPolicy
         var digests = new Dictionary<JsonObject, IReadOnlyDictionary<string, string>>(); // by reference: one entry per envelope
         foreach (var a in list) digests.TryAdd(a.Envelope, a.ObjectDigests); // the first set of digests wins
         var entities = (JsonArray)(doc["cedar"]?["entities"] ?? new JsonArray()).DeepClone();
-        return BuildFacts(agentId, correlationId, list.Select(a => a.Envelope), null, entities, digests);
+        return BuildFacts(agentId, correlationId, list.Select(a => a.Envelope), claimedMissing, entities, digests);
     }
 
     /// <summary>The core of both facts versions: <paramref name="entities"/> is non-null exactly for facts v2.</summary>

@@ -215,6 +215,13 @@ public sealed record AgentEvaluationVerdict
     public bool ResultsRecomputed { get; init; }
 
     /// <summary>
+    /// policy, ControlEvaluation v3: the enforcement comparison is confirmed — recomputed with the engine given to the verifier,
+    /// which is the core the evaluation names, or <c>not_performed</c>, which needs no core. False without that engine: the rules
+    /// that need no core are still checked (<c>spec/control-evaluation-v3.md</c> §7). A comparison that differs is a finding.
+    /// </summary>
+    public bool EnforcementRecomputed { get; init; }
+
+    /// <summary>
     /// The role in the seal's <c>srAts.claimed</c> "sealed for" attribute (§8), e.g. <c>urn:sigill:role:policy-evaluator</c>.
     /// Meaningful only together with the signer: a shared service certificate's operator emits it for its own statements only.
     /// </summary>
@@ -376,6 +383,9 @@ public static class AgentRunVerifier
         public bool Consequential;
         public List<SignedObject> Objects = new();
 
+        /// <summary>The object digests its signature confirmed (set once the artifact is checked).</summary>
+        public IReadOnlyDictionary<string, string> Digests = new Dictionary<string, string>();
+
         /// <summary>Schema and §1 problems. They fail <c>envelope</c>, never <c>signatures</c>.</summary>
         public List<string> Conformance = new();
     }
@@ -498,7 +508,7 @@ public static class AgentRunVerifier
     {
         public List<string> Findings = new();
         public bool? FactsMatch, DigestsMatch, QualifiedMet;
-        public bool QualifiedRequired, Recomputed;
+        public bool QualifiedRequired, Recomputed, EnforcementRecomputed;
         public string? Note;
         public string? PolicyStatus, State;
     }
@@ -576,16 +586,21 @@ public static class AgentRunVerifier
         if (csBytes is null || cs is null) { bad("the control-set object is not supplied, so the evaluation cannot be checked"); return; }
         if (sa.Objects.FirstOrDefault(o => o.Role == "control-set")?.ContentType != AgentPolicy.ControlSetContentType)
             bad("its control set is not a policy control set");
-        if (AgentPolicy.Validate(csBytes).Count > 0 || cs["cedar"] is not JsonObject cedar) { bad("its control set is not a valid policy control set with Cedar rules"); return; }
-        if (cs.ContainsKey("schemaVersion")) { bad("policy evaluations of a v2 control set are not specified yet (Control Evaluation v2 fixes factsVersion 1)"); return; }
+        // ControlEvaluation v3 §1: a v1 control set is evaluated as v2, a v2 control set as v3; a v2 one may have no rules.
+        var v3 = AgentProfiles.Str(env["schemaVersion"]) == "3";
+        var csV2 = cs.ContainsKey("schemaVersion");
+        var cedar = cs["cedar"] as JsonObject;
+        if (AgentPolicy.Validate(csBytes).Count > 0 || (!csV2 && cedar is null)) { bad("its control set is not a valid policy control set with Cedar rules"); return; }
+        if (csV2 && !v3) { bad("a policy evaluation of a v2 control set is a ControlEvaluation v3 (v2 fixes factsVersion 1)"); return; }
+        if (!csV2 && v3) { bad("a policy evaluation of a v1 control set is a ControlEvaluation v2, not v3"); return; }
 
         var digests = AgentPolicy.ComputeDigests(csBytes);
         r.DigestsMatch = digests.ApprovalScopeDigest == AgentProfiles.Str(policy?["approvalScopeDigest"])
             && digests.CedarDigest == AgentProfiles.Str(policy?["cedarDigest"]);
         if (r.DigestsMatch == false) bad("approvalScopeDigest or cedarDigest does not recompute from its control set");
-        if (AgentProfiles.Str(policy?["evaluator"]?["schemaSha256"]) != AgentProfiles.Str(cedar["schemaSha256"]))
-            bad("evaluator.schemaSha256 is not the control set's cedar.schemaSha256");
-        sameIds((cedar["policies"]?["staticPolicies"] as JsonObject ?? new JsonObject()).Select(kv => kv.Key), "rule");
+        if (AgentProfiles.Str(policy?["evaluator"]?["schemaSha256"]) != AgentProfiles.Str(cedar?["schemaSha256"]))
+            bad(cedar is null ? "evaluator.schemaSha256 is present, but the control set has no cedar member" : "evaluator.schemaSha256 is not the control set's cedar.schemaSha256");
+        sameIds((cedar?["policies"]?["staticPolicies"] as JsonObject ?? new JsonObject()).Select(kv => kv.Key), "rule");
         var declaresPrivate = cs["privateControls"] is JsonArray pcs && pcs.Count > 0;
         if (declaresPrivate != (policy?["privateControlsReported"] is not null))
             bad("privateControlsReported must be present exactly when the control set declares private controls");
@@ -612,7 +627,10 @@ public static class AgentRunVerifier
         else if (AgentProfiles.Str(ctl?.Env["agent"]?["id"]) is not { } agentId || sa.CorrelationId is null) bad("the agent id or correlationId the facts depend on is missing");
         else if (missingOk)
         {
-            var rebuilt = AgentPolicy.BuildFacts(agentId, sa.CorrelationId, prefixEvents.Select(e => e.Env), missing.Select(m => m!.Value).ToList());
+            var claimed = missing.Select(m => m!.Value).ToList();
+            var rebuilt = v3
+                ? AgentPolicy.BuildFactsV2(agentId, sa.CorrelationId, prefixEvents.Select(e => new AgentRunArtifact(e.Env, e.Jws, e.Digests)), csBytes, claimed)
+                : AgentPolicy.BuildFacts(agentId, sa.CorrelationId, prefixEvents.Select(e => e.Env), claimed);
             r.FactsMatch = rebuilt.Bytes.AsSpan().SequenceEqual(factsBytes);
             if (r.FactsMatch == false) bad("its facts are not the facts of this run's signed events");
             else
@@ -624,8 +642,39 @@ public static class AgentRunVerifier
                 foreach (var w in (env["controls"] as JsonArray ?? new JsonArray()).OfType<JsonObject>()
                     .SelectMany(x => (x["where"] as JsonArray ?? new JsonArray()).Select(AgentProfiles.Str)).OfType<string>().Distinct())
                     if (!seqs.Contains(w)) bad($"where names request '{w}', which is not in its facts");
-                var ruleIds = (cedar["policies"]?["staticPolicies"] as JsonObject ?? new JsonObject()).Select(kv => kv.Key).ToList();
+                var ruleIds = (cedar?["policies"]?["staticPolicies"] as JsonObject ?? new JsonObject()).Select(kv => kv.Key).ToList();
                 if (recompute is not null) Recompute(env, csBytes, factsBytes, ruleIds, (long)csBytes.Length * requests.Count, recompute, r, bad, label);
+            }
+        }
+
+        // ControlEvaluation v3 §7: the enforcement comparison, checked without the core and, with it, recomputed from the run.
+        if (v3 && contiguous && policy?["enforcement"] is JsonObject member)
+        {
+            var prefixEnvelopes = prefixEvents.Select(e => e.Env).ToList();
+            var evaluatorEngine = AgentProfiles.Str(policy["evaluator"]?["engine"]);
+            if (EnforcementMemberProblem(member, evaluatorEngine, prefixEnvelopes) is { } problem) bad($"its enforcement comparison is wrong: {problem}");
+            else if (AgentProfiles.Str(member["comparison"]) == "not_performed") r.EnforcementRecomputed = true; // fully fixed by the chain
+            else if (ctl is not null && recompute is not null)
+            {
+                try
+                {
+                    var engineId = "cedar-policy@" + recompute.Engine.Version;
+                    var cost = (long)csBytes.Length * prefixEvents.Count;
+                    if (engineId != evaluatorEngine)
+                        r.Note ??= $"{label}: its enforcement comparison was not recomputed: it names the engine {evaluatorEngine}, the verifier has {engineId}.";
+                    else if (cost > recompute.Left)
+                        r.Note ??= $"{label}: its enforcement comparison was not recomputed: the recomputation budget of this verification is used up.";
+                    else
+                    {
+                        recompute.Left -= cost;
+                        var mine = AgentPolicy.CompareEnforcement(new AgentRunArtifact(ctl.Env, ctl.Jws, ctl.Digests),
+                            prefixEvents.Select(e => new AgentRunArtifact(e.Env, e.Jws, e.Digests)), csBytes, recompute.Engine);
+                        if (AgentProfiles.Canonical(mine).AsSpan().SequenceEqual(AgentProfiles.Canonical(member))) r.EnforcementRecomputed = true;
+                        else bad("its enforcement comparison does not recompute from the run's events");
+                    }
+                }
+                catch (PolicyEngineException ex) when (ex.Refused) { bad($"its enforcement comparison cannot be recomputed: {ex.Message.TrimEnd('.')}"); }
+                catch (Exception ex) { r.Note ??= $"{label}: its enforcement comparison was not recomputed: {ex.Message.TrimEnd('.')}."; }
             }
         }
 
@@ -730,6 +779,61 @@ public static class AgentRunVerifier
             return;
         }
         r.Recomputed = true;
+    }
+
+    /// <summary>
+    /// ControlEvaluation v3 §7, what a verifier checks of an <c>enforcement</c> member without the core: the reason it was not
+    /// performed, <c>recordedEngine</c>, the positional <c>recorded</c> of each decision, that every recorded decision is listed,
+    /// the order, the findings against the outcome, <c>pending</c> exactly for open events, and <c>result</c>. Null when it fits;
+    /// otherwise what does not. <paramref name="prefix"/> is the evaluated prefix, seq 0…T in order.
+    /// </summary>
+    internal static string? EnforcementMemberProblem(JsonObject member, string? evaluatorEngine, IReadOnlyList<JsonObject> prefix)
+    {
+        var comparison = AgentProfiles.Str(member["comparison"]);
+        var notPerformed = AgentProfiles.Str(member["notPerformed"]);
+        var recordedEngine = AgentProfiles.Str(member["recordedEngine"]);
+        var (inconsistent, engines) = AgentPolicy.ComparisonPreconditions(prefix);
+        if (engines.Count == 1 ? recordedEngine != engines[0] : recordedEngine is not null)
+            return engines.Count == 1 ? "recordedEngine is not the core the prefix's enforcement records name"
+                : $"recordedEngine is present, but the prefix's enforcement records name {(engines.Count == 0 ? "no core" : "more than one core")}";
+        var due = inconsistent ? "chain_inconsistent" : engines.Count > 1 ? "engine_inconsistent" : null;
+        if (due is not null)
+            return comparison == "not_performed" && notPerformed == due ? null : $"the comparison is not performed on this prefix ({due})";
+        if (notPerformed is "chain_inconsistent" or "engine_inconsistent") return $"the prefix gives no reason {notPerformed}";
+        if (engines.Count == 1 && engines[0] != evaluatorEngine)
+            return comparison == "not_performed" && notPerformed == "engine_unavailable" ? null
+                : "it is performed with a core other than the one the enforcement records name";
+        if (comparison != "performed")
+            return notPerformed == "engine_unavailable" ? "it is engine_unavailable, but the recorded engine is the evaluator's" : "it is not performed, though nothing keeps it from being performed";
+
+        var decisions = (member["decisions"] as JsonArray ?? new JsonArray()).OfType<JsonObject>().ToList();
+        var outcomes = new List<string>();
+        var listed = new HashSet<int>();
+        var previous = -1;
+        foreach (var d in decisions)
+        {
+            if (AgentProfiles.Int(d["seq"]) is not { } seq || seq <= previous || seq >= prefix.Count) return "decisions do not ascend by seq inside the prefix";
+            previous = seq;
+            listed.Add(seq);
+            var recorded = AgentPolicy.RecordedOutcome(prefix, seq, out var open);
+            if (AgentProfiles.Str(d["recorded"]) != recorded) return $"the decision at seq {seq} has a recorded outcome the chain does not give";
+            var outcome = AgentProfiles.Str(d["outcome"]) ?? "";
+            if ((outcome == "pending") != open) return $"the decision at seq {seq} is {(open ? "open, but not pending" : "pending, but not open")}";
+            var findings = (d["findings"] as JsonArray ?? new JsonArray()).Select(AgentProfiles.Str).ToList();
+            var order = findings.Select(f => AgentPolicy.FindingOrder(f ?? "")).ToList();
+            if (order.Zip(order.Skip(1), (a, b) => a < b).Any(x => !x)) return $"the findings of seq {seq} are not in the order of the table";
+            var letThrough = findings.Any(f => AgentPolicy.IsLetThrough(f ?? "") == true);
+            if ((outcome == "let_through" && !letThrough) || (outcome == "over_enforced" && (letThrough || findings.Count == 0)))
+                return $"the findings of seq {seq} do not fit its outcome {outcome}";
+            var rules = (d["dueRules"] as JsonArray ?? new JsonArray()).Select(AgentProfiles.Str).ToList();
+            if (!rules.SequenceEqual(rules.OrderBy(x => x, StringComparer.Ordinal))) return $"the dueRules of seq {seq} are not sorted";
+            outcomes.Add(outcome);
+        }
+        for (var s = 0; s < prefix.Count; s++)
+            if (AgentPolicy.RecordedOutcome(prefix, s, out _) is "refused" or "halted" && !listed.Contains(s))
+                return $"the event at seq {s} has a recorded outcome but no decision";
+        var result = new[] { "let_through", "over_enforced", "not_checkable", "pending" }.FirstOrDefault(outcomes.Contains) ?? "as_required";
+        return AgentProfiles.Str(member["result"]) == result ? null : "result does not follow from the decisions";
     }
 
     /// <summary>
@@ -880,6 +984,10 @@ public static class AgentRunVerifier
         /// <summary>The digest of a signed object, only when the signature confirmed it.</summary>
         public string? SignedDigest(string uri) =>
             Confirmed.Contains(uri) ? Objects.FirstOrDefault(o => o.Signed && o.Uri == uri)?.HashHex : null;
+
+        /// <summary>Every digest the signature confirmed, by URI.</summary>
+        public Dictionary<string, string> ConfirmedDigests() => Objects.Where(o => o.Signed && Confirmed.Contains(o.Uri))
+            .GroupBy(o => o.Uri, StringComparer.Ordinal).ToDictionary(g => g.Key, g => g.First().HashHex, StringComparer.Ordinal);
 
         public bool AllRetained => Objects.Where(o => o.Signed).All(o => o.Retained);
         public bool TimestampOk => TimestampPresent && TimestampValid == true;
@@ -1205,6 +1313,7 @@ public static class AgentRunVerifier
             if (required) tsRequired++;
 
             var c = await CheckArtifactAsync(sa, p.Art, bundle.Payloads, verifier, label, cancellationToken).ConfigureAwait(false);
+            sa.Digests = c.ConfirmedDigests();
             findings.AddRange(c.Findings);
             if (!c.AllRetained) objWarn = true;
             sealedObjects.Add((label, c));
@@ -1290,6 +1399,7 @@ public static class AgentRunVerifier
                 findings.Add($"{label}: {ctyProblem}.");
             }
             ctlCheck = await CheckArtifactAsync(ctl, bundle.ControlArtifact, bundle.Payloads, verifier, label, cancellationToken).ConfigureAwait(false);
+            ctl.Digests = ctlCheck.ConfirmedDigests();
             findings.AddRange(ctlCheck.Findings);
             if (!ctlCheck.AllRetained) objWarn = true;
             sealedObjects.Insert(0, (label, ctlCheck));
@@ -1500,7 +1610,7 @@ public static class AgentRunVerifier
             if (!c.TimestampOk) ef.Add($"{label}: a timestamp is required and it is {(c.TimestampPresent ? "invalid" : "missing")}.");
 
             var subject = sa.Env["subject"] as JsonObject;
-            var isV2 = AgentProfiles.Str(sa.Env["schemaVersion"]) == "2";
+            var isV2 = AgentProfiles.Str(sa.Env["schemaVersion"]) is "2" or "3"; // v3 is v2 with the policy kind of a v2 control set
             var kind = isV2 ? AgentProfiles.Str(sa.Env["kind"]) : null;
             var subjectBound = kind == "policy"
                 ? sa.Conformance.Count == 0 && PolicySubjectBound(sa.Env, subject, good, ctlSig, runEndSig) && (correlation is null || sa.CorrelationId == correlation)
@@ -1546,7 +1656,8 @@ public static class AgentRunVerifier
                     && subjectBound && controlSetMatches && baselineMatches != false && (v2 is null || v2.Findings.Count == 0),
                 SchemaVersion = AgentProfiles.Str(sa.Env["schemaVersion"]), Kind = kind,
                 PolicyStatus = v2?.PolicyStatus, PolicyState = v2?.State, FactsMatch = v2?.FactsMatch,
-                PolicyDigestsMatch = v2?.DigestsMatch, ResultsRecomputed = v2?.Recomputed ?? false, SealedFor = SealedForOf(sa.Jws),
+                PolicyDigestsMatch = v2?.DigestsMatch, ResultsRecomputed = v2?.Recomputed ?? false,
+                EnforcementRecomputed = v2?.EnforcementRecomputed ?? false, SealedFor = SealedForOf(sa.Jws),
                 QualifiedTimestampsRequired = v2?.QualifiedRequired ?? false, QualifiedTimestampsMet = v2?.QualifiedMet,
                 Supersedes = AgentProfiles.Str((sa.Env["supersedes"] as JsonObject)?["evidenceId"]),
                 ObjectsComplete = c.ObjectsComplete, WellFormed = sa.Conformance.Count == 0, Signer = signer,
