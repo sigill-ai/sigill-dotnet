@@ -817,22 +817,15 @@ public sealed class SigillClient : ISigillAiEvidenceClient, IDisposable
         AgentRun.StartAsync(this, agent, options, cancellationToken);
 
     /// <summary>
-    /// Uploads a sealed Control Artifact (with its policy control-set document) to the organisation's evidence
-    /// index — the transport of <see cref="AgentRunOptions.DisclosePolicy"/>. Internal on purpose: a general upload
-    /// of execution events is sharing with the index, which waits for its data-processing terms.
+    /// Uploads one sealed artifact to the organisation's evidence index: its signed envelope, its signature and its object
+    /// digests, and with a Control Artifact optionally the policy control-set document — the transport of
+    /// <see cref="AgentRunOptions.DisclosePolicy"/> when the run is not delivered.
     /// </summary>
     internal async Task<AgentIndexResult> IndexAgentArtifactAsync(
         AgentRunArtifact artifact, byte[]? controlSetDocument = null, CancellationToken cancellationToken = default)
     {
         if (artifact is null) throw new ArgumentNullException(nameof(artifact));
-        var body = new JsonObject
-        {
-            ["envelope"] = artifact.Envelope.DeepClone(),
-            ["signature"] = artifact.Signature.DeepClone(),
-            ["objectDigests"] = new JsonObject(artifact.ObjectDigests.Select(kv => new KeyValuePair<string, JsonNode?>(kv.Key, kv.Value))),
-        };
-        if (controlSetDocument is not null) body["controlSet"] = Convert.ToBase64String(controlSetDocument);
-        using var resp = await _http.PostAsJsonAsync("/api/agent-evidence/artifacts", body, cancellationToken).ConfigureAwait(false);
+        using var resp = await _http.PostAsJsonAsync(IndexPath, IndexBody(artifact, controlSetDocument), cancellationToken).ConfigureAwait(false);
         JsonObject? json = null;
         try { json = await resp.Content.ReadFromJsonAsync<JsonObject>(cancellationToken: cancellationToken).ConfigureAwait(false); }
         catch (System.Text.Json.JsonException) { /* a non-JSON error page: the status code says enough */ }
@@ -840,6 +833,81 @@ public sealed class SigillClient : ISigillAiEvidenceClient, IDisposable
             return new AgentIndexResult("failed", Error: $"{(int)resp.StatusCode} {AgentProfiles.Str(json?["code"]) ?? resp.ReasonPhrase}");
         return new AgentIndexResult(AgentProfiles.Str(json?["status"]) ?? "indexed",
             Guid.TryParse(AgentProfiles.Str(json?["runId"]), out var runId) ? runId : null);
+    }
+
+    private const string IndexPath = "/api/agent-evidence/artifacts";
+
+    /// <summary>What the index receives for one artifact: the signed envelope, the signature, the object digests (and the policy document).</summary>
+    private static JsonObject IndexBody(AgentRunArtifact artifact, byte[]? controlSetDocument)
+    {
+        var body = new JsonObject
+        {
+            ["envelope"] = artifact.Envelope.DeepClone(),
+            ["signature"] = artifact.Signature.DeepClone(),
+            ["objectDigests"] = new JsonObject(artifact.ObjectDigests.Select(kv => new KeyValuePair<string, JsonNode?>(kv.Key, kv.Value))),
+        };
+        if (controlSetDocument is not null) body["controlSet"] = Convert.ToBase64String(controlSetDocument);
+        return body;
+    }
+
+    /// <summary>
+    /// One upload of a run's delivery (<see cref="AgentRunOptions.DeliverRun"/>, <see cref="DeliverAgentRunAsync"/>): at most
+    /// <see cref="AgentRunIndex.UploadTimeout"/>, and never an exception — a transport failure or a timeout is an answer too.
+    /// </summary>
+    /// <param name="artifact">The sealed artifact.</param>
+    /// <param name="controlSetDocument">The policy document, with a Control Artifact only.</param>
+    /// <param name="ct">The caller's cancellation: raised.</param>
+    /// <param name="budget">A time budget: when it runs out, the upload is an answer (a timeout), not an exception.</param>
+    internal async Task<AgentRunIndex.Answer> IndexUploadAsync(AgentRunArtifact artifact, byte[]? controlSetDocument, CancellationToken ct,
+        CancellationToken budget = default)
+    {
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct, budget);
+        timeout.CancelAfter(AgentRunIndex.UploadTimeout);
+        try
+        {
+            using var resp = await _http.PostAsJsonAsync(IndexPath, IndexBody(artifact, controlSetDocument), timeout.Token).ConfigureAwait(false);
+            string? text = null;
+            try { text = await resp.Content.ReadAsStringAsync().ConfigureAwait(false); }
+            catch (Exception) { /* no body: the status code says enough */ }
+            JsonObject? json = null;
+            try { json = text is null ? null : JsonNode.Parse(text) as JsonObject; }
+            catch (System.Text.Json.JsonException) { /* an HTML error page: the status code says enough */ }
+            return new AgentRunIndex.Answer((int)resp.StatusCode, AgentProfiles.Str(json?["code"]), AgentProfiles.Str(json?["status"]),
+                Guid.TryParse(AgentProfiles.Str(json?["runId"]), out var runId) ? runId : null, resp.ReasonPhrase);
+        }
+        catch (Exception ex) when (!ct.IsCancellationRequested) // the caller's cancellation is raised; everything else is an answer
+        {
+            // Any exception is a temporary failure; our own time limit is named as the timeout it is.
+            return ex is OperationCanceledException
+                ? new AgentRunIndex.Answer(null, null, null, null, "the upload took longer than its time limit", nameof(TimeoutException))
+                : new AgentRunIndex.Answer(null, null, null, null, ex.Message, ex.GetType().Name);
+        }
+    }
+
+    /// <summary>
+    /// Delivers a run's artifacts to the organisation's evidence index — the catch-up for <see cref="AgentRunOptions.DeliverRun"/>,
+    /// e.g. after the index was unreachable during the run: the Control Artifact, then the events by seq. Control Evaluations are
+    /// not uploaded (the index does not take them), nor is the policy document. Safe to repeat (the index answers an artifact it
+    /// has with <c>exists</c>), works on a partial bundle, and stops at the first artifact the index does not take; the result says
+    /// how far it got. What it uploads is what <see cref="AgentRunOptions.DeliverRun"/> describes. A failure is the result, not an
+    /// exception; only a cancellation through <paramref name="cancellationToken"/> is raised.
+    /// </summary>
+    public async Task<AgentRunDelivery> DeliverAgentRunAsync(AgentRunBundle bundle, CancellationToken cancellationToken = default)
+    {
+        if (bundle is null) throw new ArgumentNullException(nameof(bundle));
+        var chain = new List<AgentRunArtifact>();
+        if (bundle.ControlArtifact is { } control) chain.Add(control);
+        chain.AddRange(bundle.Artifacts.OrderBy(a => a.Seq ?? int.MaxValue));
+        Guid? runId = null;
+        for (var i = 0; i < chain.Count; i++)
+        {
+            var answer = await AgentRunIndex.UploadAsync(this, chain[i], null, cancellationToken).ConfigureAwait(false);
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!answer.Accepted)
+                return new AgentRunDelivery(answer.Final ? "rejected" : "pending", i, chain.Count - i, runId, answer.ErrorAt(chain[i]));
+            runId = answer.RunId ?? runId;
+        }
+        return new AgentRunDelivery("delivered", chain.Count, 0, runId, null);
     }
 
     /// <summary>

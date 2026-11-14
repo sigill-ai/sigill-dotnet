@@ -505,6 +505,47 @@ What to know:
   accepts any `BlindObjectsVerifier`; `AgentRunVerifier.Remote(client)` is the
   blind endpoint used above.
 
+### Showing a run in Sigill
+
+Sealing sends digests only, so Sigill cannot show a run it has only sealed. To see the
+run in your organisation's Sigill (its steps, the guard's refusals, alerts), opt in per
+run with `DeliverRun`:
+
+```csharp
+var run = await client.StartAgentRunAsync(agent, options with { DeliverRun = true });
+// ... record the run as usual ...
+await run.FinishAsync("completed");
+AgentRunDelivery? delivery = run.Delivery;   // Status: delivered | pending | rejected; Delivered, Pending, RunId, Error
+```
+
+After each artifact is sealed, and after `OnArtifactSealed` for it, the SDK uploads it
+to the organisation's evidence index, in chain order, with the client and credentials
+the run seals with (`DeliverRun` needs `SigillClient`; another client is refused before
+anything is sealed).
+
+- **What leaves the machine:** each artifact's signed envelope, signature and object
+  digests. That is: agent id and version, activity name and run id, step types and
+  times, tool names, operations and use ids, rule ids and guard reasons, model and
+  provider request ids, token counts, approver references, sub-agent ids, object URIs,
+  content types and sizes, and any `detail` text or extension members you set — those
+  are your own text and are uploaded as written. Never arguments, results, prompts,
+  outputs or receipts. The policy document travels only with `DisclosePolicy`, on the
+  Control Artifact's upload (`run.PolicyDisclosure` is its outcome); if the index
+  refuses the document, the Control Artifact is sent again without it and the steps
+  follow.
+- **A delivery failure never fails the run.** It is not raised, does not break the
+  chain and does not halt an enforced run (the guard's own exceptions are raised as
+  before). An unreachable index (a timeout, 408, 429 or 5xx) holds the uploads; the
+  next attempt waits for a back-off (5 s, doubling to 5 min) and resumes from the first
+  artifact not delivered. `run_end` — and `FinishAsync` on a halted run — make one more
+  attempt past the back-off, at most 30 s. If the index refuses an artifact (any other
+  4xx), delivery stops there: the index holds a true prefix of the run, and
+  `run.Delivery` says why.
+- **Catch up later** from the bundle: `await client.DeliverAgentRunAsync(bundle)`
+  uploads the Control Artifact, then the events by seq, skips evaluations, and does not
+  send the policy document. Repeating it is safe (the index answers `exists`), a partial
+  bundle works, and it stops at the first artifact the index does not take.
+
 ### Sub-agents: run trees
 
 An agent that starts sub-agents records each one as its own run, bound to the
@@ -541,6 +582,8 @@ var result = await client.VerifyAgentRunTreeAsync(tree);
   has no result; close it `aborted` or `failed` instead, and the tree reports
   "parent terminated; evidence incomplete". The recorder keeps one event slot
   per open delegation, plus `run_end`, inside the 2,000-event bundle limit.
+- **Delivery is per run.** A child run is shown in Sigill only when its own options set
+  `DeliverRun`; it does not inherit the parent's.
 - **Attribution needs a policy.** Pass `AgentRunTreeOptions.ExpectedSigners`
   (`agent.id` → certificate thumbprints) and `ExpectedRoot…` to bind the tree to
   what you expected; without them a shared certificate proves consistency, not
