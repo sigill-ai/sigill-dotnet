@@ -367,17 +367,27 @@ public class EnforcementComparisonTests
             return events;
         }
 
-        FluentActions.Invoking(() => Run(Control(doc), WithRecord(null))).Should().Throw<ArgumentException>().WithMessage("*seq 2 has no enforcer.engine*");
+        FluentActions.Invoking(() => Run(Control(doc), WithRecord(null))).Should().Throw<ArgumentException>().WithMessage("the enforcement record at seq 2 has no enforcer.engine*");
         FluentActions.Invoking(() => Run(Control(doc), WithRecord(JsonValue.Create(4)))).Should().Throw<ArgumentException>().WithMessage("*seq 2 has no enforcer.engine*");
         FluentActions.Invoking(() => Run(Changed(e => e["activity"]!.AsObject().Remove("correlationId")), chain.Events))
             .Should().Throw<ArgumentException>().WithMessage("*names no agent or correlationId*");
         FluentActions.Invoking(() => Run(Changed(e => e["objects"]!.AsArray().Add(e["objects"]!.AsArray().Single(o => o!["role"]!.GetValue<string>() == "control-set")!.DeepClone())), chain.Events))
             .Should().Throw<ArgumentException>().WithMessage("*exactly one control-set object*");
         FluentActions.Invoking(() => Run(Changed(e => e["objects"]!.AsArray().Add(new JsonObject { ["uri"] = "objects/other", ["role"] = "tool-manifest", ["contentType"] = "application/json" })), chain.Events))
-            .Should().Throw<ArgumentException>().WithMessage("*more than one object of the lockable role 'tool-manifest'*");
+            .Should().Throw<ArgumentException>().WithMessage("The Control Artifact carries more than one tool-manifest object.*");
+        // The verifier's core-free path reads the same rule (it reports a finding, with or without an engine).
+        AgentPolicy.ComparisonInputProblem(Changed(e => e["objects"]!.AsArray().Add(new JsonObject { ["uri"] = "objects/other", ["role"] = "tool-manifest", ["contentType"] = "application/json" })).Envelope,
+            chain.Events.Select(e => e.Envelope).ToList()).Should().Be("The Control Artifact carries more than one tool-manifest object.");
+        AgentPolicy.ComparisonInputProblem(Control(doc).Envelope, WithRecord(null).Select(e => e.Envelope).ToList())
+            .Should().Be("the enforcement record at seq 2 has no enforcer.engine");
+        AgentPolicy.ComparisonInputProblem(Control(doc).Envelope, chain.Events.Select(e => e.Envelope).ToList()).Should().BeNull();
+        AgentPolicy.ComparisonInputProblem(Changed(e => e["activity"]!.AsObject().Remove("correlationId")).Envelope, chain.Events.Select(e => e.Envelope).ToList())
+            .Should().Be("The Control Artifact names no agent or correlationId.");
+        AgentPolicy.ComparisonInputProblem(Changed(e => e["objects"] = new JsonArray()).Envelope, chain.Events.Select(e => e.Envelope).ToList())
+            .Should().Be("The Control Artifact must carry exactly one control-set object.");
         // Also a role the control set does not lock.
         FluentActions.Invoking(() => Run(Changed(e => e["objects"]!.AsArray().Add(new JsonObject { ["uri"] = "objects/other", ["role"] = "instruction-set", ["contentType"] = "application/json" })), chain.Events))
-            .Should().Throw<ArgumentException>().WithMessage("*lockable role 'instruction-set'*");
+            .Should().Throw<ArgumentException>().WithMessage("*more than one instruction-set object*");
         FluentActions.Invoking(() => Run(Control(doc), chain.Events.Append(chain.Events[1]))).Should().Throw<ArgumentException>().WithMessage("*two events claim seq 1*");
         var unnumbered = chain.Events[1] with { Envelope = (JsonObject)chain.Events[1].Envelope.DeepClone() };
         unnumbered.Envelope.Remove("chain");
@@ -403,6 +413,9 @@ public class EnforcementComparisonTests
         FluentActions.Invoking(() => Run(refusesRun)).Should().Throw<PolicyEngineException>().WithMessage("The policy engine refused request run: no.").Which.Refused.Should().BeTrue();
         var throwsOnRun = new ScriptedEngine(call => IsRun(call) ? throw new InvalidOperationException("run trap") : TestEngine.Shared.Authorize(call));
         FluentActions.Invoking(() => Run(throwsOnRun)).Should().Throw<PolicyEngineException>().WithMessage("The policy engine failed: run trap");
+        // A run without any record: the comparison is performed, so it names the evaluator's core and reads its version.
+        FluentActions.Invoking(() => Run(new ScriptedEngine(TestEngine.Shared.Authorize, () => throw new InvalidOperationException("no version"))))
+            .Should().Throw<PolicyEngineException>().WithMessage("The policy engine failed: no version");
         // Without run_end there is no run-level request.
         var open = new Chain().Start().Call("crm.read_customer", "c1", "C");
         AgentPolicy.CompareEnforcement(Control(doc), open.Events, doc, refusesRun)["comparison"]!.GetValue<string>().Should().Be("performed");

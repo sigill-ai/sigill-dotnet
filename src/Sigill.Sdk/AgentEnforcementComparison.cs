@@ -63,9 +63,6 @@ public static partial class AgentPolicy
         if (!controlArtifact.ObjectDigests.TryGetValue(AgentProfiles.Str(sealedSets[0]["uri"]) ?? "", out var sealedHex)
             || sealedHex != EnvelopeHashing.HashHex(controlSetDocument))
             throw new ArgumentException("The control set is not the one the Control Artifact seals.", nameof(controlSetDocument));
-        foreach (var role in LockableRoles)
-            if ((controlArtifact.Envelope["objects"] as JsonArray)!.OfType<JsonObject>().Count(o => AgentProfiles.Str(o["role"]) == role) > 1)
-                throw new ArgumentException($"The Control Artifact carries more than one object of the lockable role '{role}'.", nameof(controlArtifact));
         var agentId = AgentProfiles.Str(controlArtifact.Envelope["agent"]?["id"]);
         var correlationId = AgentProfiles.Str(controlArtifact.Envelope["activity"]?["correlationId"]);
         if (agentId is null || correlationId is null)
@@ -84,8 +81,7 @@ public static partial class AgentPolicy
         static JsonObject StepOf(AgentRunArtifact a) => a.Envelope["step"] as JsonObject ?? new JsonObject();
         static string? TypeOf(AgentRunArtifact a) => AgentProfiles.Str(StepOf(a)["type"]);
         var envelopes = prefix.Select(a => a.Envelope).ToList();
-        if (envelopes.FirstOrDefault(e => IsEnforcementRecord(e) && AgentProfiles.Str(e["step"]?["enforcer"]?["engine"]) is null) is { } bare)
-            throw new ArgumentException($"The enforcement record at seq {AgentProfiles.Int(bare["chain"]?["seq"])} has no enforcer.engine.", nameof(events));
+        if (ComparisonInputProblem(controlArtifact.Envelope, envelopes) is { } input) throw new ArgumentException(input, nameof(events));
 
         var result = new JsonObject();
         var (inconsistent, engines) = ComparisonPreconditions(envelopes);
@@ -94,6 +90,8 @@ public static partial class AgentPolicy
             : engines.Count > 1 ? "engine_inconsistent"
             : engines.Count == 1 && engines[0] != "cedar-policy@" + Surfaced(() => engine.Version) ? "engine_unavailable"
             : null;
+        // A performed comparison names the evaluator's own core, so its version is read even when no record names one.
+        if (notPerformed is null) Surfaced(() => engine.Version);
         if (notPerformed is not null)
         {
             result["comparison"] = "not_performed";
@@ -191,6 +189,23 @@ public static partial class AgentPolicy
         result["decisions"] = decisions;
         result["result"] = new[] { "let_through", "over_enforced", "not_checkable", "pending" }.FirstOrDefault(outcomes.Contains) ?? "as_required";
         return Ordered(result);
+    }
+
+    /// <summary>
+    /// What makes a run one the comparison cannot read, checked without a core: a Control Artifact without exactly one
+    /// control-set object, without agent or correlationId, or with a lockable role twice (which digest is locked would be a
+    /// guess), or an enforcement record that names no core.
+    /// </summary>
+    internal static string? ComparisonInputProblem(JsonObject controlEnvelope, IReadOnlyList<JsonObject> prefix)
+    {
+        var objects = (controlEnvelope["objects"] as JsonArray ?? new JsonArray()).OfType<JsonObject>().ToList();
+        if (objects.Count(o => AgentProfiles.Str(o["role"]) == "control-set") != 1) return "The Control Artifact must carry exactly one control-set object.";
+        if (AgentProfiles.Str(controlEnvelope["agent"]?["id"]) is null || AgentProfiles.Str(controlEnvelope["activity"]?["correlationId"]) is null)
+            return "The Control Artifact names no agent or correlationId.";
+        foreach (var role in LockableRoles.OrderBy(r => r, StringComparer.Ordinal))
+            if (objects.Count(o => AgentProfiles.Str(o["role"]) == role) > 1) return $"The Control Artifact carries more than one {role} object.";
+        return prefix.FirstOrDefault(e => IsEnforcementRecord(e) && AgentProfiles.Str(e["step"]?["enforcer"]?["engine"]) is null) is { } bare
+            ? $"the enforcement record at seq {AgentProfiles.Int(bare["chain"]?["seq"])} has no enforcer.engine" : null;
     }
 
     /// <summary>Whatever the engine throws is the <see cref="PolicyEngineException"/> the comparison promises.</summary>

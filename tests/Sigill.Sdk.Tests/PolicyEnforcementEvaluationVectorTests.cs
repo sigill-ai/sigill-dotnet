@@ -234,6 +234,8 @@ public partial class AgentRunTests
         var withEngine = (await AgentRunVerifier.VerifyWithEngineAsync(patched, StubVerify, TestEngine.Shared)).Evaluations.Single();
         withEngine.Valid.Should().BeFalse();
         withEngine.Findings.Should().Contain(f => f.Contains(RejectedWith[name], StringComparison.Ordinal), string.Join(" | ", withEngine.Findings));
+        // Whatever rejected it — schema, the core-free checks or recomputation with the core (x02) — it carries no comparison.
+        (withEngine.EnforcementComparison, withEngine.EnforcementResult).Should().Be(((string?)null, (string?)null));
         if (x["needsEngine"]!.GetValue<bool>()) return;
         var blind = (await AgentRunVerifier.VerifyAsync(patched, StubVerify)).Evaluations.Single();
         blind.Valid.Should().BeFalse("the rule needs no core");

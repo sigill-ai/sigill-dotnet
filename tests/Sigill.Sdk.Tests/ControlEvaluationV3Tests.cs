@@ -77,6 +77,13 @@ public partial class AgentRunTests
         (blind.Valid, blind.ResultsRecomputed, blind.EnforcementRecomputed).Should().Be((true, false, false));
         (blind.EnforcementComparison, blind.EnforcementResult).Should().Be(("performed", "as_required"));
         EvaluationNotes(blindResult).Should().Equal("evaluation 0: its enforcement comparison was not recomputed: no engine was given.");
+
+        // With another core both missed recomputations of a performed member reach the caller, the results' and the comparison's.
+        var mismatched = await AgentRunVerifier.VerifyWithEngineAsync(bundle, StubVerify, new Renamed("99.0.0"));
+        (mismatched.Evaluations.Single().Valid, mismatched.Evaluations.Single().EnforcementRecomputed).Should().Be((true, false));
+        EvaluationNotes(mismatched).Should().Equal(
+            "evaluation 0: its results were not recomputed: it names the engine cedar-policy@4.14.0, the verifier has cedar-policy@99.0.0.",
+            "evaluation 0: its enforcement comparison was not recomputed: it names the engine cedar-policy@4.14.0, the verifier has cedar-policy@99.0.0.");
     }
 
     /// <summary>The official core under another version name: an evaluator whose core is not the one the guard recorded.</summary>
@@ -97,14 +104,12 @@ public partial class AgentRunTests
         var blindResult = await AgentRunVerifier.VerifyAsync(bundle, StubVerify);
         var blind = blindResult.Evaluations.Single();
         (blind.Valid, blind.EnforcementRecomputed, blind.EnforcementComparison, blind.EnforcementResult).Should().Be((true, false, "not_performed", (string?)null));
-        EvaluationNotes(blindResult).Should().Equal("evaluation 0: its enforcement comparison was not recomputed: no engine was given.");
+        EvaluationNotes(blindResult).Should().BeEmpty("a not_performed member is never recomputed, so nothing is missed");
 
-        // With another core both missed recomputations reach the caller, the results' and the comparison's.
         var mismatched = await AgentRunVerifier.VerifyWithEngineAsync(bundle, StubVerify, TestEngine.Shared);
         mismatched.Evaluations.Single().EnforcementRecomputed.Should().BeFalse();
         EvaluationNotes(mismatched).Should().Equal(
-            "evaluation 0: its results were not recomputed: it names the engine cedar-policy@99.0.0, the verifier has cedar-policy@4.14.0.",
-            "evaluation 0: its enforcement comparison was not recomputed: it names the engine cedar-policy@99.0.0, the verifier has cedar-policy@4.14.0.");
+            "evaluation 0: its results were not recomputed: it names the engine cedar-policy@99.0.0, the verifier has cedar-policy@4.14.0.");
 
         // Even holding the named core: not_performed has nothing to reproduce, so it is not recomputed — and not a pass.
         var named = (await AgentRunVerifier.VerifyWithEngineAsync(bundle, StubVerify, other)).Evaluations.Single();
@@ -187,7 +192,7 @@ public partial class AgentRunTests
         var e = result.Evaluations.Single();
         e.Valid.Should().BeFalse();
         e.Findings.Should().Contain(f => f.Contains(expect, StringComparison.Ordinal), string.Join(" | ", e.Findings));
-        e.EnforcementRecomputed.Should().BeFalse();
+        (e.EnforcementRecomputed, e.EnforcementComparison, e.EnforcementResult).Should().Be((false, (string?)null, (string?)null), "an invalid evaluation carries no comparison");
     }
 
     [Fact]

@@ -780,11 +780,12 @@ var prepared = ControlEvaluation.PreparePolicy(new PolicyEvaluationRequest
     Rules = evaluated.Rules, Engine = evaluated.Engine, Enforcement = enforcement, PolicyStatus = "unapproved",
 });
 var evaluation = await ControlEvaluation.SealAsync(client, prepared, evaluatorCert);   // a ControlEvaluation v3
-
-// Reading it back: a valid evaluation is not yet a pass — check what the comparison said.
-var verdict = (await AgentRunVerifier.VerifyWithEngineAsync(bundleWithEvaluation, verifier, engine)).Evaluations.Single();
-bool guardDidWhatWasDue = verdict.Valid && verdict.EnforcementRecomputed && verdict.EnforcementResult == "as_required";
 ```
+
+Conclude that the guard did what was due only when `verdict.Valid`, `verdict.EnforcementRecomputed`,
+`verdict.EnforcementResult == "as_required"` and `verdict.PolicyState == "finalized"` all hold (`verdict` is the
+evaluation's entry in the verification result's `Evaluations`): without `EnforcementRecomputed` the result is the
+evaluator's unconfirmed word, and a partial prefix says nothing about the events after it.
 
 A policy evaluation of a run under a v2 control set is a ControlEvaluation v3 (facts v2 plus `policy.enforcement`); a v1
 control set keeps getting ControlEvaluation v2. A rule's result keeps its meaning — a matching rule is `FAIL` whether it
