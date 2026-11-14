@@ -1035,9 +1035,11 @@ public sealed class AgentRun
                 }
                 if (!answer.Accepted)
                 {
-                    if (!answer.Final && cut && Left() <= TimeSpan.Zero)
+                    // No answer, and a deadline the turn's budget cut shorter than the upload limit: the budget ran out, not the
+                    // index — no back-off. Decided on these two facts alone, not by reading the clock again (its timer may fire a
+                    // moment before the clock says the budget is spent). A full-length attempt without an answer did fail.
+                    if (answer.Http is null && cut)
                     {
-                        // Cut short by the turn's budget, not failed: no back-off. An attempt that had the full limit did fail.
                         _indexError = AgentRunIndex.Where(artifact) + IndexBudgetUsedUp;
                         return;
                     }

@@ -49,7 +49,8 @@ public sealed class SigillClient : ISigillAiEvidenceClient, IDisposable
     /// (<c>HttpClientHandler.AllowAutoRedirect = false</c>), as the client this SDK creates itself does. The SDK refuses an
     /// index answer that came from a redirected request (the delivery stops there, visibly), but by then the redirect has
     /// already carried the request — a run's envelope and, with some handlers, the credentials — to the other host; only
-    /// disabling redirects stops that.
+    /// disabling redirects stops that. For the same reason a handler that rewrites the request URI and does not restore it gets
+    /// every upload to the evidence index refused as <c>unexpected_response</c>.
     /// </summary>
     public SigillClient(HttpClient http)
     {
