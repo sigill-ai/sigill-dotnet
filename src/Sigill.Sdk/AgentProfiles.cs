@@ -72,6 +72,84 @@ public static class AgentProfiles
     public const string ExecutionEvidenceContentType = "application/vnd.sigill.agent-execution+json";
     public const string ControlEvaluationContentType = "application/vnd.sigill.control-evaluation+json";
 
+    // ── The caller's free text in an envelope (common rules §9): a producer rule, the schemas are unchanged ──
+
+    /// <summary>At most this many characters (Unicode code points, as JSON Schema <c>maxLength</c> counts) in a step's <c>detail</c>.</summary>
+    public const int MaxDetailLength = 512;
+
+    /// <summary>At most this many characters (Unicode code points) in <c>activity.name</c>.</summary>
+    public const int MaxActivityNameLength = 255;
+
+    /// <summary>At most this many characters (Unicode code points) in a step's <c>approver</c>.</summary>
+    public const int MaxApproverLength = 255;
+
+    /// <summary>At most this many characters (Unicode code points) in a step's <c>decision</c>.</summary>
+    public const int MaxDecisionLength = 255;
+
+    /// <summary>At most this many characters (Unicode code points) in an object's <c>contentType</c>.</summary>
+    public const int MaxContentTypeLength = 255;
+
+    /// <summary>At most this many bytes in an object's <c>metadata</c>: the UTF-8 length of the member's value in canonical (JCS) form.</summary>
+    public const int MaxObjectMetadataBytes = 2048;
+
+    /// <summary>At most this many bytes in the envelope's <c>extensions</c>: the UTF-8 length of the member's value in canonical (JCS) form.</summary>
+    public const int MaxExtensionsBytes = 2048;
+
+    /// <summary>
+    /// Checks the free text a caller sets in a Control Artifact or Execution Evidence envelope (any schema version) against
+    /// <see cref="MaxDetailLength"/>, <see cref="MaxActivityNameLength"/>, <see cref="MaxApproverLength"/>,
+    /// <see cref="MaxDecisionLength"/>, <see cref="MaxContentTypeLength"/>, <see cref="MaxObjectMetadataBytes"/> and
+    /// <see cref="MaxExtensionsBytes"/>. Null when it is within them; otherwise a short message naming the first field over
+    /// its limit and the limit, never the value. The recorder refuses such an event before sealing it, and an index may refuse
+    /// it on upload. Never throws: a member that is absent or of another type is not checked (schema validation is separate).
+    /// </summary>
+    public static string? CheckFreeTextLimits(JsonNode? envelope)
+    {
+        try { return FreeTextProblem(envelope); }
+        catch (Exception) { return null; } // never throws: an envelope this cannot read is the schema's business
+    }
+
+    private static string? FreeTextProblem(JsonNode? envelope)
+    {
+        if (envelope is not JsonObject e) return null;
+        if (TooLong((e["activity"] as JsonObject)?["name"], MaxActivityNameLength))
+            return $"activity.name is longer than {MaxActivityNameLength} characters";
+        var step = e["step"] as JsonObject;
+        if (TooLong(step?["detail"], MaxDetailLength)) return $"step.detail is longer than {MaxDetailLength} characters";
+        if (TooLong(step?["approver"], MaxApproverLength)) return $"step.approver is longer than {MaxApproverLength} characters";
+        if (TooLong(step?["decision"], MaxDecisionLength)) return $"step.decision is longer than {MaxDecisionLength} characters";
+        if (e["objects"] is JsonArray objects)
+            for (var i = 0; i < objects.Count; i++)
+            {
+                if (objects[i] is not JsonObject o) continue;
+                if (TooLong(o["contentType"], MaxContentTypeLength)) return $"objects[{i}].contentType is longer than {MaxContentTypeLength} characters";
+                if (o["metadata"] is { } metadata && Utf8Length(metadata) > MaxObjectMetadataBytes)
+                    return $"objects[{i}].metadata is larger than {MaxObjectMetadataBytes} bytes";
+            }
+        if (e["extensions"] is JsonObject extensions && Utf8Length(extensions) > MaxExtensionsBytes)
+            return $"extensions is larger than {MaxExtensionsBytes} bytes";
+        return null;
+    }
+
+    // TryGetValue: a JsonValue built from a Guid, a DateTime or a char reports kind String but is no string to GetValue.
+    private static bool TooLong(JsonNode? node, int max) =>
+        node is JsonValue v && v.TryGetValue<string>(out var s) && CodePoints(s) > max;
+
+    /// <summary>Unicode code points: a surrogate pair counts once (netstandard2.1 has no Rune).</summary>
+    private static int CodePoints(string s)
+    {
+        var n = 0;
+        for (var i = 0; i < s.Length; i++, n++)
+            if (char.IsHighSurrogate(s[i]) && i + 1 < s.Length && char.IsLowSurrogate(s[i + 1])) i++;
+        return n;
+    }
+
+    private static int Utf8Length(JsonNode value)
+    {
+        try { return Canonical(value).Length; }
+        catch (Exception) { return 0; } // not canonicalizable (e.g. NaN): not I-JSON, which other checks refuse
+    }
+
     /// <summary>
     /// The binding digest of an artifact (§2): lowercase SHA-256 hex over the
     /// base64url-decoded JWS Signature Value of its classical signature — the

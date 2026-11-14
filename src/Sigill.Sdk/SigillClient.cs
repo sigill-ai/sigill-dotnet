@@ -35,7 +35,9 @@ public sealed class SigillClient : ISigillAiEvidenceClient, IDisposable
     public SigillClient(string apiKey, string baseUrl = DefaultBaseUrl, TimeSpan? timeout = null)
     {
         if (string.IsNullOrWhiteSpace(apiKey)) throw new ArgumentException("apiKey is required", nameof(apiKey));
-        _http = new HttpClient { BaseAddress = new Uri(baseUrl), Timeout = timeout ?? TimeSpan.FromSeconds(30) };
+        // No redirects: a request with the API key and a run's envelopes goes to the configured host or nowhere.
+        _http = new HttpClient(new HttpClientHandler { AllowAutoRedirect = false })
+            { BaseAddress = new Uri(baseUrl), Timeout = timeout ?? TimeSpan.FromSeconds(30) };
         _http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
         _http.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
         _ownsHttp = true;
@@ -43,7 +45,12 @@ public sealed class SigillClient : ISigillAiEvidenceClient, IDisposable
 
     /// <summary>
     /// Construct using a caller-managed HttpClient — the <c>IHttpClientFactory</c>
-    /// path. The Authorization header MUST be set on the supplied client.
+    /// path. The Authorization header MUST be set on the supplied client. Disable redirects on it
+    /// (<c>HttpClientHandler.AllowAutoRedirect = false</c>), as the client this SDK creates itself does. The SDK refuses an
+    /// index answer that came from a redirected request (the delivery stops there, visibly), but by then the redirect has
+    /// already carried the request — a run's envelope and, with some handlers, the credentials — to the other host; only
+    /// disabling redirects stops that. For the same reason a handler that rewrites the request URI and does not restore it gets
+    /// every upload to the evidence index refused as <c>unexpected_response</c>.
     /// </summary>
     public SigillClient(HttpClient http)
     {
@@ -817,14 +824,24 @@ public sealed class SigillClient : ISigillAiEvidenceClient, IDisposable
         AgentRun.StartAsync(this, agent, options, cancellationToken);
 
     /// <summary>
-    /// Uploads a sealed Control Artifact (with its policy control-set document) to the organisation's evidence
-    /// index — the transport of <see cref="AgentRunOptions.DisclosePolicy"/>. Internal on purpose: a general upload
-    /// of execution events is sharing with the index, which waits for its data-processing terms.
+    /// Uploads one sealed artifact to the organisation's evidence index: its signed envelope, its signature and its object
+    /// digests, and with a Control Artifact optionally the policy control-set document — the transport of
+    /// <see cref="AgentRunOptions.DisclosePolicy"/> when the run is not delivered.
     /// </summary>
     internal async Task<AgentIndexResult> IndexAgentArtifactAsync(
         AgentRunArtifact artifact, byte[]? controlSetDocument = null, CancellationToken cancellationToken = default)
     {
         if (artifact is null) throw new ArgumentNullException(nameof(artifact));
+        // Delivery's upload limit for the whole exchange, body included: a trickling answer cannot hold the start.
+        var answer = await IndexUploadAsync(artifact, controlSetDocument, AgentRunIndex.UploadTimeout, cancellationToken).ConfigureAwait(false);
+        return answer.Accepted ? new AgentIndexResult(answer.Status!, answer.RunId) : new AgentIndexResult("failed", Error: answer.ErrorText);
+    }
+
+    private const string IndexPath = "/api/agent-evidence/artifacts";
+
+    /// <summary>What the index receives for one artifact: the signed envelope, the signature, the object digests (and the policy document).</summary>
+    private static JsonObject IndexBody(AgentRunArtifact artifact, byte[]? controlSetDocument)
+    {
         var body = new JsonObject
         {
             ["envelope"] = artifact.Envelope.DeepClone(),
@@ -832,14 +849,67 @@ public sealed class SigillClient : ISigillAiEvidenceClient, IDisposable
             ["objectDigests"] = new JsonObject(artifact.ObjectDigests.Select(kv => new KeyValuePair<string, JsonNode?>(kv.Key, kv.Value))),
         };
         if (controlSetDocument is not null) body["controlSet"] = Convert.ToBase64String(controlSetDocument);
-        using var resp = await _http.PostAsJsonAsync("/api/agent-evidence/artifacts", body, cancellationToken).ConfigureAwait(false);
-        JsonObject? json = null;
-        try { json = await resp.Content.ReadFromJsonAsync<JsonObject>(cancellationToken: cancellationToken).ConfigureAwait(false); }
-        catch (System.Text.Json.JsonException) { /* a non-JSON error page: the status code says enough */ }
-        if (!resp.IsSuccessStatusCode)
-            return new AgentIndexResult("failed", Error: $"{(int)resp.StatusCode} {AgentProfiles.Str(json?["code"]) ?? resp.ReasonPhrase}");
-        return new AgentIndexResult(AgentProfiles.Str(json?["status"]) ?? "indexed",
-            Guid.TryParse(AgentProfiles.Str(json?["runId"]), out var runId) ? runId : null);
+        return body;
+    }
+
+    /// <summary>
+    /// One upload of a run's delivery (<see cref="AgentRunOptions.DeliverRun"/>, <see cref="DeliverAgentRunAsync"/>): at most
+    /// <paramref name="timeout"/> from the request to the end of the answer's body (at most <see cref="AgentRunIndex.MaxAnswerBytes"/>
+    /// of it are read), and never an exception — a transport failure, a timeout or an unreadable answer is an answer too.
+    /// </summary>
+    /// <param name="artifact">The sealed artifact.</param>
+    /// <param name="controlSetDocument">The policy document, with a Control Artifact only.</param>
+    /// <param name="timeout">The deadline of this upload.</param>
+    /// <param name="ct">The caller's cancellation: raised.</param>
+    internal async Task<AgentRunIndex.Answer> IndexUploadAsync(AgentRunArtifact artifact, byte[]? controlSetDocument, TimeSpan timeout,
+        CancellationToken ct)
+    {
+        if (timeout != Timeout.InfiniteTimeSpan && timeout <= TimeSpan.Zero) return AgentRunIndex.Answer.Failed(nameof(TimeoutException));
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        deadline.CancelAfter(timeout);
+        try
+        {
+            var requested = _http.BaseAddress is { } baseAddress ? new Uri(baseAddress, IndexPath) : null;
+            using var request = new HttpRequestMessage(HttpMethod.Post, IndexPath) { Content = JsonContent.Create(IndexBody(artifact, controlSetDocument)) };
+            // Headers first: the body is read against the same deadline, and only so far.
+            using var resp = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, deadline.Token).ConfigureAwait(false);
+            // An answer to a redirected request (a caller's HttpClient may follow redirects) is not the index's, whatever it says.
+            if (requested is not null && resp.RequestMessage?.RequestUri is { } answered && answered != requested)
+                return AgentRunIndex.Answer.FromElsewhere((int)resp.StatusCode);
+            var body = await AgentRunIndex.ReadAtMostAsync(resp.Content, deadline.Token).ConfigureAwait(false);
+            return AgentRunIndex.Answer.From((int)resp.StatusCode, body);
+        }
+        catch (Exception ex) when (!ct.IsCancellationRequested) // the caller's cancellation is raised; everything else is an answer
+        {
+            // Our own SDK's words only: the exception's type, never its message.
+            return AgentRunIndex.Answer.Failed(ex is OperationCanceledException ? nameof(TimeoutException) : ex.GetType().Name);
+        }
+    }
+
+    /// <summary>
+    /// Delivers a run's artifacts to the organisation's evidence index — the catch-up for <see cref="AgentRunOptions.DeliverRun"/>,
+    /// e.g. after the index was unreachable during the run: the Control Artifact, then the events by seq. Control Evaluations are
+    /// not uploaded (the index does not take them), nor is the policy document. Safe to repeat (the index answers an artifact it
+    /// has with <c>exists</c>), works on a partial bundle, and stops at the first artifact the index does not take; the result says
+    /// how far it got. What it uploads is what <see cref="AgentRunOptions.DeliverRun"/> describes. A failure is the result, not an
+    /// exception; only a cancellation through <paramref name="cancellationToken"/> is raised.
+    /// </summary>
+    public async Task<AgentRunDelivery> DeliverAgentRunAsync(AgentRunBundle bundle, CancellationToken cancellationToken = default)
+    {
+        if (bundle is null) throw new ArgumentNullException(nameof(bundle));
+        var chain = new List<AgentRunArtifact>();
+        if (bundle.ControlArtifact is { } control) chain.Add(control);
+        chain.AddRange(bundle.Artifacts.OrderBy(a => a.Seq ?? int.MaxValue));
+        Guid? runId = null;
+        for (var i = 0; i < chain.Count; i++)
+        {
+            var answer = await AgentRunIndex.UploadAsync(this, chain[i], null, AgentRunIndex.UploadTimeout, cancellationToken).ConfigureAwait(false);
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!answer.Accepted)
+                return new AgentRunDelivery(answer.Final ? "rejected" : "pending", i, chain.Count - i, runId, AgentRunIndex.Where(chain[i]) + answer.ErrorText);
+            runId = answer.RunId ?? runId;
+        }
+        return new AgentRunDelivery("delivered", chain.Count, 0, runId, null);
     }
 
     /// <summary>

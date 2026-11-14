@@ -211,9 +211,35 @@ public sealed record AgentRunOptions
     /// is sealed, upload its signed envelope (metadata and digests, no content) together with the control-set
     /// document, so the organisation can review, approve and track the policy. Requires a
     /// <see cref="AgentPolicy.ControlSetContentType"/> control set. Off by default. The upload never fails
-    /// the run; its outcome is <see cref="AgentRun.PolicyDisclosure"/>. Execution events are not uploaded.
+    /// the run; its outcome is <see cref="AgentRun.PolicyDisclosure"/>. Execution events are not uploaded unless
+    /// <see cref="DeliverRun"/> is set too; then the document travels with the Control Artifact's delivery.
     /// </summary>
     public bool DisclosePolicy { get; init; }
+
+    /// <summary>
+    /// Upload each artifact, as it is sealed, to your Sigill organisation's evidence index, so the run is shown there: its
+    /// steps, the guard's refusals, alerts. Off by default, and decided per run: a child run delivers only when it is started
+    /// with <see cref="DeliverRun"/> itself. The upload happens in the artifact's ordered turn, after
+    /// <see cref="OnArtifactSealed"/> and <see cref="AgentEnforcement.OnEvent"/>, in chain order.
+    /// <para>
+    /// What leaves the machine, exactly: each artifact's signed envelope, signature and object digests. That is: the agent id,
+    /// version, tenant id and identity reference, the activity name and run id, the control set's id and version, step types
+    /// and times, tool names, operations and use ids, authorization decisions and policy ids, rule ids and guard reasons, model
+    /// names, deployments, regions and stop reasons, model and provider request ids, token counts, approver references,
+    /// sub-agent ids, object URIs, content types and sizes, the <c>detail</c> text, and the signing certificate inside each
+    /// signature. Every one of these is your own value, uploaded as written; only <c>detail</c>, the activity name, the approver,
+    /// the decision and the content type are length-bounded (<see cref="AgentProfiles.CheckFreeTextLimits"/>). Never arguments,
+    /// results, prompts, outputs or receipts; the policy document only with <see cref="DisclosePolicy"/>.
+    /// </para>
+    /// <para>
+    /// A delivery failure never raises, never breaks or halts the run: a temporary failure is retried at a later step after a
+    /// back-off, <c>run_end</c> makes one last attempt, and <see cref="AgentRun.Delivery"/> says where it stands. With the index
+    /// unreachable a step takes up to 10 s longer and the run's end up to 30 s; a guard's refusal still blocks the call at once,
+    /// but its exception is raised after that wait.
+    /// <see cref="SigillClient.DeliverAgentRunAsync"/> delivers a bundle later. Requires a <see cref="SigillClient"/>.
+    /// </para>
+    /// </summary>
+    public bool DeliverRun { get; init; }
 
     /// <summary>
     /// The run may start sub-agent runs (<c>spec/agent-delegation-v1.md</c>). Its events are sealed as
@@ -360,6 +386,21 @@ public enum QualifiedArtifacts
     ControlArtifact = 1,
     RunEnd = 2,
 }
+
+/// <summary>
+/// Where the delivery of a run to the organisation's evidence index stands (<see cref="AgentRun.Delivery"/>,
+/// <see cref="SigillClient.DeliverAgentRunAsync"/>).
+/// </summary>
+/// <param name="Status">
+/// <c>delivered</c>: every artifact sealed so far is in the index. <c>pending</c>: some are not yet (the index was unreachable
+/// or answered later; another attempt follows at a later step, or by <see cref="SigillClient.DeliverAgentRunAsync"/>).
+/// <c>rejected</c>: the index refused an artifact; no automatic attempt follows.
+/// </param>
+/// <param name="Delivered">Artifacts in the index, the Control Artifact included, counted from the start of the chain.</param>
+/// <param name="Pending">Artifacts sealed (or in the bundle) and not yet delivered.</param>
+/// <param name="RunId">The index's id for the run, once it has answered.</param>
+/// <param name="Error">Why the last attempt failed (the index's status and error code, or the transport error); null after a success.</param>
+public sealed record AgentRunDelivery(string Status, int Delivered, int Pending, Guid? RunId, string? Error);
 
 /// <summary>Outcome of an upload to the organisation's evidence index.</summary>
 /// <param name="Status"><c>indexed</c> or <c>exists</c> on success, <c>failed</c> otherwise.</param>

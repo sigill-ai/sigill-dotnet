@@ -3,6 +3,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
 using System.Runtime.ExceptionServices;
 using System.Text.Json;
@@ -83,6 +84,23 @@ public sealed class AgentRun
     /// <summary>Outcome of <see cref="AgentRunOptions.DisclosePolicy"/>; null when the policy was not shared.</summary>
     public AgentIndexResult? PolicyDisclosure { get; private set; }
 
+    /// <summary>
+    /// Where the delivery to the organisation's evidence index stands (<see cref="AgentRunOptions.DeliverRun"/>); null when the
+    /// run is not delivered. Read it after <see cref="FinishAsync"/> for the outcome; a delivery failure is never raised.
+    /// </summary>
+    public AgentRunDelivery? Delivery
+    {
+        get
+        {
+            if (!_options.DeliverRun) return null;
+            int total;
+            lock (_artifacts) total = 1 + _artifacts.Count;
+            var delivered = Math.Min(_indexNext, total);
+            var status = _indexRejected ? "rejected" : delivered < total ? "pending" : "delivered";
+            return new AgentRunDelivery(status, delivered, total - delivered, _indexRunId, _indexError);
+        }
+    }
+
     /// <summary>The sealed events so far, in chain order.</summary>
     public IReadOnlyList<AgentRunArtifact> Artifacts
     {
@@ -147,7 +165,7 @@ public sealed class AgentRun
 
     internal static async Task<AgentRun> StartCoreAsync(
         ISigillAiEvidenceClient client, AgentDefinition agent, AgentRunOptions options,
-        Func<DateTimeOffset> clock, CancellationToken cancellationToken, AgentDelegation? parent = null)
+        Func<DateTimeOffset> clock, CancellationToken cancellationToken, AgentDelegation? parent = null, Func<TimeSpan>? indexClock = null)
     {
         if (client is null) throw new ArgumentNullException(nameof(client));
         if (agent is null) throw new ArgumentNullException(nameof(agent));
@@ -157,6 +175,8 @@ public sealed class AgentRun
         options = options with { ControlSet = options.ControlSet with { Content = options.ControlSet.Content?.ToArray()! } };
         ValidatePolicy(options.TimestampPolicy);
         ValidateControlSet(options);
+        if (options.DeliverRun && client is not SigillClient)
+            throw new ArgumentException("DeliverRun requires a SigillClient: only the SDK's own client delivers to the evidence index.", nameof(options));
         if (parent is not null)
         {
             if (string.IsNullOrEmpty(parent.ChildCorrelationId) || string.IsNullOrEmpty(parent.ParentCorrelationId)
@@ -172,6 +192,7 @@ public sealed class AgentRun
         var guard = AgentGuard.Create(options, agent.AgentId, parent is not null);
 
         var run = new AgentRun(client, agent, options, clock, parent, guard);
+        if (indexClock is not null) run._indexClock = indexClock;
         var now = AgentProfiles.Truncate(clock());
         var objects = new List<AgentRunObject>();
         var config = agent.Configuration ?? new AgentConfiguration();
@@ -206,6 +227,7 @@ public sealed class AgentRun
             ["timestampPolicy"] = options.TimestampPolicy.ToJson(),
             ["objects"] = ObjectsBlock(objects),
         };
+        RefuseLongFreeText(envelope);
         AgentRunVerifier.Prevalidate(envelope, AgentProfiles.ControlArtifactSchema);
 
         var digests = Digests(objects); // once: the seal request, the Control Artifact and the start gate use these
@@ -226,7 +248,7 @@ public sealed class AgentRun
         // Seal run_start before any callback runs, so a failing callback cannot strand a sealed control basis.
         var (start, outcome) = await run.SealEventAsync("run_start", options.StartObjects ?? Array.Empty<AgentRunObject>(),
             new JsonObject(), consequential: false, cancellationToken).ConfigureAwait(false);
-        if (options.DisclosePolicy)
+        if (options.DisclosePolicy && !options.DeliverRun) // delivered: the document travels with the Control Artifact's upload
         {
             // Sharing is a side channel: it never fails the run (the evidence is in the producer's bundle either way).
             try
@@ -535,32 +557,43 @@ public sealed class AgentRun
     {
         if (disposition is not ("completed" or "failed" or "aborted"))
             throw new ArgumentException("disposition must be completed, failed or aborted.", nameof(disposition));
-        AgentRunArtifact artifact;
+        AgentRunArtifact? artifact = null;
         AgentRunBundle bundle;
-        Outcome? outcome;
+        Outcome? outcome = null;
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            if (_halt is not null) return ToBundle();
-            EnsureOpen();
-            lock (_artifacts)
-                if (disposition == "completed" && _outstanding.Count > 0)
-                    throw new InvalidOperationException(
-                        $"{_outstanding.Count} delegation(s) have no result: record them first, or close the run as aborted or failed (delegation §4 rule 5).");
-            int seq;
-            lock (_artifacts) seq = _artifacts.Count;
-            // finalSeq is run_end's own seq, finalPrev its own chain link (§11): closure is checkable on its own.
-            var step = new JsonObject
+            if (_halt is not null) bundle = ToBundle();
+            else
             {
-                ["finalSeq"] = seq,
-                ["finalPrevSignatureSha256"] = _prevSignatureSha256,
-                ["runDisposition"] = disposition,
-            };
-            (artifact, outcome) = await SealEventAsync("run_end", Array.Empty<AgentRunObject>(), Detail(step, detail),
-                consequential: false, cancellationToken).ConfigureAwait(false);
-            bundle = ToBundle();
+                EnsureOpen();
+                lock (_artifacts)
+                    if (disposition == "completed" && _outstanding.Count > 0)
+                        throw new InvalidOperationException(
+                            $"{_outstanding.Count} delegation(s) have no result: record them first, or close the run as aborted or failed (delegation §4 rule 5).");
+                int seq;
+                lock (_artifacts) seq = _artifacts.Count;
+                // finalSeq is run_end's own seq, finalPrev its own chain link (§11): closure is checkable on its own.
+                var step = new JsonObject
+                {
+                    ["finalSeq"] = seq,
+                    ["finalPrevSignatureSha256"] = _prevSignatureSha256,
+                    ["runDisposition"] = disposition,
+                };
+                (artifact, outcome) = await SealEventAsync("run_end", Array.Empty<AgentRunObject>(), Detail(step, detail),
+                    consequential: false, cancellationToken).ConfigureAwait(false);
+                bundle = ToBundle();
+            }
         }
         finally { _gate.Release(); }
+        if (artifact is null)
+        {
+            // The halted run is closed already: nothing is sealed, and one more delivery attempt is made, past any back-off.
+            int last;
+            lock (_artifacts) last = _artifacts.Count;
+            await IndexThroughAsync(last, final: true).ConfigureAwait(false);
+            return bundle;
+        }
         await DeliverAsync(artifact, outcome, cancellationToken).ConfigureAwait(false);
         return bundle;
     }
@@ -759,6 +792,7 @@ public sealed class AgentRun
                 if (stepType == "tool_result" && toolName != call.Tool)
                     throw new ArgumentException($"The tool_call with use_id '{useId}' was made to tool '{call.Tool}'; its result cannot name another tool.");
             }
+        RefuseLongFreeText(envelope); // the guard writes none of these fields, and the activity passed at start
         AgentRunVerifier.Prevalidate(envelope, AgentProfiles.ExecutionSchemaFor(envelope)); // throws before anything is sealed
         // The guard decides on its own copy, taken before the artifact is reachable by caller code (Artifacts, callbacks).
         var guardEnvelope = _guard is null ? null : (JsonObject)envelope.DeepClone();
@@ -917,10 +951,119 @@ public sealed class AgentRun
         }
         finally
         {
-            then?.Invoke(); // never throws; runs within this seq's turn, so the guard's reports keep seal order too
-            Advance(seq);
+            try
+            {
+                then?.Invoke(); // never throws; runs within this seq's turn, so the guard's reports keep seal order too
+                // Delivery after the hook, in this turn: the index receives the chain in order, also for events recorded in a hook.
+                await IndexThroughAsync(seq + 1, final: artifact.StepType == "run_end").ConfigureAwait(false);
+            }
+            finally { Advance(seq); }
         }
     }
+
+    // ── Delivery to the organisation's evidence index (AgentRunOptions.DeliverRun): a cursor over the chain, no thread ──
+
+    private readonly SemaphoreSlim _indexGate = new(1, 1);
+    private int _indexNext;   // the next position to deliver: 0 is the Control Artifact, n the event at seq n - 1
+    private Guid? _indexRunId;
+    private string? _indexError;
+    private bool _indexRejected;
+    private bool _indexWithoutPolicy;
+    private TimeSpan _indexBackoff = AgentRunIndex.FirstBackoff;
+    private TimeSpan _indexRetryAt = TimeSpan.MinValue;
+    private Func<TimeSpan> _indexClock = AgentRunIndex.Monotonic;   // monotonic: the back-off does not move with the wall clock
+
+    /// <summary>Tests: the delivery's time limits.</summary>
+    internal AgentRunIndex.Limits IndexLimits { get; set; } = AgentRunIndex.Limits.Default;
+
+    /// <summary>The message of a turn whose time budget was used up before every artifact was delivered (no back-off follows).</summary>
+    internal const string IndexBudgetUsedUp = "time budget used up";
+
+    /// <summary>
+    /// Uploads from the cursor through <paramref name="through"/>, within the turn's time budget (<see cref="AgentRunIndex.Limits"/>:
+    /// an ordinary turn, or the final one — the <c>run_end</c> turn and <see cref="FinishAsync"/> on a halted run, which also
+    /// ignores a back-off). Every attempt has a deadline of its own, at most what is left of the budget. Never raises: a failure is
+    /// <see cref="Delivery"/>.
+    /// </summary>
+    private async Task IndexThroughAsync(int through, bool final)
+    {
+        if (!_options.DeliverRun || _client is not SigillClient client) return;
+        await _indexGate.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            if (_indexRejected || _indexNext > through || (!final && _indexClock() < _indexRetryAt)) return;
+            var limits = IndexLimits;
+            var budget = Stopwatch.StartNew();
+            var allowed = final ? limits.Final : limits.Turn;
+            TimeSpan Left() => allowed - budget.Elapsed;
+            var cut = false;   // the last attempt's deadline was shorter than the upload limit: the turn's budget, not the index, ran out
+            var first = true;  // the turn's first attempt has all of the budget (the clock has not moved for it)
+            async Task<AgentRunIndex.Answer> Attempt(AgentRunArtifact artifact, byte[]? document)
+            {
+                var deadline = Min(limits.Upload, first ? allowed : Left());
+                first = false;
+                cut = deadline < limits.Upload;
+                return await client.IndexUploadAsync(artifact, document, deadline, CancellationToken.None).ConfigureAwait(false);
+            }
+            async Task<AgentRunIndex.Answer> Send(AgentRunArtifact artifact, byte[]? document)
+            {
+                var answer = await Attempt(artifact, document).ConfigureAwait(false);
+                // A concurrent upload won: once more, on the same budget.
+                return answer.Conflict && Left() > TimeSpan.Zero ? await Attempt(artifact, document).ConfigureAwait(false) : answer;
+            }
+            while (_indexNext <= through)
+            {
+                AgentRunArtifact artifact;
+                lock (_artifacts) artifact = _indexNext == 0 ? ControlArtifact : _artifacts[_indexNext - 1];
+                if (Left() <= TimeSpan.Zero)
+                {
+                    _indexError = AgentRunIndex.Where(artifact) + IndexBudgetUsedUp; // the rest waits for a later turn, no back-off
+                    return;
+                }
+                var withPolicy = _indexNext == 0 && _options.DisclosePolicy && !_indexWithoutPolicy;
+                var answer = await Send(artifact, withPolicy ? _options.ControlSet.Content : null).ConfigureAwait(false);
+                if (withPolicy)
+                {
+                    PolicyDisclosure = answer.Accepted ? new AgentIndexResult("indexed", answer.RunId)
+                        : new AgentIndexResult("failed", Error: AgentRunIndex.Where(artifact) + answer.ErrorText);
+                    if (answer.ControlSetRejected && Left() > TimeSpan.Zero)
+                    {
+                        // A refused policy document must not block the steps: the Control Artifact again, without it.
+                        _indexWithoutPolicy = true;
+                        answer = await Send(artifact, null).ConfigureAwait(false);
+                    }
+                }
+                if (!answer.Accepted)
+                {
+                    // No answer, and a deadline the turn's budget cut shorter than the upload limit: the budget ran out, not the
+                    // index — no back-off. Decided on these two facts alone, not by reading the clock again (its timer may fire a
+                    // moment before the clock says the budget is spent). A full-length attempt without an answer did fail.
+                    if (answer.Http is null && cut)
+                    {
+                        _indexError = AgentRunIndex.Where(artifact) + IndexBudgetUsedUp;
+                        return;
+                    }
+                    _indexError = AgentRunIndex.Where(artifact) + answer.ErrorText;
+                    if (answer.Final) _indexRejected = true; // the index keeps a true prefix of the run
+                    else
+                    {
+                        _indexRetryAt = _indexClock() + _indexBackoff;
+                        _indexBackoff = TimeSpan.FromTicks(Math.Min(_indexBackoff.Ticks * 2, AgentRunIndex.LastBackoff.Ticks));
+                    }
+                    return;
+                }
+                _indexNext++;
+                _indexRunId = answer.RunId ?? _indexRunId;
+                _indexError = null;
+                _indexBackoff = AgentRunIndex.FirstBackoff;
+                _indexRetryAt = TimeSpan.MinValue;
+            }
+        }
+        catch (Exception ex) { _indexError = ex.GetType().Name; } // never raised: delivery is not part of the run's chain
+        finally { _indexGate.Release(); }
+    }
+
+    private static TimeSpan Min(TimeSpan a, TimeSpan b) => a < b ? a : b;
 
     private static readonly AsyncLocal<bool> InCallback = new();
     private readonly object _notifyLock = new();
@@ -1062,6 +1205,12 @@ public sealed class AgentRun
         if (operation is not null) block["operation"] = operation;
         if (useId is not null) block["useId"] = useId;
         return block;
+    }
+
+    /// <summary>The caller's free text is bounded (<see cref="AgentProfiles.CheckFreeTextLimits"/>): refused before sealing, never truncated.</summary>
+    private static void RefuseLongFreeText(JsonObject envelope)
+    {
+        if (AgentProfiles.CheckFreeTextLimits(envelope) is { } problem) throw new ArgumentException(problem + "; nothing was sealed.");
     }
 
     private static JsonObject Detail(JsonObject fields, string? detail)
