@@ -215,11 +215,24 @@ public sealed record AgentEvaluationVerdict
     public bool ResultsRecomputed { get; init; }
 
     /// <summary>
-    /// policy, ControlEvaluation v3: the enforcement comparison is confirmed — recomputed with the engine given to the verifier,
-    /// which is the core the evaluation names, or <c>not_performed</c>, which needs no core. False without that engine: the rules
-    /// that need no core are still checked (<c>spec/control-evaluation-v3.md</c> §7). A comparison that differs is a finding.
+    /// policy, ControlEvaluation v3: the comparison is <c>performed</c> and this verifier, holding the core the evaluation names,
+    /// reproduced it from the run's events. Always false for <c>not_performed</c>, and false without that engine (a note says
+    /// so): the rules that need no core are still checked (<c>spec/control-evaluation-v3.md</c> §7). A comparison that differs
+    /// is a finding.
     /// </summary>
     public bool EnforcementRecomputed { get; init; }
+
+    /// <summary>
+    /// policy, ControlEvaluation v3: the member's <c>comparison</c> — <c>performed</c> or <c>not_performed</c> — once it passes
+    /// the checks that need no core; null otherwise and for an evaluation without the member. <c>not_performed</c> is not a pass.
+    /// </summary>
+    public string? EnforcementComparison { get; init; }
+
+    /// <summary>
+    /// policy, ControlEvaluation v3: the member's <c>result</c> (<c>as_required</c>, <c>let_through</c>, <c>over_enforced</c>,
+    /// <c>not_checkable</c> or <c>pending</c>) when <see cref="EnforcementComparison"/> is <c>performed</c>; null otherwise.
+    /// </summary>
+    public string? EnforcementResult { get; init; }
 
     /// <summary>
     /// The role in the seal's <c>srAts.claimed</c> "sealed for" attribute (§8), e.g. <c>urn:sigill:role:policy-evaluator</c>.
@@ -281,8 +294,9 @@ public sealed record AgentRunVerificationResult
     public required IReadOnlyList<string> Warnings { get; init; }
 
     /// <summary>
-    /// Informational notes — the legacy envelope reference diagnostic (AiEvidenceEnvelopeV2 §5.4), and a policy evaluation whose
-    /// results were not recomputed although an engine was given (another engine version, or the engine failed). Never a
+    /// Informational notes — the legacy envelope reference diagnostic (AiEvidenceEnvelopeV2 §5.4), a policy evaluation whose
+    /// results were not recomputed although an engine was given (another engine version, or the engine failed), and one whose
+    /// enforcement comparison was not recomputed (also without an engine). Never a
     /// warning: notes do not affect <see cref="Verdict"/>, <see cref="Checks"/> or <see cref="Warnings"/>.
     /// </summary>
     public IReadOnlyList<string> Notes { get; init; } = Array.Empty<string>();
@@ -509,7 +523,8 @@ public static class AgentRunVerifier
         public List<string> Findings = new();
         public bool? FactsMatch, DigestsMatch, QualifiedMet;
         public bool QualifiedRequired, Recomputed, EnforcementRecomputed;
-        public string? Note;
+        public string? EnforcementComparison, EnforcementResult;
+        public List<string> Notes = new();
         public string? PolicyStatus, State;
     }
 
@@ -652,29 +667,40 @@ public static class AgentRunVerifier
         {
             var prefixEnvelopes = prefixEvents.Select(e => e.Env).ToList();
             var evaluatorEngine = AgentProfiles.Str(policy["evaluator"]?["engine"]);
+            void Note(string n) => r.Notes.Add($"{label}: its enforcement comparison was not recomputed: {n}.");
             if (EnforcementMemberProblem(member, evaluatorEngine, prefixEnvelopes) is { } problem) bad($"its enforcement comparison is wrong: {problem}");
-            else if (AgentProfiles.Str(member["comparison"]) == "not_performed") r.EnforcementRecomputed = true; // fully fixed by the chain
-            else if (ctl is not null && recompute is not null)
+            else
             {
-                try
+                r.EnforcementComparison = AgentProfiles.Str(member["comparison"]);
+                r.EnforcementResult = r.EnforcementComparison == "performed" ? AgentProfiles.Str(member["result"]) : null;
+                if (recompute is null || ctl is null) Note("no engine was given");
+                else
                 {
-                    var engineId = "cedar-policy@" + recompute.Engine.Version;
-                    var cost = (long)csBytes.Length * prefixEvents.Count;
-                    if (engineId != evaluatorEngine)
-                        r.Note ??= $"{label}: its enforcement comparison was not recomputed: it names the engine {evaluatorEngine}, the verifier has {engineId}.";
-                    else if (cost > recompute.Left)
-                        r.Note ??= $"{label}: its enforcement comparison was not recomputed: the recomputation budget of this verification is used up.";
-                    else
+                    try
                     {
-                        recompute.Left -= cost;
-                        var mine = AgentPolicy.CompareEnforcement(new AgentRunArtifact(ctl.Env, ctl.Jws, ctl.Digests),
-                            prefixEvents.Select(e => new AgentRunArtifact(e.Env, e.Jws, e.Digests)), csBytes, recompute.Engine);
-                        if (AgentProfiles.Canonical(mine).AsSpan().SequenceEqual(AgentProfiles.Canonical(member))) r.EnforcementRecomputed = true;
-                        else bad("its enforcement comparison does not recompute from the run's events");
+                        var engineId = "cedar-policy@" + recompute.Engine.Version;
+                        var cost = (long)csBytes.Length * prefixEvents.Count;
+                        if (engineId != evaluatorEngine) Note($"it names the engine {evaluatorEngine}, the verifier has {engineId}");
+                        // A not_performed member has nothing to reproduce: it is never recomputed (§7).
+                        else if (r.EnforcementComparison == "performed" && cost > recompute.Left) Note("the recomputation budget of this verification is used up");
+                        else if (r.EnforcementComparison == "performed")
+                        {
+                            recompute.Left -= cost;
+                            var mine = AgentPolicy.CompareEnforcement(new AgentRunArtifact(ctl.Env, ctl.Jws, ctl.Digests),
+                                prefixEvents.Select(e => new AgentRunArtifact(e.Env, e.Jws, e.Digests)), csBytes, recompute.Engine);
+                            if (AgentProfiles.Canonical(mine).AsSpan().SequenceEqual(AgentProfiles.Canonical(member))) r.EnforcementRecomputed = true;
+                            else bad("its enforcement comparison does not recompute from the run's events");
+                        }
                     }
+                    catch (PolicyEngineException ex) when (ex.Refused) { bad($"its enforcement comparison cannot be recomputed: {ex.Message.TrimEnd('.')}"); }
+                    // The run itself is not one the comparison can read (a record without its core, a role twice): a finding.
+                    catch (ArgumentException ex)
+                    {
+                        var message = ex.ParamName is { } param ? ex.Message.Replace($" (Parameter '{param}')", "") : ex.Message;
+                        bad($"its enforcement comparison cannot be recomputed: {message.TrimEnd('.')}");
+                    }
+                    catch (Exception ex) { Note(ex.Message.TrimEnd('.')); } // whatever the supplied engine throws: the verifier never raises because of it
                 }
-                catch (PolicyEngineException ex) when (ex.Refused) { bad($"its enforcement comparison cannot be recomputed: {ex.Message.TrimEnd('.')}"); }
-                catch (Exception ex) { r.Note ??= $"{label}: its enforcement comparison was not recomputed: {ex.Message.TrimEnd('.')}."; }
             }
         }
 
@@ -740,12 +766,12 @@ public static class AgentRunVerifier
             var engineId = "cedar-policy@" + recompute.Engine.Version;
             if (claimedEngine != engineId)
             {
-                r.Note = $"{label}: its results were not recomputed: it names the engine {claimedEngine}, the verifier has {engineId}.";
+                r.Notes.Add($"{label}: its results were not recomputed: it names the engine {claimedEngine}, the verifier has {engineId}.");
                 return;
             }
             if (cost > recompute.Left)
             {
-                r.Note = $"{label}: its results were not recomputed: the recomputation budget of this verification is used up.";
+                r.Notes.Add($"{label}: its results were not recomputed: the recomputation budget of this verification is used up.");
                 return;
             }
             recompute.Left -= cost;
@@ -758,7 +784,7 @@ public static class AgentRunVerifier
         }
         catch (Exception ex) // whatever the supplied engine throws: the verifier never raises because of it
         {
-            r.Note = $"{label}: its results were not recomputed: {Trimmed(ex)}.";
+            r.Notes.Add($"{label}: its results were not recomputed: {Trimmed(ex)}.");
             return;
         }
         static string Show(string? result, IEnumerable<string> where) =>
@@ -827,6 +853,14 @@ public static class AgentRunVerifier
                 return $"the findings of seq {seq} do not fit its outcome {outcome}";
             var rules = (d["dueRules"] as JsonArray ?? new JsonArray()).Select(AgentProfiles.Str).ToList();
             if (!rules.SequenceEqual(rules.OrderBy(x => x, StringComparer.Ordinal))) return $"the dueRules of seq {seq} are not sorted";
+            // The record the chain holds after the event, read by position (§5.3).
+            var record = recorded is "refused" or "halted" ? prefix[seq + 1]["step"] as JsonObject : null;
+            var recordReason = AgentProfiles.Str(record?["enforcer"]?["reason"]);
+            if (outcome == "not_checkable" && recordReason != "unavailable")
+                return $"the decision at seq {seq} is not_checkable, but the chain records no unavailable core there";
+            if (outcome == "as_required" && (AgentProfiles.Str(d["due"]) != recorded || (recorded != "none" && (AgentProfiles.Str(d["dueReason"]) != recordReason
+                    || !new HashSet<string?>(rules, StringComparer.Ordinal).SetEquals((record?["rules"] as JsonArray ?? new JsonArray()).Select(AgentProfiles.Str))))))
+                return $"the decision at seq {seq} is as_required, but what was due is not what the chain records";
             outcomes.Add(outcome);
         }
         for (var s = 0; s < prefix.Count; s++)
@@ -1645,7 +1679,7 @@ public static class AgentRunVerifier
             // Kind rules read typed fields, so they run on a schema-valid envelope only; a non-conforming one is never valid anyway.
             var v2 = isV2 && sa.Conformance.Count == 0 ? CheckEvaluationV2(sa, c, bundle.Payloads, ctl, good, label, recompute) : null;
             if (v2 is not null) ef.AddRange(v2.Findings);
-            if (v2?.Note is { } note) evaluationNotes.Add(note);
+            if (v2 is not null) evaluationNotes.AddRange(v2.Notes);
 
             evaluations.Add(new AgentEvaluationVerdict
             {
@@ -1657,7 +1691,8 @@ public static class AgentRunVerifier
                 SchemaVersion = AgentProfiles.Str(sa.Env["schemaVersion"]), Kind = kind,
                 PolicyStatus = v2?.PolicyStatus, PolicyState = v2?.State, FactsMatch = v2?.FactsMatch,
                 PolicyDigestsMatch = v2?.DigestsMatch, ResultsRecomputed = v2?.Recomputed ?? false,
-                EnforcementRecomputed = v2?.EnforcementRecomputed ?? false, SealedFor = SealedForOf(sa.Jws),
+                EnforcementRecomputed = v2?.EnforcementRecomputed ?? false, EnforcementComparison = v2?.EnforcementComparison,
+                EnforcementResult = v2?.EnforcementResult, SealedFor = SealedForOf(sa.Jws),
                 QualifiedTimestampsRequired = v2?.QualifiedRequired ?? false, QualifiedTimestampsMet = v2?.QualifiedMet,
                 Supersedes = AgentProfiles.Str((sa.Env["supersedes"] as JsonObject)?["evidenceId"]),
                 ObjectsComplete = c.ObjectsComplete, WellFormed = sa.Conformance.Count == 0, Signer = signer,

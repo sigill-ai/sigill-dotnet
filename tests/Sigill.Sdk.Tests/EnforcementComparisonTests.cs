@@ -24,6 +24,7 @@ public class EnforcementComparisonTests
     private static readonly JsonObject Arguments = Load("cases.json")["arguments"]!.AsObject();
     private const string Agent = "urn:example:agent:support";
     private const string Engine = "cedar-policy@4.14.0";
+    private const string Correlation = "urn:uuid:00000000-0000-4000-8000-150000000001";
 
     private static string Jcs(JsonNode n) => Encoding.UTF8.GetString(AgentProfiles.Canonical(n));
     private static byte[] Utf8(string s) => Encoding.UTF8.GetBytes(s);
@@ -47,7 +48,8 @@ public class EnforcementComparisonTests
         var envelope = new JsonObject
         {
             ["schemaName"] = "AgentControlArtifact", ["schemaVersion"] = "1",
-            ["agent"] = new JsonObject { ["id"] = Agent, ["version"] = "1" }, ["objects"] = objects,
+            ["agent"] = new JsonObject { ["id"] = Agent, ["version"] = "1" },
+            ["activity"] = new JsonObject { ["correlationId"] = Correlation }, ["objects"] = objects,
         };
         return new AgentRunArtifact(envelope, new JsonObject(), digests);
     }
@@ -84,7 +86,7 @@ public class EnforcementComparisonTests
             {
                 ["schemaName"] = "AgentExecutionEvidence", ["schemaVersion"] = "4",
                 ["actor"] = new JsonObject { ["type"] = "agent", ["id"] = Agent },
-                ["activity"] = new JsonObject { ["name"] = "support-session", ["correlationId"] = "urn:uuid:00000000-0000-4000-8000-150000000001" },
+                ["activity"] = new JsonObject { ["name"] = "support-session", ["correlationId"] = Correlation },
                 ["chain"] = new JsonObject { ["seq"] = seq }, ["step"] = s, ["objects"] = arr,
             };
             Events.Add(new AgentRunArtifact(envelope, new JsonObject(), digests));
@@ -333,5 +335,76 @@ public class EnforcementComparisonTests
         var v1 = File.ReadAllBytes(Path.Combine(SpecRoot.TestVectorsDir, "11-policy-control-set", "control-set.json"));
         FluentActions.Invoking(() => AgentPolicy.CompareEnforcement(Control(v1), chain.Events, v1, TestEngine.Shared))
             .Should().Throw<ArgumentException>().WithMessage("*v2 policy control set*");
+    }
+
+    // ── Input errors: what the comparison cannot read is the caller's mistake, never a comparison ──
+
+    private sealed class ScriptedEngine(Func<JsonObject, JsonObject> authorize, Func<string>? version = null) : IPolicyEngine
+    {
+        public string Version => version is null ? TestEngine.Shared.Version : version();
+        public JsonObject Authorize(JsonObject call) => authorize(call);
+        public JsonObject Validate(JsonObject call) => TestEngine.Shared.Validate(call);
+    }
+
+    [Fact]
+    public void InputItCannotRead_IsAnArgumentException()
+    {
+        var doc = Doc();
+        var chain = new Chain().Start().Call("search.web", "c1", "Q").Record("rule", new[] { "no-web-search" }, "search.web", "c1").End();
+        JsonObject Run(AgentRunArtifact control, IEnumerable<AgentRunArtifact> events) => AgentPolicy.CompareEnforcement(control, events, doc, TestEngine.Shared);
+        AgentRunArtifact Changed(Action<JsonObject> change)
+        {
+            var c = Control(doc);
+            var env = (JsonObject)c.Envelope.DeepClone();
+            change(env);
+            return c with { Envelope = env };
+        }
+        List<AgentRunArtifact> WithRecord(JsonNode? engine)
+        {
+            var events = chain.Events.Select(e => e with { Envelope = (JsonObject)e.Envelope.DeepClone() }).ToList();
+            var enforcer = events[2].Envelope["step"]!["enforcer"]!.AsObject();
+            if (engine is null) enforcer.Remove("engine"); else enforcer["engine"] = engine;
+            return events;
+        }
+
+        FluentActions.Invoking(() => Run(Control(doc), WithRecord(null))).Should().Throw<ArgumentException>().WithMessage("*seq 2 has no enforcer.engine*");
+        FluentActions.Invoking(() => Run(Control(doc), WithRecord(JsonValue.Create(4)))).Should().Throw<ArgumentException>().WithMessage("*seq 2 has no enforcer.engine*");
+        FluentActions.Invoking(() => Run(Changed(e => e["activity"]!.AsObject().Remove("correlationId")), chain.Events))
+            .Should().Throw<ArgumentException>().WithMessage("*names no agent or correlationId*");
+        FluentActions.Invoking(() => Run(Changed(e => e["objects"]!.AsArray().Add(e["objects"]!.AsArray().Single(o => o!["role"]!.GetValue<string>() == "control-set")!.DeepClone())), chain.Events))
+            .Should().Throw<ArgumentException>().WithMessage("*exactly one control-set object*");
+        FluentActions.Invoking(() => Run(Changed(e => e["objects"]!.AsArray().Add(new JsonObject { ["uri"] = "objects/other", ["role"] = "tool-manifest", ["contentType"] = "application/json" })), chain.Events))
+            .Should().Throw<ArgumentException>().WithMessage("*more than one object of the lockable role 'tool-manifest'*");
+        // Also a role the control set does not lock.
+        FluentActions.Invoking(() => Run(Changed(e => e["objects"]!.AsArray().Add(new JsonObject { ["uri"] = "objects/other", ["role"] = "instruction-set", ["contentType"] = "application/json" })), chain.Events))
+            .Should().Throw<ArgumentException>().WithMessage("*lockable role 'instruction-set'*");
+        FluentActions.Invoking(() => Run(Control(doc), chain.Events.Append(chain.Events[1]))).Should().Throw<ArgumentException>().WithMessage("*two events claim seq 1*");
+        var unnumbered = chain.Events[1] with { Envelope = (JsonObject)chain.Events[1].Envelope.DeepClone() };
+        unnumbered.Envelope.Remove("chain");
+        FluentActions.Invoking(() => Run(Control(doc), chain.Events.Append(unnumbered))).Should().Throw<ArgumentException>().WithMessage("*no chain.seq*");
+    }
+
+    [Fact]
+    public void WhateverTheEngineThrows_IsAPolicyEngineException_TheRunLevelRequestIncluded()
+    {
+        var doc = Doc();
+        var chain = new Chain().Start().Call("crm.read_customer", "c1", "C").Result("crm.read_customer", "c1").End();
+        JsonObject Run(IPolicyEngine engine) => AgentPolicy.CompareEnforcement(Control(doc), chain.Events, doc, engine);
+
+        FluentActions.Invoking(() => Run(new ScriptedEngine(_ => throw new InvalidOperationException("trap"))))
+            .Should().Throw<PolicyEngineException>().WithMessage("The policy engine failed: trap").Which.Refused.Should().BeFalse();
+        // The records name a core, so its version is asked: what that throws is surfaced too.
+        var recorded = new Chain().Start().Call("search.web", "c1", "Q").Record("rule", new[] { "no-web-search" }, "search.web", "c1").End();
+        FluentActions.Invoking(() => AgentPolicy.CompareEnforcement(Control(doc), recorded.Events, doc, new ScriptedEngine(TestEngine.Shared.Authorize, () => throw new InvalidOperationException("no version"))))
+            .Should().Throw<PolicyEngineException>().WithMessage("The policy engine failed: no version");
+        // An engine that refuses only the run-level request ends the comparison as one that refuses any other.
+        static bool IsRun(JsonObject call) => call["action"]?["id"]?.GetValue<string>() == "run";
+        var refusesRun = new ScriptedEngine(call => IsRun(call) ? JsonNode.Parse("""{"type":"failure","errors":[{"message":"no."}]}""")!.AsObject() : TestEngine.Shared.Authorize(call));
+        FluentActions.Invoking(() => Run(refusesRun)).Should().Throw<PolicyEngineException>().WithMessage("The policy engine refused request run: no.").Which.Refused.Should().BeTrue();
+        var throwsOnRun = new ScriptedEngine(call => IsRun(call) ? throw new InvalidOperationException("run trap") : TestEngine.Shared.Authorize(call));
+        FluentActions.Invoking(() => Run(throwsOnRun)).Should().Throw<PolicyEngineException>().WithMessage("The policy engine failed: run trap");
+        // Without run_end there is no run-level request.
+        var open = new Chain().Start().Call("crm.read_customer", "c1", "C");
+        AgentPolicy.CompareEnforcement(Control(doc), open.Events, doc, refusesRun)["comparison"]!.GetValue<string>().Should().Be("performed");
     }
 }

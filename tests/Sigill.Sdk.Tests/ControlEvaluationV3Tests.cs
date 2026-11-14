@@ -20,8 +20,10 @@ public partial class AgentRunTests
     /// A run recorded under vector 13's enforcing control set (one call refused, one allowed) and a sealed v3 policy evaluation of
     /// it, optionally changed before sealing.
     /// </summary>
-    private async Task<(AgentRunBundle Bundle, JsonObject Enforcement)> EvaluatedEnforcedRun(Action<JsonObject>? mutate = null, byte[]? doc = null)
+    private async Task<(AgentRunBundle Bundle, JsonObject Enforcement)> EvaluatedEnforcedRun(Action<JsonObject>? mutate = null, byte[]? doc = null,
+        IPolicyEngine? evaluator = null)
     {
+        evaluator ??= TestEngine.Shared;
         doc ??= DocV13;
         var (run, sealer, client) = await StartGuarded(doc);
         using var owned = client;
@@ -29,9 +31,9 @@ public partial class AgentRunTests
         await run.InvokeToolAsync("crm.update_address", Utf8("{}"), _ => System.Threading.Tasks.Task.FromResult(Utf8("{}")), definition: Utf8("crm.update_address definition"));
         var bundle = await run.FinishAsync();
 
-        var enforcement = AgentPolicy.CompareEnforcement(run.ControlArtifact, bundle.Artifacts, doc, TestEngine.Shared);
+        var enforcement = AgentPolicy.CompareEnforcement(run.ControlArtifact, bundle.Artifacts, doc, evaluator);
         var facts = AgentPolicy.BuildFactsV2(SupportAgent().AgentId, run.CorrelationId, bundle.Artifacts, doc);
-        var evaluated = AgentPolicy.Evaluate(doc, facts.Bytes, TestEngine.Shared);
+        var evaluated = AgentPolicy.Evaluate(doc, facts.Bytes, evaluator);
         var declaresPrivate = JsonNode.Parse(doc)!["privateControls"] is JsonArray pc && pc.Count > 0;
         var prepared = ControlEvaluation.PreparePolicy(new PolicyEvaluationRequest
         {
@@ -66,10 +68,47 @@ public partial class AgentRunTests
         var e = result.Evaluations.Single();
         e.Valid.Should().BeTrue(string.Join(" | ", e.Findings));
         (e.SchemaVersion, e.Kind, e.FactsMatch, e.PolicyDigestsMatch, e.ResultsRecomputed, e.EnforcementRecomputed).Should().Be(("3", "policy", true, true, true, true));
+        (e.EnforcementComparison, e.EnforcementResult).Should().Be(("performed", "as_required"));
+        EvaluationNotes(result).Should().BeEmpty();
 
-        // Without the core the comparison is checked as far as it can be, and the evaluation is not recomputed.
-        var blind = (await AgentRunVerifier.VerifyAsync(bundle, StubVerify)).Evaluations.Single();
+        // Without the core the comparison is checked as far as it can be, not recomputed, and a note says so.
+        var blindResult = await AgentRunVerifier.VerifyAsync(bundle, StubVerify);
+        var blind = blindResult.Evaluations.Single();
         (blind.Valid, blind.ResultsRecomputed, blind.EnforcementRecomputed).Should().Be((true, false, false));
+        (blind.EnforcementComparison, blind.EnforcementResult).Should().Be(("performed", "as_required"));
+        EvaluationNotes(blindResult).Should().Equal("evaluation 0: its enforcement comparison was not recomputed: no engine was given.");
+    }
+
+    /// <summary>The official core under another version name: an evaluator whose core is not the one the guard recorded.</summary>
+    private sealed class Renamed(string version) : IPolicyEngine
+    {
+        public string Version => version;
+        public JsonObject Authorize(JsonObject call) => TestEngine.Shared.Authorize(call);
+        public JsonObject Validate(JsonObject call) => TestEngine.Shared.Validate(call);
+    }
+
+    [Fact]
+    public async Task ANotPerformedComparison_IsNeverRecomputed_AndEveryMissedRecomputationIsNoted()
+    {
+        var other = new Renamed("99.0.0");
+        var (bundle, enforcement) = await EvaluatedEnforcedRun(evaluator: other);
+        System.Text.Encoding.UTF8.GetString(AgentProfiles.Canonical(enforcement)).Should().Be("""{"comparison":"not_performed","notPerformed":"engine_unavailable","recordedEngine":"cedar-policy@4.14.0"}""");
+
+        var blindResult = await AgentRunVerifier.VerifyAsync(bundle, StubVerify);
+        var blind = blindResult.Evaluations.Single();
+        (blind.Valid, blind.EnforcementRecomputed, blind.EnforcementComparison, blind.EnforcementResult).Should().Be((true, false, "not_performed", (string?)null));
+        EvaluationNotes(blindResult).Should().Equal("evaluation 0: its enforcement comparison was not recomputed: no engine was given.");
+
+        // With another core both missed recomputations reach the caller, the results' and the comparison's.
+        var mismatched = await AgentRunVerifier.VerifyWithEngineAsync(bundle, StubVerify, TestEngine.Shared);
+        mismatched.Evaluations.Single().EnforcementRecomputed.Should().BeFalse();
+        EvaluationNotes(mismatched).Should().Equal(
+            "evaluation 0: its results were not recomputed: it names the engine cedar-policy@99.0.0, the verifier has cedar-policy@4.14.0.",
+            "evaluation 0: its enforcement comparison was not recomputed: it names the engine cedar-policy@99.0.0, the verifier has cedar-policy@4.14.0.");
+
+        // Even holding the named core: not_performed has nothing to reproduce, so it is not recomputed — and not a pass.
+        var named = (await AgentRunVerifier.VerifyWithEngineAsync(bundle, StubVerify, other)).Evaluations.Single();
+        (named.Valid, named.ResultsRecomputed, named.EnforcementRecomputed, named.EnforcementResult).Should().Be((true, true, false, (string?)null));
     }
 
     [Fact]
@@ -114,7 +153,10 @@ public partial class AgentRunTests
         ("findings-of-the-wrong-class", "do not fit its outcome"),
         ("chain-inconsistent-without-cause", "the prefix gives no reason chain_inconsistent"),
         ("recorded-engine-wrong", "recordedEngine is not the core"),
-        ("as-required-claimed-for-a-missing-refusal", "does not recompute"),
+        ("as-required-claimed-for-a-missing-refusal", "is as_required, but what was due is not what the chain records"), // vector x02 needs the core
+        ("as-required-where-due-is-not-recorded", "is as_required, but what was due is not what the chain records"),
+        ("as-required-with-another-reason", "is as_required, but what was due is not what the chain records"),
+        ("not-checkable-without-an-unavailable-record", "is not_checkable, but the chain records no unavailable core there"),
     }.Select(x => new object[] { x.Name, x.Expect });
 
     [Theory]
@@ -136,12 +178,16 @@ public partial class AgentRunTests
                 case "chain-inconsistent-without-cause": m.Remove("decisions"); m.Remove("result"); m["comparison"] = "not_performed"; m["notPerformed"] = "chain_inconsistent"; break;
                 case "recorded-engine-wrong": m["recordedEngine"] = "cedar-policy@4.13.0"; break;
                 case "as-required-claimed-for-a-missing-refusal": first["dueRules"] = new JsonArray("read-loop-limit"); break;
+                case "as-required-where-due-is-not-recorded": first["due"] = "halted"; break;
+                case "as-required-with-another-reason": first["dueReason"] = "unknown_tool"; first.Remove("dueRules"); break;
+                case "not-checkable-without-an-unavailable-record": first["outcome"] = "not_checkable"; m["result"] = "not_checkable"; break;
             }
         });
         var result = await AgentRunVerifier.VerifyWithEngineAsync(bundle, StubVerify, TestEngine.Shared);
         var e = result.Evaluations.Single();
         e.Valid.Should().BeFalse();
         e.Findings.Should().Contain(f => f.Contains(expect, StringComparison.Ordinal), string.Join(" | ", e.Findings));
+        e.EnforcementRecomputed.Should().BeFalse();
     }
 
     [Fact]

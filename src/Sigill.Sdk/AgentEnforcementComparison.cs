@@ -41,7 +41,9 @@ public static partial class AgentPolicy
     /// <param name="events">The run's events (at least the evaluated prefix), each with its signed object digests.</param>
     /// <param name="controlSetDocument">The run's v2 policy control set, exactly the bytes the Control Artifact seals.</param>
     /// <param name="engine">The evaluator's Cedar core.</param>
-    /// <exception cref="ArgumentException">The control set is not a valid v2 policy control set, is not the one the Control Artifact seals, or the events are not a chain.</exception>
+    /// <exception cref="ArgumentException">The control set is not a valid v2 policy control set, is not the one the Control Artifact seals, the Control
+    /// Artifact does not carry exactly one control-set object, carries a lockable role twice or names no agent or correlationId, the events are not a chain, or an enforcement record
+    /// names no <c>enforcer.engine</c>.</exception>
     /// <exception cref="PolicyEngineException">The engine failed or refused a request: there is no comparison of this prefix.</exception>
     public static JsonObject CompareEnforcement(AgentRunArtifact controlArtifact, IEnumerable<AgentRunArtifact> events, byte[] controlSetDocument,
         IPolicyEngine engine)
@@ -54,12 +56,20 @@ public static partial class AgentPolicy
         var doc = Parse(controlSetDocument)!;
         if (AgentProfiles.Str(doc["schemaVersion"]) != "2")
             throw new ArgumentException("The enforcement comparison needs a v2 policy control set (schemaVersion \"2\").", nameof(controlSetDocument));
-        var sealedSet = (controlArtifact.Envelope["objects"] as JsonArray)?.OfType<JsonObject>().FirstOrDefault(o => AgentProfiles.Str(o["role"]) == "control-set");
-        if (sealedSet is null || !controlArtifact.ObjectDigests.TryGetValue(AgentProfiles.Str(sealedSet["uri"]) ?? "", out var sealedHex)
+        var sealedSets = (controlArtifact.Envelope["objects"] as JsonArray)?.OfType<JsonObject>().Where(o => AgentProfiles.Str(o["role"]) == "control-set").ToList()
+            ?? new List<JsonObject>();
+        if (sealedSets.Count != 1)
+            throw new ArgumentException("The Control Artifact must carry exactly one control-set object.", nameof(controlArtifact));
+        if (!controlArtifact.ObjectDigests.TryGetValue(AgentProfiles.Str(sealedSets[0]["uri"]) ?? "", out var sealedHex)
             || sealedHex != EnvelopeHashing.HashHex(controlSetDocument))
             throw new ArgumentException("The control set is not the one the Control Artifact seals.", nameof(controlSetDocument));
-        var agentId = AgentProfiles.Str(controlArtifact.Envelope["agent"]?["id"])
-            ?? throw new ArgumentException("The Control Artifact names no agent.", nameof(controlArtifact));
+        foreach (var role in LockableRoles)
+            if ((controlArtifact.Envelope["objects"] as JsonArray)!.OfType<JsonObject>().Count(o => AgentProfiles.Str(o["role"]) == role) > 1)
+                throw new ArgumentException($"The Control Artifact carries more than one object of the lockable role '{role}'.", nameof(controlArtifact));
+        var agentId = AgentProfiles.Str(controlArtifact.Envelope["agent"]?["id"]);
+        var correlationId = AgentProfiles.Str(controlArtifact.Envelope["activity"]?["correlationId"]);
+        if (agentId is null || correlationId is null)
+            throw new ArgumentException("The Control Artifact names no agent or correlationId.", nameof(controlArtifact));
 
         // The contiguous prefix from seq 0 (ControlEvaluation v2 §4.2).
         var bySeq = new SortedDictionary<int, AgentRunArtifact>();
@@ -74,13 +84,15 @@ public static partial class AgentPolicy
         static JsonObject StepOf(AgentRunArtifact a) => a.Envelope["step"] as JsonObject ?? new JsonObject();
         static string? TypeOf(AgentRunArtifact a) => AgentProfiles.Str(StepOf(a)["type"]);
         var envelopes = prefix.Select(a => a.Envelope).ToList();
+        if (envelopes.FirstOrDefault(e => IsEnforcementRecord(e) && AgentProfiles.Str(e["step"]?["enforcer"]?["engine"]) is null) is { } bare)
+            throw new ArgumentException($"The enforcement record at seq {AgentProfiles.Int(bare["chain"]?["seq"])} has no enforcer.engine.", nameof(events));
 
         var result = new JsonObject();
         var (inconsistent, engines) = ComparisonPreconditions(envelopes);
         if (engines.Count == 1) result["recordedEngine"] = engines[0];
         string? notPerformed = inconsistent ? "chain_inconsistent"
             : engines.Count > 1 ? "engine_inconsistent"
-            : engines.Count == 1 && engines[0] != "cedar-policy@" + engine.Version ? "engine_unavailable"
+            : engines.Count == 1 && engines[0] != "cedar-policy@" + Surfaced(() => engine.Version) ? "engine_unavailable"
             : null;
         if (notPerformed is not null)
         {
@@ -94,23 +106,30 @@ public static partial class AgentPolicy
         var tools = new Dictionary<string, string?>(StringComparer.Ordinal);
         foreach (var e in (call["entities"] as JsonArray)!.OfType<JsonObject>().Where(e => AgentProfiles.Str(e["uid"]?["type"]) == "Tool"))
             tools[AgentProfiles.Str(e["uid"]?["id"])!] = AgentProfiles.Str(e["attrs"]?["definitionSha256"]);
-        var isChildRun = prefix.Count > 0 && TypeOf(prefix[0]) == "run_start"
-            && AgentProfiles.Str(prefix[0].Envelope["binds"]?["parentCorrelationId"]) is { Length: > 0 };
-        var facts = new FactsState(agentId, v2: true, isChildRun);
+        // The facts of the prefix: one request per event and, when it holds run_end, the run-level request.
+        var requests = (JsonNode.Parse(BuildFactsV2(agentId, correlationId, prefix, controlSetDocument).Bytes)!["requests"] as JsonArray)!
+            .OfType<JsonObject>().ToList();
+        // §4: every request is evaluated, also without rules (the baseline permit alone); a refusal ends the comparison.
+        var diagnostics = requests.Select((request, i) =>
+        {
+            foreach (var member in new[] { "principal", "action", "resource", "context" }) call[member] = request[member]!.DeepClone();
+            var answer = Surfaced(() => engine.Authorize((JsonObject)call.DeepClone()));
+            var seq = AgentProfiles.Str(request["seq"]) ?? i.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            if (AgentProfiles.Str(answer?["type"]) == "failure")
+                throw new PolicyEngineException($"The policy engine refused request {seq}: {FailureMessages(answer!)}", refused: true);
+            if (!TryDiagnostics(answer, call, out var reason, out var errors))
+                throw new PolicyEngineException("The policy engine's answer is not an isAuthorized answer.");
+            return (Reason: reason, Errors: errors);
+        }).ToList();
+
         var decisions = new JsonArray();
         var outcomes = new List<string>();
         for (var s = 0; s < prefix.Count; s++)
         {
             var e = prefix[s];
             var type = TypeOf(e);
-            var request = facts.Next(s, e.Envelope, e.ObjectDigests);
-            // §4: every request is evaluated, also without rules (the baseline permit alone); a refusal ends the comparison.
-            foreach (var member in new[] { "principal", "action", "resource", "context" }) call[member] = request[member]!.DeepClone();
-            var answer = engine.Authorize((JsonObject)call.DeepClone());
-            if (AgentProfiles.Str(answer?["type"]) == "failure")
-                throw new PolicyEngineException($"The policy engine refused request {s}: {FailureMessages(answer!)}", refused: true);
-            if (!TryDiagnostics(answer, call, out var reason, out var errors))
-                throw new PolicyEngineException("The policy engine's answer is not an isAuthorized answer.");
+            var request = requests[s];
+            var (reason, errors) = diagnostics[s];
 
             // §5.2: what was due.
             string due = "none";
@@ -172,6 +191,14 @@ public static partial class AgentPolicy
         result["decisions"] = decisions;
         result["result"] = new[] { "let_through", "over_enforced", "not_checkable", "pending" }.FirstOrDefault(outcomes.Contains) ?? "as_required";
         return Ordered(result);
+    }
+
+    /// <summary>Whatever the engine throws is the <see cref="PolicyEngineException"/> the comparison promises.</summary>
+    private static T Surfaced<T>(Func<T> f)
+    {
+        try { return f(); }
+        catch (PolicyEngineException) { throw; }
+        catch (Exception ex) { throw new PolicyEngineException($"The policy engine failed: {ex.Message}", ex); }
     }
 
     /// <summary>The prefix holds <c>run_end</c>: no event of it is open (§5.4).</summary>

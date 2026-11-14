@@ -50,7 +50,8 @@ public partial class AgentRunTests
         Add("control-set", EnvelopeHashing.HashHex(controlSet), AgentPolicy.ControlSetContentType);
         return new AgentRunArtifact(new JsonObject
         {
-            ["schemaName"] = "AgentControlArtifact", ["agent"] = new JsonObject { ["id"] = run["agentId"]!.DeepClone() }, ["objects"] = objects,
+            ["schemaName"] = "AgentControlArtifact", ["agent"] = new JsonObject { ["id"] = run["agentId"]!.DeepClone() },
+            ["activity"] = new JsonObject { ["correlationId"] = run["correlationId"]!.DeepClone() }, ["objects"] = objects,
         }, new JsonObject(), digests);
     }
 
@@ -62,7 +63,7 @@ public partial class AgentRunTests
     public void Vector15_IsComplete()
     {
         Vector15Cases().Should().HaveCount(95);
-        Directory.GetFiles(Path.Combine(Dir15, "invalid-evaluations"), "*.json").Should().HaveCount(12);
+        Directory.GetFiles(Path.Combine(Dir15, "invalid-evaluations"), "*.json").Should().HaveCount(15);
     }
 
     [Theory]
@@ -212,6 +213,9 @@ public partial class AgentRunTests
         ["x10-chain-inconsistent-claimed"] = "the prefix gives no reason chain_inconsistent",
         ["x11-cedar-digest-without-cedar"] = "approvalScopeDigest or cedarDigest does not recompute",
         ["x11-controls-empty-with-rules"] = "is not reported",
+        ["x13-recorded-outcome-without-decision"] = "has a recorded outcome but no decision",
+        ["x14-not-checkable-without-unavailable"] = "is not_checkable, but the chain records no unavailable core there",
+        ["x15-as-required-where-due-is-not-recorded"] = "is as_required, but what was due is not what the chain records",
     };
 
     [Theory]
@@ -223,7 +227,8 @@ public partial class AgentRunTests
 
         var honest = (await AgentRunVerifier.VerifyWithEngineAsync(await EvaluatedVectorRun(runName, null), StubVerify, TestEngine.Shared)).Evaluations.Single();
         honest.Valid.Should().BeTrue(string.Join(" | ", honest.Findings));
-        honest.EnforcementRecomputed.Should().BeTrue();
+        honest.EnforcementComparison.Should().NotBeNull();
+        honest.EnforcementRecomputed.Should().Be(honest.EnforcementComparison == "performed", "only a performed comparison is reproduced");
 
         var patched = await EvaluatedVectorRun(runName, x["patch"]!.AsArray());
         var withEngine = (await AgentRunVerifier.VerifyWithEngineAsync(patched, StubVerify, TestEngine.Shared)).Evaluations.Single();
