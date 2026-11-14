@@ -1325,7 +1325,10 @@ public static class ControlEvaluation
     private static readonly HashSet<string> Statuses = new(StringComparer.Ordinal) { "approved_before_run", "approved_after_start", "unapproved" };
 
     /// <summary>
-    /// Builds a policy evaluation (<c>spec/control-evaluation-v2.md</c> §4) ready to sign. Nothing is sent.
+    /// Builds a policy evaluation ready to sign. Nothing is sent. For a v1 policy control set it is a ControlEvaluation v2
+    /// (<c>spec/control-evaluation-v2.md</c> §4); for a v2 control set a ControlEvaluation v3 (<c>spec/control-evaluation-v3.md</c>):
+    /// facts v2 and the enforcement comparison, which <see cref="PolicyEvaluationRequest.Enforcement"/> carries
+    /// (<see cref="AgentPolicy.CompareEnforcement"/>).
     /// </summary>
     /// <exception cref="ArgumentException">The evaluation would not verify.</exception>
     public static PreparedEvaluation PreparePolicy(PolicyEvaluationRequest request) => PreparePolicy(request, () => DateTimeOffset.UtcNow);
@@ -1338,10 +1341,14 @@ public static class ControlEvaluation
         var problems = AgentPolicy.Validate(doc);
         if (problems.Count > 0) throw new ArgumentException("Invalid policy control set: " + string.Join("; ", problems), nameof(request));
         var policyDoc = (JsonObject)JsonNode.Parse(doc)!;
-        // Agent Enforcement v1 §8: evaluations of a v2 control set (facts v2) are specified in a later round.
-        if (policyDoc.ContainsKey("schemaVersion"))
-            throw new ArgumentException("Policy evaluations of a v2 control set are not specified yet (Control Evaluation v2 fixes factsVersion 1).", nameof(request));
-        if (policyDoc["cedar"] is not JsonObject cedar) throw new ArgumentException("The control set carries no Cedar rules.", nameof(request));
+        // ControlEvaluation v3 §1: a v2 control set is evaluated as v3 (facts v2, the enforcement comparison), a v1 one as v2.
+        var v3 = policyDoc.ContainsKey("schemaVersion");
+        var cedar = policyDoc["cedar"] as JsonObject;
+        if (!v3 && cedar is null) throw new ArgumentException("The control set carries no Cedar rules.", nameof(request));
+        if (!v3 && request.Enforcement is not null)
+            throw new ArgumentException("Enforcement belongs to a policy evaluation of a v2 control set (ControlEvaluation v3).", nameof(request));
+        if (v3 && request.Enforcement is null)
+            throw new ArgumentException("A policy evaluation of a v2 control set carries the enforcement comparison: pass Enforcement (AgentPolicy.CompareEnforcement).", nameof(request));
         var (csUri, csNode) = ControlSetObject(control, doc, request);
         if (AgentProfiles.Str(csNode["contentType"]) != AgentPolicy.ControlSetContentType)
             throw new ArgumentException("The Control Artifact's control set is not a policy control set.", nameof(request));
@@ -1356,7 +1363,9 @@ public static class ControlEvaluation
         var correlationId = AgentProfiles.Str(control.Envelope["activity"]?["correlationId"]) ?? throw new ArgumentException("The Control Artifact has no correlationId.", nameof(request));
         var events = (request.Events ?? Array.Empty<AgentRunArtifact>()).OrderBy(e => AgentProfiles.Int(e.Envelope["chain"]?["seq"])).ToList();
         if (events.Count == 0) throw new ArgumentException("Events must hold the evaluated prefix, starting at seq 0.", nameof(request));
-        var facts = AgentPolicy.BuildFacts(agentId, correlationId, events.Select(e => e.Envelope), request.MissingSeqs ?? Array.Empty<int>());
+        var facts = v3
+            ? AgentPolicy.BuildFactsV2(agentId, correlationId, events, doc, request.MissingSeqs ?? Array.Empty<int>())
+            : AgentPolicy.BuildFacts(agentId, correlationId, events.Select(e => e.Envelope), request.MissingSeqs ?? Array.Empty<int>());
         if (facts.MissingSeqs.Count > 0 && facts.MissingSeqs[0] != facts.ThroughSeq + 1)
             throw new ArgumentException("MissingSeqs must start right after the evaluated prefix.", nameof(request));
         var last = events[^1];
@@ -1364,7 +1373,7 @@ public static class ControlEvaluation
         var finalized = runEnd is not null && facts.MissingSeqs.Count == 0;
 
         var rules = request.Rules ?? Array.Empty<PolicyRuleResult>();
-        var ruleIds = (cedar["policies"]?["staticPolicies"] as JsonObject)!.Select(kv => kv.Key).ToList();
+        var ruleIds = (cedar?["policies"]?["staticPolicies"] as JsonObject)?.Select(kv => kv.Key).ToList() ?? new List<string>();
         if (!new HashSet<string>(ruleIds, StringComparer.Ordinal).SetEquals(rules.Select(r => r.Id)) || rules.Count != ruleIds.Count)
             throw new ArgumentException("Rules must hold exactly one result per Cedar rule of the control set.", nameof(request));
         foreach (var r in rules)
@@ -1399,12 +1408,14 @@ public static class ControlEvaluation
             ["throughSignatureSha256"] = last.SignatureSha256 ?? throw new ArgumentException("An event carries no classical signature.", nameof(request)),
         };
         if (finalized) subject["runEndSignatureSha256"] = runEnd!.SignatureSha256;
+        var evaluator = new JsonObject { ["engine"] = request.Engine, ["factsVersion"] = v3 ? "2" : AgentPolicy.FactsVersion };
+        if (cedar is not null) evaluator["schemaSha256"] = AgentProfiles.Str(cedar["schemaSha256"]); // v3 §2: exactly when cedar
         var policy = new JsonObject
         {
             ["approvalScopeDigest"] = digestsOfPolicy.ApprovalScopeDigest,
             ["cedarDigest"] = digestsOfPolicy.CedarDigest,
             ["policyStatus"] = request.PolicyStatus,
-            ["evaluator"] = new JsonObject { ["engine"] = request.Engine, ["factsVersion"] = AgentPolicy.FactsVersion, ["schemaSha256"] = AgentProfiles.Str(cedar["schemaSha256"]) },
+            ["evaluator"] = evaluator,
             ["prefix"] = new JsonObject
             {
                 ["throughSeq"] = facts.ThroughSeq,
@@ -1413,7 +1424,16 @@ public static class ControlEvaluation
             },
             ["state"] = finalized ? "finalized" : "partial",
         };
+        if (cedar is null) policy.Remove("cedarDigest"); // v3 §2: exactly when the control set has cedar
         if (request.PrivateControlsReported is { } reported) policy["privateControlsReported"] = reported;
+        if (v3)
+        {
+            // v3 §6, §7: the comparison as given, held to what a verifier checks without the core.
+            var enforcement = (JsonObject)request.Enforcement!.DeepClone();
+            if (AgentRunVerifier.EnforcementMemberProblem(enforcement, request.Engine, events.Select(e => e.Envelope).ToList()) is { } problem)
+                throw new ArgumentException($"Enforcement does not fit this evaluation: {problem}.", nameof(request));
+            policy["enforcement"] = enforcement;
+        }
         // §4.7: present exactly when the approval record requires qualified time.
         JsonObject? approvalDoc = null;
         if (request.ApprovalRecord is { } rec)
@@ -1438,7 +1458,7 @@ public static class ControlEvaluation
                 if (r.Where is { Count: > 0 } w) j["where"] = new JsonArray(w.Select(x => (JsonNode?)x).ToArray());
                 if (r.Detail is not null) j["detail"] = r.Detail;
                 return j;
-            }), rules.Select(r => r.Result), objects, request.Supersedes);
+            }), rules.Select(r => r.Result), objects, request.Supersedes, v3 ? "3" : "2");
         envelope["policy"] = policy;
         return Prepared(envelope, seal, new[] { csUri }, digests, payloads) with { RequiresQualifiedTimestamp = requiresQualified };
     }
@@ -1522,12 +1542,12 @@ public static class ControlEvaluation
 
     private static JsonObject Envelope(string kind, string actorType, string actorId, string actorVersion, AgentRunArtifact control,
         JsonObject subject, DateTimeOffset now, DateTimeOffset? evaluatedAt, IEnumerable<JsonObject> controls, IEnumerable<string> results,
-        JsonArray objects, EvaluationReference? supersedes)
+        JsonArray objects, EvaluationReference? supersedes, string schemaVersion = "2")
     {
         var envelope = new JsonObject
         {
             ["schemaName"] = AgentProfiles.ControlEvaluationSchema,
-            ["schemaVersion"] = "2",
+            ["schemaVersion"] = schemaVersion,
             ["kind"] = kind,
             ["evidenceId"] = Guid.NewGuid().ToString(),
             ["createdAt"] = AgentProfiles.FormatTime(now),
@@ -1548,7 +1568,7 @@ public static class ControlEvaluation
     private static PreparedEvaluation Prepared(JsonObject envelope, IReadOnlyList<SignedObjectDigest> seal, IReadOnlyCollection<string> reused,
         Dictionary<string, string> digests, Dictionary<string, byte[]> payloads)
     {
-        AgentRunVerifier.Prevalidate(envelope, AgentProfiles.ControlEvaluationSchemaV2);
+        AgentRunVerifier.Prevalidate(envelope, AgentProfiles.EvaluationSchemaFor(envelope));
         return new PreparedEvaluation
         {
             Envelope = envelope, EnvelopeHashHex = EnvelopeHashing.HashHex(EnvelopeHashing.Canonicalize(envelope)),

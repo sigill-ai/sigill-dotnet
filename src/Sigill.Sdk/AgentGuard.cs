@@ -121,34 +121,16 @@ internal sealed class AgentGuard
         // §7.4: the start gate, in order, before the engine is asked anything.
         if (Enforcing && type == "run_start")
         {
-            if (_settings.LockedConfiguration.Any(kv => DigestOf(control, kv.Key) != kv.Value)) return Deny("configuration_locked", null, default, true);
+            if (EnforcementRule.ConfigurationLocked(_settings, control)) return Deny("configuration_locked", null, default, true);
             if (_unavailableAtStart) return Deny("unavailable", null, default, true);
         }
         var answer = Ask(request);
         if (!Enforcing) return answer is null ? null : Observed(answer.Reason, named);
         if (answer is not { } d) return Deny("unavailable", null, call, true); // §7.5
-        if (type != "tool_call")
-        {
-            // §7.3: only a matching halt rule acts on another event.
-            var halting = d.Reason.Where(r => Effect(r) == "halt").ToList();
-            return halting.Count > 0 ? Deny("rule", halting, default, true) : Observed(d.Reason, named);
-        }
-
-        // §7.2: the first reason that applies.
-        var blockingErrors = d.Errors.Where(r => Effect(r) != "observe").ToList();
-        var blocking = d.Reason.Where(r => Effect(r) != "observe").ToList();
-        var known = call.Name is not null && _tools.ContainsKey(call.Name);
-        var (reason, rules) =
-            !known && _settings.UnknownTools == "deny" ? ("unknown_tool", (List<string>?)null)
-            : known && _tools[call.Name!] is { } definition && DefinitionOf(envelope, digests) != definition ? ("tool_changed", null)
-            : blockingErrors.Count > 0 && _settings.OnRuleError == "deny" ? ("rule_error", blockingErrors)
-            : blocking.Count > 0 ? ("rule", blocking)
-            : ((string?)null, null);
-        if (reason is null) return Observed(d.Reason, call);
-        // A matching halt rule always halts, whatever reason won the record; so does the denial that reaches haltAfterDenials.
-        var halt = d.Reason.Any(r => Effect(r) == "halt")
-            || (_settings.HaltAfterDenials > 0 && _records + 1 == _settings.HaltAfterDenials);
-        return Deny(reason, rules, call, halt);
+        // §7.2, §7.3: the rule the evaluator recomputes (ControlEvaluation v3 §5.2); the guard counts denials with "equals".
+        var due = EnforcementRule.Due(type, d.Reason, d.Errors, _settings, _tools, call.Name, DefinitionOf(envelope, digests), _records, countAtLeast: false);
+        if (due is not { } x) return Observed(d.Reason, named);
+        return Deny(x.Reason, x.Rules.Count > 0 ? x.Rules.ToList() : null, call, x.Halts);
     }
 
     private sealed record Diagnostics(IReadOnlyList<string> Reason, IReadOnlyList<string> Errors);
@@ -163,7 +145,6 @@ internal sealed class AgentGuard
     private static Decision? Observed(IReadOnlyList<string> reason, (string? Name, string? UseId) call = default) =>
         reason.Count > 0 ? new Decision("observed", null, reason, call.Name, call.UseId) : null;
 
-    private string Effect(string rule) => _settings.RuleEffects.TryGetValue(rule, out var e) ? e : "observe";
 
     /// <summary>Cedar's matching and erroring rules for one request (sorted, unique, without the baseline permit), or null when the engine failed.</summary>
     private Diagnostics? Ask(JsonObject request)
@@ -179,15 +160,64 @@ internal sealed class AgentGuard
         catch (Exception) { return null; } // §7.5: the engine raised or trapped
     }
 
-    /// <summary>The digest of the Control Artifact's object of <paramref name="role"/>; null when it has none.</summary>
-    private static string? DigestOf(AgentRunArtifact control, string role) =>
-        (control.Envelope["objects"] as JsonArray)?.OfType<JsonObject>().Where(o => AgentProfiles.Str(o["role"]) == role)
-            .Select(o => control.ObjectDigests.TryGetValue(AgentProfiles.Str(o["uri"]) ?? "", out var hex) ? hex : null).FirstOrDefault();
-
     /// <summary>The signed digest of the call's one <c>tool-definition</c> object; null unless there is exactly one.</summary>
-    private static string? DefinitionOf(JsonObject envelope, IReadOnlyDictionary<string, string> digests)
+    internal static string? DefinitionOf(JsonObject envelope, IReadOnlyDictionary<string, string> digests)
     {
         var defs = (envelope["objects"] as JsonArray)?.OfType<JsonObject>().Where(o => AgentProfiles.Str(o["role"]) == "tool-definition").ToList();
         return defs is { Count: 1 } && digests.TryGetValue(AgentProfiles.Str(defs[0]["uri"]) ?? "", out var hex) ? hex : null;
     }
+}
+
+/// <summary>
+/// What Control Set v2 §7.2–§7.4 requires after one event, from Cedar's diagnostics for its facts request: the one rule the
+/// guard applies before an action and an evaluator recomputes afterwards (ControlEvaluation v3 §5.2). Pure: no engine, no state.
+/// </summary>
+internal static class EnforcementRule
+{
+    /// <summary>A due enforcement record: its reason, its rules (empty unless <c>rule</c> or <c>rule_error</c>) and whether the halt follows.</summary>
+    internal readonly record struct DueRecord(string Reason, IReadOnlyList<string> Rules, bool Halts);
+
+    /// <summary>
+    /// §7.2 for a <c>tool_call</c>, §7.3 for any other event; null when nothing is due. <paramref name="denials"/> are the
+    /// enforcement records before the event; the denial that makes them reach <c>haltAfterDenials</c> halts — when it
+    /// <i>equals</i> it for the guard, when it is <i>at least</i> it for an evaluator (<paramref name="countAtLeast"/>, Control Set
+    /// v2 §8.2), which differ only on a chain that has stepped over the number. Mode, the start gate and an engine failure are
+    /// the caller's.
+    /// </summary>
+    internal static DueRecord? Due(string? type, IReadOnlyList<string> reason, IReadOnlyList<string> errors, PolicyEnforcement settings,
+        IReadOnlyDictionary<string, string?> tools, string? toolName, string? definitionDigest, long denials, bool countAtLeast)
+    {
+        string Effect(string rule) => settings.RuleEffects.TryGetValue(rule, out var e) ? e : "observe";
+        if (type != "tool_call")
+        {
+            // §7.3: only a matching halt rule acts on another event.
+            var halting = reason.Where(r => Effect(r) == "halt").ToList();
+            return halting.Count > 0 ? new DueRecord("rule", halting.AsReadOnly(), true) : null;
+        }
+        // §7.2: the first reason that applies.
+        var blockingErrors = errors.Where(r => Effect(r) != "observe").ToList();
+        var blocking = reason.Where(r => Effect(r) != "observe").ToList();
+        var known = toolName is not null && tools.ContainsKey(toolName);
+        var (why, rules) =
+            !known && settings.UnknownTools == "deny" ? ("unknown_tool", (List<string>?)null)
+            : known && tools[toolName!] is { } definition && definitionDigest != definition ? ("tool_changed", null)
+            : blockingErrors.Count > 0 && settings.OnRuleError == "deny" ? ("rule_error", blockingErrors)
+            : blocking.Count > 0 ? ("rule", blocking)
+            : ((string?)null, null);
+        if (why is null) return null;
+        // A matching halt rule always halts, whatever reason won the record; so does the denial that reaches haltAfterDenials.
+        var count = denials + 1;
+        var halt = reason.Any(r => Effect(r) == "halt")
+            || (settings.HaltAfterDenials > 0 && (countAtLeast ? count >= settings.HaltAfterDenials : count == settings.HaltAfterDenials));
+        return new DueRecord(why, (IReadOnlyList<string>?)rules?.AsReadOnly() ?? Array.Empty<string>(), halt);
+    }
+
+    /// <summary>§7.4 item 1: an entry of <c>lockedConfiguration</c> whose role the Control Artifact lacks, or whose signed digest differs.</summary>
+    internal static bool ConfigurationLocked(PolicyEnforcement settings, AgentRunArtifact control) =>
+        settings.LockedConfiguration.Any(kv => DigestOf(control, kv.Key) != kv.Value);
+
+    /// <summary>The signed digest of the Control Artifact's object of <paramref name="role"/>; null when it has none.</summary>
+    private static string? DigestOf(AgentRunArtifact control, string role) =>
+        (control.Envelope["objects"] as JsonArray)?.OfType<JsonObject>().Where(o => AgentProfiles.Str(o["role"]) == role)
+            .Select(o => control.ObjectDigests.TryGetValue(AgentProfiles.Str(o["uri"]) ?? "", out var hex) ? hex : null).FirstOrDefault();
 }

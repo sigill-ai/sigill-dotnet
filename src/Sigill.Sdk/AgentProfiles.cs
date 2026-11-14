@@ -54,9 +54,19 @@ public static class AgentProfiles
     /// <summary>Control Evaluation v2 (<c>spec/control-evaluation-v2.md</c>): state, policy or attested.</summary>
     public const string ControlEvaluationSchemaV2 = "ControlEvaluation/2";
 
-    /// <summary>The evaluation schema to validate against: v2 when the envelope says <c>schemaVersion "2"</c>, else v1.</summary>
-    internal static string EvaluationSchemaFor(JsonObject envelope) =>
-        Str(envelope["schemaVersion"]) == "2" ? ControlEvaluationSchemaV2 : ControlEvaluationSchema;
+    /// <summary>
+    /// Control Evaluation v3 (<c>spec/control-evaluation-v3.md</c>): v2 with the policy evaluation of a run under a v2 control
+    /// set — facts v2 and the enforcement comparison.
+    /// </summary>
+    public const string ControlEvaluationSchemaV3 = "ControlEvaluation/3";
+
+    /// <summary>The evaluation schema to validate against, by the envelope's <c>schemaVersion</c> ("3", "2", else v1).</summary>
+    internal static string EvaluationSchemaFor(JsonObject envelope) => Str(envelope["schemaVersion"]) switch
+    {
+        "3" => ControlEvaluationSchemaV3,
+        "2" => ControlEvaluationSchemaV2,
+        _ => ControlEvaluationSchema,
+    };
 
     /// <summary>The execution schema to validate against, by the envelope's <c>schemaVersion</c> ("4", "3", "2", else v1).</summary>
     internal static string ExecutionSchemaFor(JsonObject envelope) => Str(envelope["schemaVersion"]) switch
