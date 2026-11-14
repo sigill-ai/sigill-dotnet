@@ -225,8 +225,8 @@ public sealed record AgentRunOptions
     /// What leaves the machine, exactly: each artifact's signed envelope, signature and object digests. That is: the agent id
     /// and version, the activity name and run id, step types and times, tool names, operations and use ids, rule ids and guard
     /// reasons, model and provider request ids, token counts, approver references, sub-agent ids, object URIs, content types
-    /// and sizes, and any <c>detail</c> text or extension members you set — those are your own text and are uploaded as
-    /// written. Never arguments, results, prompts, outputs or receipts; the policy document only with
+    /// and sizes, and the <c>detail</c> text and the names and identifiers you chose — those are your own text and are
+    /// uploaded as written. Never arguments, results, prompts, outputs or receipts; the policy document only with
     /// <see cref="DisclosePolicy"/>.
     /// </para>
     /// <para>

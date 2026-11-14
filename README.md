@@ -527,12 +527,18 @@ anything is sealed).
   digests. That is: agent id and version, activity name and run id, step types and
   times, tool names, operations and use ids, rule ids and guard reasons, model and
   provider request ids, token counts, approver references, sub-agent ids, object URIs,
-  content types and sizes, and any `detail` text or extension members you set — those
-  are your own text and are uploaded as written. Never arguments, results, prompts,
+  content types and sizes, and the `detail` text and the names and identifiers you
+  chose — those are your own text and are uploaded as written. Never arguments, results, prompts,
   outputs or receipts. The policy document travels only with `DisclosePolicy`, on the
   Control Artifact's upload (`run.PolicyDisclosure` is its outcome); if the index
   refuses the document, the Control Artifact is sent again without it and the steps
   follow.
+- **Free text is bounded, with or without delivery.** A step's `detail` is at most 512
+  characters, the activity name and an approver reference at most 255 (Unicode code
+  points), an object's `metadata` at most 2,048 bytes. A longer value is refused with an
+  `ArgumentException` before anything is sealed — never truncated — and the index refuses
+  it too (`AgentProfiles.CheckFreeTextLimits` is the same rule). New in 0.15.0: 0.14 sealed
+  longer values.
 - **A delivery failure never fails the run.** It is not raised, does not break the
   chain and does not halt an enforced run (the guard's own exceptions are raised as
   before). An unreachable index (a timeout, 408, 429 or 5xx) holds the uploads; the

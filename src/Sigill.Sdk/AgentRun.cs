@@ -226,6 +226,7 @@ public sealed class AgentRun
             ["timestampPolicy"] = options.TimestampPolicy.ToJson(),
             ["objects"] = ObjectsBlock(objects),
         };
+        RefuseLongFreeText(envelope);
         AgentRunVerifier.Prevalidate(envelope, AgentProfiles.ControlArtifactSchema);
 
         var digests = Digests(objects); // once: the seal request, the Control Artifact and the start gate use these
@@ -790,6 +791,7 @@ public sealed class AgentRun
                 if (stepType == "tool_result" && toolName != call.Tool)
                     throw new ArgumentException($"The tool_call with use_id '{useId}' was made to tool '{call.Tool}'; its result cannot name another tool.");
             }
+        RefuseLongFreeText(envelope); // the guard writes none of these fields, and the activity passed at start
         AgentRunVerifier.Prevalidate(envelope, AgentProfiles.ExecutionSchemaFor(envelope)); // throws before anything is sealed
         // The guard decides on its own copy, taken before the artifact is reachable by caller code (Artifacts, callbacks).
         var guardEnvelope = _guard is null ? null : (JsonObject)envelope.DeepClone();
@@ -1164,6 +1166,12 @@ public sealed class AgentRun
         if (operation is not null) block["operation"] = operation;
         if (useId is not null) block["useId"] = useId;
         return block;
+    }
+
+    /// <summary>The caller's free text is bounded (<see cref="AgentProfiles.CheckFreeTextLimits"/>): refused before sealing, never truncated.</summary>
+    private static void RefuseLongFreeText(JsonObject envelope)
+    {
+        if (AgentProfiles.CheckFreeTextLimits(envelope) is { } problem) throw new ArgumentException(problem + "; nothing was sealed.");
     }
 
     private static JsonObject Detail(JsonObject fields, string? detail)
