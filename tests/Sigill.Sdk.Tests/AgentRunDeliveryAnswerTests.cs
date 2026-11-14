@@ -75,12 +75,47 @@ public partial class AgentRunTests
         var (run, _, client) = await StartDelivered(index: index, indexClock: () => now);
         using var owned = client;
         await run.RecordModelOutputAsync(Utf8("x"));
-        run.Delivery.Should().Be(new AgentRunDelivery("pending", 2, 1, Guid.Parse("0e0e0e0e-0000-0000-0000-000000000001"), "seq 1: 503 unexpected_response"));
+        run.Delivery.Should().Be(new AgentRunDelivery("pending", 2, 1, Guid.Parse("0e0e0e0e-0000-0000-0000-000000000001"), "seq 1: 503"));
         index.Answer = null;
         now += TimeSpan.FromSeconds(6);
         await run.RecordModelOutputAsync(Utf8("y"));
         run.Delivery!.Status.Should().Be("delivered");
         index.Indexed.Should().Equal(Chain(run));
+    }
+
+    [Fact]
+    public async Task ADeadIndex_CostsOneUploadLimit_ThenTheBackoffHolds_WhenTheLimitIsTheWholeTurn()
+    {
+        var index = new DeliveryIndex(new StubSealer());
+        var now = TimeSpan.FromHours(1);
+        var (run, _, client) = await StartDelivered(index: index, indexClock: () => now);
+        using var owned = client;
+        run.IndexLimits = new AgentRunIndex.Limits(TimeSpan.FromMilliseconds(300), TimeSpan.FromMilliseconds(300), TimeSpan.FromSeconds(1));
+        index.Delay = TimeSpan.FromSeconds(30);   // never answers within the limit
+        var before = index.Attempts.Count;
+        for (var i = 0; i < 4; i++) await run.RecordModelOutputAsync(Utf8($"{i}"));
+        index.Attempts.Should().HaveCount(before + 1, "the timed-out attempt had its full limit: a back-off holds the next three");
+        run.Delivery!.Error.Should().Be("seq 1: TimeoutException");
+        now += TimeSpan.FromSeconds(6);
+        index.Delay = TimeSpan.Zero;
+        await run.RecordModelOutputAsync(Utf8("after the back-off"));
+        run.Delivery!.Status.Should().Be("delivered");
+    }
+
+    [Fact]
+    public async Task DisclosePolicyAlone_ATricklingAnswerEndsAtTheUploadLimit_AndTheRunStarts()
+    {
+        var index = new DeliveryIndex(new StubSealer())
+        {
+            Respond = _ => new HttpResponseMessage(HttpStatusCode.Created) { Content = new StreamContent(new TrickleStream(TimeSpan.FromMilliseconds(500))) },
+        };
+        var client = new SigillClient(new HttpClient(index) { BaseAddress = new Uri("https://api.example") });
+        using var owned = client;
+        var watch = Stopwatch.StartNew();
+        var run = await AgentRun.StartCoreAsync(client, Agent(), PolicyOptions() with { DisclosePolicy = true }, Clock(), CancellationToken.None);
+        watch.Elapsed.Should().BeLessThan(TimeSpan.FromSeconds(15));
+        run.PolicyDisclosure.Should().Be(new AgentIndexResult("failed", Error: "TimeoutException"));
+        run.Artifacts.Should().ContainSingle(a => a.StepType == "run_start");
     }
 
     [Fact]
@@ -94,12 +129,12 @@ public partial class AgentRunTests
         var (run, _, client) = await StartDelivered(index: index);
         using var owned = client;
         await run.RecordRetrievalAsync(Utf8("r"));
-        run.Delivery!.Error.Should().Be("seq 1: 422 unexpected_response");
+        run.Delivery!.Error.Should().Be("seq 1: 422");
         var (r2, _, c2) = await StartDelivered(index: new DeliveryIndex(new StubSealer())
             { Answer = u => Label(u) == "1:model_output" ? Error(HttpStatusCode.UnprocessableEntity, "Not_lower") : null });
         using var o2 = c2;
         await r2.RecordModelOutputAsync(Utf8("x"));
-        r2.Delivery!.Error.Should().Be("seq 1: 422 unexpected_response", "a code outside ^[a-z0-9_]{1,64}$ is not kept");
+        r2.Delivery!.Error.Should().Be("seq 1: 422", "a code outside ^[a-z0-9_]{1,64}$ is not kept");
         // A transport failure is named by its type only, never by its message.
         var (r3, _, c3) = await StartDelivered(index: new DeliveryIndex(new StubSealer()) { Down = true });
         using var o3 = c3;
@@ -254,6 +289,23 @@ public partial class AgentRunTests
         result.Should().Be(new AgentRunDelivery("rejected", 0, 1, null, $"control artifact: {status} unexpected_response"));
         index.Received.Should().ContainSingle();
         other.Received.Should().BeEmpty();
+    }
+
+    [Theory]
+    [InlineData(307)]
+    [InlineData(308)]
+    public async Task ACallersClientThatFollowsARedirect_GetsTheAnswerRejected_NeverDelivered(int status)
+    {
+        using var other = new LoopbackServer("HTTP/1.1 201 Created\r\nContent-Type: application/json\r\nContent-Length: 67\r\nConnection: close\r\n\r\n"
+            + """{"status":"indexed","runId":"0e0e0e0e-0000-0000-0000-000000000001"}""");
+        using var index = new LoopbackServer($"HTTP/1.1 {status} Moved\r\nLocation: http://127.0.0.1:{other.Port}/api/agent-evidence/artifacts\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+        using var http = new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{index.Port}") };   // follows redirects, as a default client does
+        using var client = new SigillClient(http);
+        var bundle = new AgentRunBundle(null, new AgentRunArtifact(new JsonObject { ["schemaName"] = "AgentControlArtifact", ["evidenceId"] = "e" },
+            new JsonObject(), new Dictionary<string, string>()), Array.Empty<AgentRunArtifact>());
+        var result = await client.DeliverAgentRunAsync(bundle);
+        result.Should().Be(new AgentRunDelivery("rejected", 0, 1, null, "control artifact: 201 unexpected_response"));
+        other.Received.Should().ContainSingle("the redirect was followed by the caller's client");
     }
 
     // ── The guard is sound whatever the index does ──

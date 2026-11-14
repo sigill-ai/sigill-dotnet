@@ -46,8 +46,10 @@ public sealed class SigillClient : ISigillAiEvidenceClient, IDisposable
     /// <summary>
     /// Construct using a caller-managed HttpClient — the <c>IHttpClientFactory</c>
     /// path. The Authorization header MUST be set on the supplied client. Disable redirects on it
-    /// (<c>HttpClientHandler.AllowAutoRedirect = false</c>), as the client this SDK creates itself does: otherwise a redirect
-    /// can carry the credentials and a run's envelopes to another host.
+    /// (<c>HttpClientHandler.AllowAutoRedirect = false</c>), as the client this SDK creates itself does. The SDK refuses an
+    /// index answer that came from a redirected request (the delivery stops there, visibly), but by then the redirect has
+    /// already carried the request — a run's envelope and, with some handlers, the credentials — to the other host; only
+    /// disabling redirects stops that.
     /// </summary>
     public SigillClient(HttpClient http)
     {
@@ -829,8 +831,8 @@ public sealed class SigillClient : ISigillAiEvidenceClient, IDisposable
         AgentRunArtifact artifact, byte[]? controlSetDocument = null, CancellationToken cancellationToken = default)
     {
         if (artifact is null) throw new ArgumentNullException(nameof(artifact));
-        // As in 0.14 no deadline of its own (the HttpClient's timeout applies); the answer is read by delivery's rules.
-        var answer = await IndexUploadAsync(artifact, controlSetDocument, Timeout.InfiniteTimeSpan, cancellationToken).ConfigureAwait(false);
+        // Delivery's upload limit for the whole exchange, body included: a trickling answer cannot hold the start.
+        var answer = await IndexUploadAsync(artifact, controlSetDocument, AgentRunIndex.UploadTimeout, cancellationToken).ConfigureAwait(false);
         return answer.Accepted ? new AgentIndexResult(answer.Status!, answer.RunId) : new AgentIndexResult("failed", Error: answer.ErrorText);
     }
 
@@ -866,9 +868,13 @@ public sealed class SigillClient : ISigillAiEvidenceClient, IDisposable
         deadline.CancelAfter(timeout);
         try
         {
+            var requested = _http.BaseAddress is { } baseAddress ? new Uri(baseAddress, IndexPath) : null;
             using var request = new HttpRequestMessage(HttpMethod.Post, IndexPath) { Content = JsonContent.Create(IndexBody(artifact, controlSetDocument)) };
             // Headers first: the body is read against the same deadline, and only so far.
             using var resp = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, deadline.Token).ConfigureAwait(false);
+            // An answer to a redirected request (a caller's HttpClient may follow redirects) is not the index's, whatever it says.
+            if (requested is not null && resp.RequestMessage?.RequestUri is { } answered && answered != requested)
+                return AgentRunIndex.Answer.FromElsewhere((int)resp.StatusCode);
             var body = await AgentRunIndex.ReadAtMostAsync(resp.Content, deadline.Token).ConfigureAwait(false);
             return AgentRunIndex.Answer.From((int)resp.StatusCode, body);
         }

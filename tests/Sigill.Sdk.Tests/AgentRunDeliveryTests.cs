@@ -206,7 +206,7 @@ public partial class AgentRunTests
 
     [Theory]
     [InlineData("seq_conflict", "application/json", "seq 1: 409 seq_conflict")]
-    [InlineData(null, "text/html", "seq 1: 409 unexpected_response")]
+    [InlineData(null, "text/html", "seq 1: 409")]
     public async Task AFinalConflict_OrAConflictWithoutACode_IsRejected(string? code, string contentType, string error)
     {
         var index = new DeliveryIndex(new StubSealer());
@@ -234,7 +234,7 @@ public partial class AgentRunTests
         var attempts = index.Attempts.Count;
         await run.RecordModelOutputAsync(Utf8("2"));   // within the back-off: nothing is tried
         index.Attempts.Should().HaveCount(attempts);
-        run.Delivery.Should().Match<AgentRunDelivery>(d => d.Status == "pending" && d.Delivered == 2 && d.Pending == 2 && d.Error == "seq 1: 503 unexpected_response");
+        run.Delivery.Should().Match<AgentRunDelivery>(d => d.Status == "pending" && d.Delivered == 2 && d.Pending == 2 && d.Error == "seq 1: 503");
 
         index.Answer = null;
         now += TimeSpan.FromSeconds(6);

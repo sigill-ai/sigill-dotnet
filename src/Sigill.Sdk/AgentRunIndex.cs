@@ -49,10 +49,13 @@ internal static class AgentRunIndex
     /// names what happened in the SDK's own words (an exception type). <paramref name="Code"/> is the server's code only when it
     /// matches <c>^[a-z0-9_]{1,64}$</c>; nothing else the server sends is kept.
     /// </summary>
-    public sealed record Answer(int? Http, string? Code, string? Status, Guid? RunId, string? Failure, bool Unreadable = false)
+    public sealed record Answer(int? Http, string? Code, string? Status, Guid? RunId, string? Failure, bool Unreadable = false, bool Elsewhere = false)
     {
-        /// <summary>Accepted only as the index accepts: 200 or 201 with a JSON body whose status is indexed or exists and whose runId is a UUID.</summary>
-        public bool Accepted => Http is 200 or 201 && Status is "indexed" or "exists" && RunId is not null && !Unreadable;
+        /// <summary>
+        /// Accepted only as the index accepts: 200 or 201, from the URI the SDK requested, with a JSON body whose status is
+        /// indexed or exists and whose runId is a UUID.
+        /// </summary>
+        public bool Accepted => Http is 200 or 201 && Status is "indexed" or "exists" && RunId is not null && !Unreadable && !Elsewhere;
 
         /// <summary>A concurrent upload of the same artifact won: try again.</summary>
         public bool Conflict => Http == 409 && Code == "conflict";
@@ -67,13 +70,21 @@ internal static class AgentRunIndex
         public bool Final => !Accepted && Http is int h && (Unexpected || (h is >= 400 and < 500 and not (408 or 429) && !Conflict));
 
         // The status decides first, the body only refines it: an over-long body makes a 2xx unexpected, never a 408, 429 or 5xx final.
-        private bool Unexpected => Http is >= 200 and < 400 && !Accepted;
+        private bool Unexpected => Elsewhere || (Http is >= 200 and < 400 && !Accepted);
 
-        /// <summary>"&lt;status&gt; &lt;code&gt;", "&lt;status&gt; unexpected_response", or the SDK's word for a failure without an answer.</summary>
+        /// <summary>
+        /// "&lt;status&gt; &lt;code&gt;", the bare status when there is no usable code, "&lt;status&gt; unexpected_response" for a 2xx
+        /// that is not an acceptance and for a 3xx, or the SDK's word for a failure without an answer.
+        /// </summary>
         public string? ErrorText => Accepted ? null
-            : Http is int h ? $"{h} {(Unexpected || Code is null ? UnexpectedResponse : Code)}" : Failure;
+            : Http is not int h ? Failure
+            : Unexpected ? $"{h} {UnexpectedResponse}"
+            : Code is null ? $"{h}" : $"{h} {Code}";
 
         public static Answer Failed(string failure) => new(null, null, null, null, failure);
+
+        /// <summary>An answer to a request that was redirected to another URI: never the index's, whatever its status or body.</summary>
+        public static Answer FromElsewhere(int http) => new(http, null, null, null, null, Elsewhere: true);
 
         /// <summary>An answer from its status and the bytes read of its body (null: longer than <see cref="MaxAnswerBytes"/>).</summary>
         public static Answer From(int http, byte[]? body)

@@ -996,13 +996,20 @@ public sealed class AgentRun
             var budget = Stopwatch.StartNew();
             var allowed = final ? limits.Final : limits.Turn;
             TimeSpan Left() => allowed - budget.Elapsed;
+            var cut = false;   // the last attempt's deadline was shorter than the upload limit: the turn's budget, not the index, ran out
+            var first = true;  // the turn's first attempt has all of the budget (the clock has not moved for it)
+            async Task<AgentRunIndex.Answer> Attempt(AgentRunArtifact artifact, byte[]? document)
+            {
+                var deadline = Min(limits.Upload, first ? allowed : Left());
+                first = false;
+                cut = deadline < limits.Upload;
+                return await client.IndexUploadAsync(artifact, document, deadline, CancellationToken.None).ConfigureAwait(false);
+            }
             async Task<AgentRunIndex.Answer> Send(AgentRunArtifact artifact, byte[]? document)
             {
-                var answer = await client.IndexUploadAsync(artifact, document, Min(limits.Upload, Left()), CancellationToken.None).ConfigureAwait(false);
+                var answer = await Attempt(artifact, document).ConfigureAwait(false);
                 // A concurrent upload won: once more, on the same budget.
-                return answer.Conflict && Left() > TimeSpan.Zero
-                    ? await client.IndexUploadAsync(artifact, document, Min(limits.Upload, Left()), CancellationToken.None).ConfigureAwait(false)
-                    : answer;
+                return answer.Conflict && Left() > TimeSpan.Zero ? await Attempt(artifact, document).ConfigureAwait(false) : answer;
             }
             while (_indexNext <= through)
             {
@@ -1028,9 +1035,10 @@ public sealed class AgentRun
                 }
                 if (!answer.Accepted)
                 {
-                    if (!answer.Final && Left() <= TimeSpan.Zero)
+                    if (!answer.Final && cut && Left() <= TimeSpan.Zero)
                     {
-                        _indexError = AgentRunIndex.Where(artifact) + IndexBudgetUsedUp; // cut by the budget, not failed: no back-off
+                        // Cut short by the turn's budget, not failed: no back-off. An attempt that had the full limit did fail.
+                        _indexError = AgentRunIndex.Where(artifact) + IndexBudgetUsedUp;
                         return;
                     }
                     _indexError = AgentRunIndex.Where(artifact) + answer.ErrorText;
