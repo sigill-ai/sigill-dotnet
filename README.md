@@ -375,8 +375,8 @@ cover one controlled run:
 | Before | [Control Artifact](spec/agent-control-artifact-v1.md) | configuration, control set, baseline, timestamp policy |
 | During | [Execution Evidence](spec/agent-execution-evidence-v1.md) | one artifact per event, chained by signature |
 | During | [Model Calls](spec/agent-model-calls-v1.md) (execution `schemaVersion "3"`) | per model call: the model that served it and the provider's own ids for the call, so the provider can confirm it against its logs; prompts and responses as digests only |
-| During | [Enforcement (draft)](spec/agent-enforcement-v1.md) (execution `schemaVersion "4"`) | the guard's denials and halts before the action, recomputable from the [policy control set v2](spec/agent-policy-control-set-v2.md) |
-| After | [Control Evaluation](spec/control-evaluation-v1.md), [v2 (draft)](spec/control-evaluation-v2.md) | what an independent verifier observed, and each control's result; v2 adds policy evaluations (reproducible from the run's facts) and the producer's own attested results |
+| During | [Enforcement](spec/agent-enforcement-v1.md) (execution `schemaVersion "4"`) | the guard's denials and halts before the action, recomputable from the [policy control set v2](spec/agent-policy-control-set-v2.md) |
+| After | [Control Evaluation](spec/control-evaluation-v1.md), [v2](spec/control-evaluation-v2.md) | what an independent verifier observed, and each control's result; v2 adds policy evaluations (reproducible from the run's facts) and the producer's own attested results |
 
 To record model calls, start the run with `RecordsModelCalls = true` and put
 `ModelCallHandler` under any provider client that accepts an `HttpClient`
@@ -604,7 +604,7 @@ var result = await client.VerifyAgentRunTreeAsync(tree);
   what you expected; without them a shared certificate proves consistency, not
   who ran each sub-agent.
 
-### Policy enforcement (draft): tool calls and bound approvals
+### Policy enforcement: tool calls and bound approvals
 
 A run whose control set is a [policy control set v2](spec/agent-policy-control-set-v2.md)
 (`AgentPolicy.ControlSetFromDocument`, with `"schemaVersion": "2"`) is recorded as
@@ -679,7 +679,7 @@ not recomputed (a note says so); a request the engine refuses makes the evaluati
 inside the engine is a `PolicyEngineException`, and never makes the verifier throw. The engine runs where
 Wasmtime ships native libraries: Linux (glibc), macOS and Windows on x64 and arm64.
 
-### Enforcement (draft): deny a tool call, halt a run
+### Enforcement: deny a tool call, halt a run
 
 With a policy engine the run gets a guard ([Control Set v2 §7](spec/agent-policy-control-set-v2.md)): after
 each event is sealed it evaluates the event's facts, and under `enforcement.mode: "enforce"` it denies a tool
@@ -761,7 +761,7 @@ SIGILL_API_KEY=… SIGILL_CERTIFICATE_ID=… dotnet run --project examples/Sigil
 - A child run is refused after its parent halted only when it is started from the delegation object the parent
   returned in the same process.
 
-### Evaluating an enforced run (draft): did the guard do what the control set required?
+### Evaluating an enforced run: did the guard do what the control set required?
 
 The verifier checks that a run's enforcement records hang together; it does not check that the guard denied or halted
 when it had to. An independent evaluator does: from the Control Artifact, the signed events with their signed object
